@@ -6,8 +6,8 @@ AI 이더리움 데이트레이딩 봇 - Gemini + 고급 지표 (v2.0 - 레버�
 - 고급 모멘텀 지표 (RSI, MACD, Stochastic, Williams %R)
 - 시장 심리 분석 (펀딩비, 미결제약정, 롱숏비율, 청산 데이터)
 - Gemini API 기반 AI 분석
-- 동적 레버리지 및 포지션 사이징 (5-50배) - 레버리지 계산 로직 수정
-- 개선된 SL/TP 설정 (원금 대비 10-50% 범위) - 레버리지 계산 로직 수정
+- 동적 레버리지 및 포지션 사이징 (5-35배) - 레버리지 계산 로직 수정
+- 개선된 SL/TP 설정 (원금 대비 10-60% 범위) - 레버리지 계산 로직 수정
 - 24시간 무제한 거래
 - 이더리움 선물 거래 최적화
 - 최소 투자금액: 100 USDT
@@ -651,7 +651,7 @@ print("\n=== Ethereum Day Trading Bot Started (v2.0 - Leverage Corrected) ===")
 print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 print("Trading Pair:", symbol)
 print("Strategy: Day Trading (5m/15m/1h analysis)")
-print("AI Engine: Google Gemini 1.5 Flash")
+print("AI Engine: Google Gemini 2.5 Flash")
 print("Asset: Ethereum Futures")
 print("Leverage Range: 5-35x (Dynamic)")
 print("SL/TP Range: 10-60% on margin (Dynamic)")
@@ -778,7 +778,7 @@ ANALYSIS PROCESS:
    - Consider ETH's higher volatility - it can move 5-10% in hours.
 
 4. POSITION SIZING & LEVERAGE (ETH-adjusted):
-   - High conviction (80%+): 0.3-0.6 margin (30-60%), 15-35x leverage (lower than BTC due to volatility)
+   - High conviction (80%+): 0.3-0.6 margin (30-60%), 15-35x leverage
    - Medium conviction (65-80%): 0.1-0.3 margin (10-30%), 5-20x leverage
    - Low conviction (<65%): NO_POSITION
 
