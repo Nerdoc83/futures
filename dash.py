@@ -1,1516 +1,493 @@
-#!/usr/bin/env python3
 """
-Ethereum Day Trading Bot - Streamlit Dashboard with Log Monitoring
-기존 ethereum_daytrading.db를 활용한 실시간 대시보드 + output.log 모니터링
+이더리움 데이트레이딩 봇 대시보드 - Streamlit (수정된 버전)
+실행 방법: streamlit run dashboard.py
 """
 
 import streamlit as st
-import pandas as pd
-import numpy as np
-import plotly.graph_objects as go
-import plotly.express as px
-from datetime import datetime, timedelta
 import sqlite3
-import os
-import time
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import numpy as np
+from datetime import datetime, timedelta
 import warnings
-import logging
-from pathlib import Path
-import re
-
-# 모든 경고와 로그 메시지 숨기기
+import time
 warnings.filterwarnings('ignore')
-logging.getLogger().setLevel(logging.ERROR)
-logging.getLogger('streamlit').setLevel(logging.ERROR)
 
-# 환경 변수 설정으로 추가 경고 방지
-os.environ['STREAMLIT_BROWSER_GATHER_USAGE_STATS'] = 'false'
-
-# 페이지 설정
+# ===== 페이지 설정 =====
 st.set_page_config(
-    page_title="ETH Trading Dashboard",
-    page_icon="📈",
+    page_title="ETH Day Trading Dashboard",
+    page_icon="🚀",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# CSS 스타일 (로그 스타일 추가)
-st.markdown("""
-<style>
-    .main-header {
-        font-size: 2.5rem;
-        font-weight: bold;
-        color: #00D4AA;
-        text-align: center;
-        margin-bottom: 2rem;
-    }
-    .metric-card {
-        background: linear-gradient(145deg, #1F2937, #374151);
-        padding: 1rem;
-        border-radius: 0.5rem;
-        border-left: 4px solid #00D4AA;
-        margin: 0.5rem 0;
-    }
-    .profit-positive {
-        color: #10B981;
-        font-weight: bold;
-    }
-    .profit-negative {
-        color: #EF4444;
-        font-weight: bold;
-    }
-    .status-running {
-        color: #10B981;
-    }
-    .status-stopped {
-        color: #EF4444;
-    }
-    .log-container {
-        background: #0F172A;
-        border-radius: 8px;
-        padding: 1rem;
-        height: 400px;
-        overflow-y: auto;
-        font-family: 'Courier New', monospace;
-        font-size: 0.85rem;
-        border: 1px solid #334155;
-    }
-    .log-error {
-        color: #EF4444;
-        background: rgba(239, 68, 68, 0.1);
-        padding: 2px 4px;
-        border-radius: 3px;
-        margin: 1px 0;
-    }
-    .log-warning {
-        color: #F59E0B;
-        background: rgba(245, 158, 11, 0.1);
-        padding: 2px 4px;
-        border-radius: 3px;
-        margin: 1px 0;
-    }
-    .log-info {
-        color: #10B981;
-        background: rgba(16, 185, 129, 0.1);
-        padding: 2px 4px;
-        border-radius: 3px;
-        margin: 1px 0;
-    }
-    .log-debug {
-        color: #6B7280;
-        background: rgba(107, 114, 128, 0.1);
-        padding: 2px 4px;
-        border-radius: 3px;
-        margin: 1px 0;
-    }
-    .log-trade {
-        color: #8B5CF6;
-        background: rgba(139, 92, 246, 0.1);
-        padding: 2px 4px;
-        border-radius: 3px;
-        margin: 1px 0;
-        font-weight: bold;
-    }
-    .log-default {
-        color: #E5E7EB;
-        padding: 2px 4px;
-        margin: 1px 0;
-    }
-    .sidebar .sidebar-content {
-        background: linear-gradient(145deg, #1F2937, #374151);
-    }
-</style>
-""", unsafe_allow_html=True)
-
-def setup_streamlit_config():
-    """Streamlit 설정을 통해 경고 메시지 최소화"""
-    config_dir = Path(".streamlit")
-    config_dir.mkdir(exist_ok=True)
-    
-    config_content = """[global]
-developmentMode = false
-
-[server]
-port = 8501
-enableCORS = false
-enableXsrfProtection = false
-
-[browser]
-gatherUsageStats = false
-
-[theme]
-primaryColor = "#00D4AA"
-backgroundColor = "#0E1117"
-secondaryBackgroundColor = "#1F2937"
-textColor = "#FAFAFA"
-font = "sans serif"
-"""
-    
-    config_file = config_dir / "config.toml"
-    with open(config_file, 'w', encoding='utf-8') as f:
-        f.write(config_content)
-
-def check_database_exists():
-    """데이터베이스 파일 존재 확인"""
-    db_path = "ethereum_daytrading.db"
-    return os.path.exists(db_path)
-
-def check_log_file_exists():
-    """로그 파일 존재 확인"""
-    log_path = "output.log"
-    return os.path.exists(log_path)
-
-def get_database_info():
-    """데이터베이스 스키마 정보 조회"""
-    if not check_database_exists():
-        return None
-    
-    conn = sqlite3.connect("ethereum_daytrading.db")
-    cursor = conn.cursor()
-    
-    # 모든 테이블 조회
-    cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
-    tables = cursor.fetchall()
-    
-    db_info = {
-        'tables': {},
-        'total_size': os.path.getsize("ethereum_daytrading.db")
-    }
-    
-    for table in tables:
-        table_name = table[0]
-        # 테이블 스키마 조회
-        cursor.execute(f"PRAGMA table_info({table_name})")
-        columns = cursor.fetchall()
-        
-        # 테이블 레코드 수 조회
-        cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
-        count = cursor.fetchone()[0]
-        
-        db_info['tables'][table_name] = {
-            'columns': [col[1] for col in columns],
-            'column_details': columns,
-            'row_count': count
-        }
-    
-    conn.close()
-    return db_info
-
-# 로그 관련 함수들
-def read_log_file(file_path="output.log", max_lines=500):
-    """로그 파일을 읽어서 최근 라인들을 반환"""
+# ===== 데이터베이스 연결 함수 =====
+@st.cache_data(ttl=30)  # 30초간 캐시
+def load_data_from_db():
+    """데이터베이스에서 데이터 로드"""
     try:
-        if not os.path.exists(file_path):
-            return []
+        conn = sqlite3.connect('ethereum_daytrading.db')
         
-        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-            lines = f.readlines()
-            # 최근 max_lines 만큼만 반환
-            return lines[-max_lines:] if len(lines) > max_lines else lines
-    except Exception as e:
-        return [f"Error reading log file: {str(e)}"]
-
-def categorize_log_line(line):
-    """로그 라인의 종류를 분류"""
-    line_upper = line.upper()
-    
-    if 'ERROR' in line_upper or '에러' in line:
-        return 'error'
-    elif 'WARNING' in line_upper or 'WARN' in line_upper or '경고' in line:
-        return 'warning'
-    elif 'INFO' in line_upper or '정보' in line:
-        return 'info'
-    elif 'DEBUG' in line_upper or 'TRACE' in line_upper:
-        return 'debug'
-    elif any(word in line_upper for word in ['매수', '매도', 'BUY', 'SELL', 'TRADE', 'ORDER']):
-        return 'trade'
-    else:
-        return 'default'
-
-def extract_position_info(log_lines):
-    """로그에서 포지션 정보 (진입가, 포지션 타입, 레버리지, TP/SL) 추출"""
-    position_data = {
-        'entry_price': None,
-        'position_type': None,  # 'long' or 'short'
-        'leverage': 1,
-        'take_profit': None,
-        'stop_loss': None,
-        'entry_time': None,
-        'is_active': False
-    }
-    
-    # 포지션 관련 패턴들
-    entry_patterns = [
-        r'진입가[:\s]+\$?([0-9,]+\.?[0-9]*)',
-        r'entry\s*price[:\s]+\$?([0-9,]+\.?[0-9]*)',
-        r'매수가[:\s]+\$?([0-9,]+\.?[0-9]*)',
-        r'매도가[:\s]+\$?([0-9,]+\.?[0-9]*)',
-        r'포지션\s*진입[:\s]+\$?([0-9,]+\.?[0-9]*)',
-        r'position\s*opened[:\s]+\$?([0-9,]+\.?[0-9]*)',
-    ]
-    
-    position_patterns = [
-        r'(long|롱|매수|buy)',
-        r'(short|숏|매도|sell)',
-    ]
-    
-    leverage_patterns = [
-        r'레버리지[:\s]*([0-9]+)배?',
-        r'leverage[:\s]*([0-9]+)x?',
-        r'([0-9]+)배\s*레버리지',
-        r'([0-9]+)x\s*leverage',
-    ]
-    
-    # TP/SL 패턴들
-    tp_patterns = [
-        r'TP[:\s]+\$?([0-9,]+\.?[0-9]*)',
-        r'take\s*profit[:\s]+\$?([0-9,]+\.?[0-9]*)',
-        r'익절[:\s]+\$?([0-9,]+\.?[0-9]*)',
-        r'목표가[:\s]+\$?([0-9,]+\.?[0-9]*)',
-        r'target[:\s]+\$?([0-9,]+\.?[0-9]*)',
-        r'T\.P[:\s]+\$?([0-9,]+\.?[0-9]*)',
-    ]
-    
-    sl_patterns = [
-        r'SL[:\s]+\$?([0-9,]+\.?[0-9]*)',
-        r'stop\s*loss[:\s]+\$?([0-9,]+\.?[0-9]*)',
-        r'손절[:\s]+\$?([0-9,]+\.?[0-9]*)',
-        r'스탑[:\s]+\$?([0-9,]+\.?[0-9]*)',
-        r'stop[:\s]+\$?([0-9,]+\.?[0-9]*)',
-        r'S\.L[:\s]+\$?([0-9,]+\.?[0-9]*)',
-    ]
-    
-    close_patterns = [
-        r'포지션\s*청산',
-        r'position\s*closed',
-        r'청산\s*완료',
-        r'포지션\s*종료',
-        r'익절|손절',
-    ]
-    
-    # 최근 로그부터 역순으로 검색 (최신 포지션 정보 우선)
-    for line in reversed(log_lines[-200:]):  # 최근 200줄에서 검색
-        line_lower = line.lower()
+        # 거래 데이터 - 모든 컬럼 선택
+        trades_query = """
+        SELECT * FROM trades ORDER BY timestamp DESC
+        """
+        trades_df = pd.read_sql_query(trades_query, conn)
         
-        # 포지션 청산 확인
-        for pattern in close_patterns:
-            if re.search(pattern, line, re.IGNORECASE):
-                position_data['is_active'] = False
-                return position_data  # 청산되었으면 비활성 상태로 반환
-        
-        # 진입가 추출
-        if position_data['entry_price'] is None:
-            for pattern in entry_patterns:
-                match = re.search(pattern, line, re.IGNORECASE)
-                if match:
-                    try:
-                        price_str = match.group(1).replace(',', '')
-                        price = float(price_str)
-                        if 100 <= price <= 10000:  # 합리적한 ETH 가격 범위
-                            position_data['entry_price'] = price
-                            position_data['is_active'] = True
-                            
-                            # 시간 정보도 추출
-                            time_patterns = [
-                                r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})',
-                                r'(\d{2}:\d{2}:\d{2})',
-                            ]
-                            for time_pattern in time_patterns:
-                                time_match = re.search(time_pattern, line)
-                                if time_match:
-                                    try:
-                                        time_str = time_match.group(1)
-                                        if re.match(r'\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}', time_str):
-                                            position_data['entry_time'] = datetime.strptime(time_str, '%Y-%m-%d %H:%M:%S')
-                                        elif re.match(r'\d{2}:\d{2}:\d{2}', time_str):
-                                            today = datetime.now().date()
-                                            position_data['entry_time'] = datetime.combine(today, datetime.strptime(time_str, '%H:%M:%S').time())
-                                        break
-                                    except:
-                                        continue
-                            break
-                    except:
-                        continue
-        
-        # 포지션 타입 추출
-        if position_data['position_type'] is None:
-            for pattern in position_patterns:
-                match = re.search(pattern, line, re.IGNORECASE)
-                if match:
-                    pos_type = match.group(1).lower()
-                    if pos_type in ['long', '롱', '매수', 'buy']:
-                        position_data['position_type'] = 'long'
-                    elif pos_type in ['short', '숏', '매도', 'sell']:
-                        position_data['position_type'] = 'short'
-                    break
-        
-        # 레버리지 추출
-        if position_data['leverage'] == 1:
-            for pattern in leverage_patterns:
-                match = re.search(pattern, line, re.IGNORECASE)
-                if match:
-                    try:
-                        leverage = int(match.group(1))
-                        if 1 <= leverage <= 100:  # 합리적인 레버리지 범위
-                            position_data['leverage'] = leverage
-                            break
-                    except:
-                        continue
-        
-        # TP 추출
-        if position_data['take_profit'] is None:
-            for pattern in tp_patterns:
-                match = re.search(pattern, line, re.IGNORECASE)
-                if match:
-                    try:
-                        tp_str = match.group(1).replace(',', '')
-                        tp = float(tp_str)
-                        if 100 <= tp <= 10000:  # 합리적한 TP 가격 범위
-                            position_data['take_profit'] = tp
-                            break
-                    except:
-                        continue
-        
-        # SL 추출
-        if position_data['stop_loss'] is None:
-            for pattern in sl_patterns:
-                match = re.search(pattern, line, re.IGNORECASE)
-                if match:
-                    try:
-                        sl_str = match.group(1).replace(',', '')
-                        sl = float(sl_str)
-                        if 100 <= sl <= 10000:  # 합리적한 SL 가격 범위
-                            position_data['stop_loss'] = sl
-                            break
-                    except:
-                        continue
-        
-        # 모든 정보가 수집되었으면 반복 중단
-        if (position_data['entry_price'] is not None and 
-            position_data['position_type'] is not None and 
-            position_data['leverage'] != 1 and
-            position_data['take_profit'] is not None and
-            position_data['stop_loss'] is not None):
-            break
-    
-    return position_data
-
-def calculate_tp_sl_progress(entry_price, current_price, take_profit, stop_loss, position_type):
-    """TP/SL 달성률 계산"""
-    if not all([entry_price, current_price, take_profit, stop_loss]):
-        return None, None, None, None
-    
-    if position_type == 'long':
-        # Long 포지션: entry -> current -> TP (상승), entry -> current -> SL (하락)
-        tp_distance_total = take_profit - entry_price
-        tp_distance_current = current_price - entry_price
-        tp_progress = (tp_distance_current / tp_distance_total * 100) if tp_distance_total != 0 else 0
-        
-        sl_distance_total = entry_price - stop_loss
-        sl_distance_current = entry_price - current_price
-        sl_risk = (sl_distance_current / sl_distance_total * 100) if sl_distance_total != 0 else 0
-        
-    elif position_type == 'short':
-        # Short 포지션: entry -> current -> TP (하락), entry -> current -> SL (상승) 
-        tp_distance_total = entry_price - take_profit
-        tp_distance_current = entry_price - current_price
-        tp_progress = (tp_distance_current / tp_distance_total * 100) if tp_distance_total != 0 else 0
-        
-        sl_distance_total = stop_loss - entry_price
-        sl_distance_current = current_price - entry_price
-        sl_risk = (sl_distance_current / sl_distance_total * 100) if sl_distance_total != 0 else 0
-    else:
-        return None, None, None, None
-    
-    # TP까지 남은 거리 및 SL까지 남은 거리
-    tp_remaining = take_profit - current_price if position_type == 'long' else current_price - take_profit
-    sl_remaining = current_price - stop_loss if position_type == 'long' else stop_loss - current_price
-    
-    return tp_progress, sl_risk, tp_remaining, sl_remaining
-
-def calculate_pnl(entry_price, current_price, position_type, leverage):
-    """수익률 계산"""
-    if entry_price is None or current_price is None:
-        return 0, 0
-    
-    if position_type == 'long':
-        price_change_pct = (current_price - entry_price) / entry_price * 100
-    elif position_type == 'short':
-        price_change_pct = (entry_price - current_price) / entry_price * 100
-    else:
-        return 0, 0
-    
-    # 레버리지 적용한 수익률
-    leveraged_pnl_pct = price_change_pct * leverage
-    
-    # 절대 수익 (1000 USDT 기준으로 가정, 실제로는 포지션 크기를 로그에서 추출해야 함)
-    position_size = 1000  # USD
-    pnl_usd = position_size * leveraged_pnl_pct / 100
-    
-    return leveraged_pnl_pct, pnl_usd
-
-def extract_price_from_logs(log_lines, max_prices=30):
-    """로그에서 이더리움 가격 정보 추출"""
-    price_data = []
-    
-    # 가격 추출 패턴들
-    price_patterns = [
-        r'현재가[:\s]+\$?([0-9,]+\.?[0-9]*)',  # 현재가: $3,245.67
-        r'ETH\s*Price[:\s]+\$?([0-9,]+\.?[0-9]*)',  # ETH Price: 3245.67
-        r'price[:\s]+\$?([0-9,]+\.?[0-9]*)',  # price: 3245.67
-        r'ETH[:\s]+\$([0-9,]+\.?[0-9]*)',  # ETH: $3,245.67
-        r'이더리움[:\s]+\$?([0-9,]+\.?[0-9]*)',  # 이더리움: 3245.67
-        r'\$([0-9,]+\.?[0-9]*)\s*(USD|USDT)',  # $3245.67 USD
-        r'([0-9,]+\.?[0-9]*)\s*USD',  # 3245.67 USD
-    ]
-    
-    # 시간 패턴들
-    time_patterns = [
-        r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})',
-        r'(\d{2}:\d{2}:\d{2})',
-        r'(\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2})',
-        r'(\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})',
-    ]
-    
-    for line in log_lines:
-        # 시간 정보 추출
-        timestamp = None
-        for pattern in time_patterns:
-            time_match = re.search(pattern, line)
-            if time_match:
-                time_str = time_match.group(1)
-                try:
-                    if re.match(r'\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}', time_str):
-                        timestamp = datetime.strptime(time_str, '%Y-%m-%d %H:%M:%S')
-                    elif re.match(r'\d{2}:\d{2}:\d{2}', time_str):
-                        today = datetime.now().date()
-                        timestamp = datetime.combine(today, datetime.strptime(time_str, '%H:%M:%S').time())
-                    elif re.match(r'\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2}', time_str):
-                        timestamp = datetime.strptime(time_str, '%Y/%m/%d %H:%M:%S')
-                    break
-                except:
-                    continue
-        
-        # 가격 정보 추출
-        for pattern in price_patterns:
-            price_match = re.search(pattern, line, re.IGNORECASE)
-            if price_match:
-                try:
-                    price_str = price_match.group(1).replace(',', '')
-                    price = float(price_str)
-                    
-                    # 합리적인 이더리움 가격 범위 체크 ($100 ~ $10,000)
-                    if 100 <= price <= 10000:
-                        price_data.append({
-                            'timestamp': timestamp or datetime.now(),
-                            'price': price,
-                            'log_line': line.strip()
-                        })
-                        break
-                except:
-                    continue
-    
-    # 최신 데이터부터 최대 max_prices개 반환
-    return price_data[-max_prices:] if len(price_data) > max_prices else price_data
-
-def create_log_price_chart(price_data, entry_price=None, take_profit=None, stop_loss=None):
-    """로그에서 추출한 가격 데이터로 차트 생성 (TP/SL 라인 포함)"""
-    if not price_data:
-        return None
-    
-    df = pd.DataFrame(price_data)
-    df = df.sort_values('timestamp')
-    
-    fig = go.Figure()
-    
-    fig.add_trace(go.Scatter(
-        x=df['timestamp'],
-        y=df['price'],
-        mode='lines+markers',
-        name='ETH Price (from logs)',
-        line=dict(color='#00D4AA', width=2),
-        marker=dict(size=4, color='#00D4AA'),
-        hovertemplate='<b>ETH Price</b><br>' +
-                      'Time: %{x}<br>' +
-                      'Price: $%{y:.2f}<br>' +
-                      '<extra></extra>'
-    ))
-    
-    # Entry Price 라인 추가
-    if entry_price:
-        fig.add_hline(
-            y=entry_price,
-            line_dash="dash",
-            line_color="#FFD700",  # 금색
-            line_width=2,
-            annotation_text=f"Entry: ${entry_price:.2f}",
-            annotation_position="top right",
-            annotation=dict(
-                bgcolor="rgba(255, 215, 0, 0.8)",
-                bordercolor="#FFD700",
-                borderwidth=1
-            )
-        )
-    
-    # Take Profit 라인 추가
-    if take_profit:
-        fig.add_hline(
-            y=take_profit,
-            line_dash="dot",
-            line_color="#10B981",  # 초록색
-            line_width=2,
-            annotation_text=f"TP: ${take_profit:.2f}",
-            annotation_position="top left",
-            annotation=dict(
-                bgcolor="rgba(16, 185, 129, 0.8)",
-                bordercolor="#10B981",
-                borderwidth=1
-            )
-        )
-    
-    # Stop Loss 라인 추가
-    if stop_loss:
-        fig.add_hline(
-            y=stop_loss,
-            line_dash="dot",
-            line_color="#EF4444",  # 빨간색
-            line_width=2,
-            annotation_text=f"SL: ${stop_loss:.2f}",
-            annotation_position="bottom left",
-            annotation=dict(
-                bgcolor="rgba(239, 68, 68, 0.8)",
-                bordercolor="#EF4444",
-                borderwidth=1
-            )
-        )
-    
-    fig.update_layout(
-        title="Real-time ETH Price with Entry/TP/SL Levels",
-        xaxis_title="Time",
-        yaxis_title="Price (USD)",
-        template="plotly_dark",
-        height=300,
-        showlegend=False,
-        margin=dict(l=40, r=40, t=40, b=40)
-    )
-    
-    return fig
-
-def parse_log_statistics(log_lines):
-    """로그에서 통계 정보 추출"""
-    stats = {
-        'total_lines': len(log_lines),
-        'error_count': 0,
-        'warning_count': 0,
-        'trade_count': 0,
-        'last_update': datetime.now(),
-        'bot_status': 'Unknown'
-    }
-    
-    current_time = datetime.now()
-    recent_logs = []
-    
-    # 로그 파일 자체의 최종 수정 시간도 확인
-    try:
-        if os.path.exists("output.log"):
-            file_mtime = datetime.fromtimestamp(os.path.getmtime("output.log"))
-            recent_logs.append(file_mtime)
-    except:
-        pass
-    
-    for line in log_lines[-50:]:  # 최근 50개 라인만 분석
-        category = categorize_log_line(line)
-        
-        if category == 'error':
-            stats['error_count'] += 1
-        elif category == 'warning':
-            stats['warning_count'] += 1
-        elif category == 'trade':
-            stats['trade_count'] += 1
-        
-        # 다양한 시간 형식 파싱 시도
-        time_patterns = [
-            r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})',  # 2024-08-24 13:36:59
-            r'(\d{2}:\d{2}:\d{2})',  # 13:36:59
-            r'(\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2})',  # 2024/08/24 13:36:59
-            r'(\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})',  # Aug 24 13:36:59
-        ]
-        
-        for pattern in time_patterns:
-            time_match = re.search(pattern, line)
-            if time_match:
-                time_str = time_match.group(1)
-                try:
-                    # 다양한 형식으로 파싱 시도
-                    if re.match(r'\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}', time_str):
-                        log_time = datetime.strptime(time_str, '%Y-%m-%d %H:%M:%S')
-                    elif re.match(r'\d{2}:\d{2}:\d{2}', time_str):
-                        # 오늘 날짜로 가정
-                        today = datetime.now().date()
-                        log_time = datetime.combine(today, datetime.strptime(time_str, '%H:%M:%S').time())
-                    elif re.match(r'\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2}', time_str):
-                        log_time = datetime.strptime(time_str, '%Y/%m/%d %H:%M:%S')
-                    else:
-                        continue
-                    
-                    recent_logs.append(log_time)
-                    break
-                except:
-                    continue
-    
-    # 봇 상태 판단
-    if recent_logs:
-        latest_log = max(recent_logs)
-        time_diff = current_time - latest_log
-        
-        if time_diff.total_seconds() < 300:  # 5분
-            stats['bot_status'] = 'Running'
-        elif time_diff.total_seconds() < 1800:  # 30분
-            stats['bot_status'] = 'Idle'
-        else:
-            stats['bot_status'] = 'Stopped'
-        
-        stats['last_update'] = latest_log
-    else:
-        # 로그에서 시간을 파싱할 수 없지만 로그가 있다면
-        if len(log_lines) > 0:
-            # 파일 수정 시간 기준으로 판단
-            try:
-                file_mtime = datetime.fromtimestamp(os.path.getmtime("output.log"))
-                time_diff = current_time - file_mtime
-                if time_diff.total_seconds() < 300:  # 5분
-                    stats['bot_status'] = 'Running'
-                elif time_diff.total_seconds() < 1800:  # 30분
-                    stats['bot_status'] = 'Idle'
-                else:
-                    stats['bot_status'] = 'Stopped'
-                stats['last_update'] = file_mtime
-            except:
-                stats['bot_status'] = 'Unknown'
-    
-    return stats
-
-def format_log_line_html(line):
-    """로그 라인을 HTML로 포맷팅"""
-    category = categorize_log_line(line)
-    escaped_line = line.replace('<', '&lt;').replace('>', '&gt;').strip()
-    
-    return f'<div class="log-{category}">{escaped_line}</div>'
-
-# 캐시 데코레이터를 조건부로 적용
-def conditional_cache(func):
-    try:
-        return st.cache_data(ttl=30)(func)
-    except:
-        return func
-
-@conditional_cache
-def load_trades_data(limit=200):
-    """거래 데이터 로드"""
-    if not check_database_exists():
-        return pd.DataFrame()
-    
-    conn = sqlite3.connect("ethereum_daytrading.db")
-    
-    try:
-        # 일반적인 거래 테이블 이름들을 시도
-        possible_tables = ['trades', 'trade_history', 'trading_history', 'transactions']
-        trades_df = pd.DataFrame()
-        
-        for table_name in possible_tables:
-            try:
-                query = f"SELECT * FROM {table_name} ORDER BY timestamp DESC LIMIT {limit}"
-                trades_df = pd.read_sql_query(query, conn)
-                break
-            except:
-                continue
-        
-        if not trades_df.empty and 'timestamp' in trades_df.columns:
-            # 타임스탬프 컬럼을 datetime으로 변환
-            try:
-                trades_df['timestamp'] = pd.to_datetime(trades_df['timestamp'])
-            except:
-                pass
+        # AI 분석 데이터
+        ai_analysis_query = """
+        SELECT * FROM ai_analysis ORDER BY timestamp DESC
+        """
+        ai_analysis_df = pd.read_sql_query(ai_analysis_query, conn)
         
         conn.close()
-        return trades_df
+        
+        # 타임스탬프 변환
+        if not trades_df.empty:
+            trades_df['timestamp'] = pd.to_datetime(trades_df['timestamp'])
+            if 'exit_timestamp' in trades_df.columns:
+                trades_df['exit_timestamp'] = pd.to_datetime(trades_df['exit_timestamp'], errors='coerce')
+        
+        if not ai_analysis_df.empty:
+            ai_analysis_df['timestamp'] = pd.to_datetime(ai_analysis_df['timestamp'])
+            
+        return trades_df, ai_analysis_df
     
     except Exception as e:
-        conn.close()
-        st.error(f"거래 데이터 로드 중 오류: {e}")
-        return pd.DataFrame()
+        st.error(f"데이터베이스 연결 오류: {e}")
+        return pd.DataFrame(), pd.DataFrame()
 
-@conditional_cache
-def load_price_data(limit=500):
-    """가격 데이터 로드"""
-    if not check_database_exists():
-        return pd.DataFrame()
+# ===== 메트릭 계산 함수 =====
+def calculate_performance_metrics(trades_df):
+    """성과 메트릭 계산 - 개선된 버전"""
+    # 기본 메트릭
+    metrics = {
+        'total_trades': 0,
+        'closed_trades': 0,
+        'open_trades': 0,
+        'winning_trades': 0,
+        'losing_trades': 0,
+        'win_rate': 0.0,
+        'total_pnl': 0.0,
+        'avg_pnl_percent': 0.0,
+        'max_profit': 0.0,
+        'max_loss': 0.0,
+        'profit_factor': 0.0,
+        'avg_hold_time': '0 hours'
+    }
     
-    conn = sqlite3.connect("ethereum_daytrading.db")
-    
-    try:
-        # 일반적인 가격 데이터 테이블 이름들을 시도
-        possible_tables = ['price_data', 'prices', 'market_data', 'ohlcv']
-        price_df = pd.DataFrame()
-        
-        for table_name in possible_tables:
-            try:
-                query = f"SELECT * FROM {table_name} ORDER BY timestamp DESC LIMIT {limit}"
-                price_df = pd.read_sql_query(query, conn)
-                break
-            except:
-                continue
-        
-        if not price_df.empty and 'timestamp' in price_df.columns:
-            try:
-                price_df['timestamp'] = pd.to_datetime(price_df['timestamp'])
-            except:
-                pass
-        
-        conn.close()
-        return price_df
-    
-    except Exception as e:
-        conn.close()
-        return pd.DataFrame()
-
-@conditional_cache
-def load_balance_data():
-    """잔액/포트폴리오 데이터 로드"""
-    if not check_database_exists():
-        return pd.DataFrame()
-    
-    conn = sqlite3.connect("ethereum_daytrading.db")
-    
-    try:
-        possible_tables = ['portfolio', 'balance', 'account', 'wallet']
-        balance_df = pd.DataFrame()
-        
-        for table_name in possible_tables:
-            try:
-                query = f"SELECT * FROM {table_name} ORDER BY timestamp DESC LIMIT 100"
-                balance_df = pd.read_sql_query(query, conn)
-                break
-            except:
-                continue
-        
-        if not balance_df.empty and 'timestamp' in balance_df.columns:
-            try:
-                balance_df['timestamp'] = pd.to_datetime(balance_df['timestamp'])
-            except:
-                pass
-        
-        conn.close()
-        return balance_df
-    
-    except Exception as e:
-        conn.close()
-        return pd.DataFrame()
-
-def get_latest_metrics(trades_df):
-    """최신 거래 메트릭스 계산"""
     if trades_df.empty:
-        return {
-            'total_trades': 0,
-            'total_profit': 0,
-            'win_rate': 0,
-            'current_balance': 0,
-            'last_trade_time': 'N/A'
-        }
+        return metrics
     
-    metrics = {}
+    # 기본 통계
+    total_trades = len(trades_df)
+    open_trades = len(trades_df[trades_df['status'] == 'OPEN'])
+    closed_trades_df = trades_df[trades_df['status'] == 'CLOSED']
+    closed_count = len(closed_trades_df)
     
-    # 총 거래 수
-    metrics['total_trades'] = len(trades_df)
+    metrics.update({
+        'total_trades': total_trades,
+        'open_trades': open_trades,
+        'closed_trades': closed_count
+    })
     
-    # 총 수익 계산
-    if 'profit' in trades_df.columns:
-        metrics['total_profit'] = trades_df['profit'].sum()
-    elif 'pnl' in trades_df.columns:
-        metrics['total_profit'] = trades_df['pnl'].sum()
-    else:
-        metrics['total_profit'] = 0
+    if closed_trades_df.empty:
+        return metrics
     
-    # 승률 계산
-    if 'profit' in trades_df.columns:
-        winning_trades = len(trades_df[trades_df['profit'] > 0])
-    elif 'pnl' in trades_df.columns:
-        winning_trades = len(trades_df[trades_df['pnl'] > 0])
-    else:
-        winning_trades = 0
+    # 손익 계산
+    profit_data = closed_trades_df['profit_loss'].dropna()
+    profit_pct_data = closed_trades_df['profit_loss_percentage'].dropna()
     
-    metrics['win_rate'] = (winning_trades / len(trades_df) * 100) if len(trades_df) > 0 else 0
+    if not profit_data.empty:
+        winning_trades = profit_data[profit_data > 0]
+        losing_trades = profit_data[profit_data < 0]
+        
+        win_count = len(winning_trades)
+        loss_count = len(losing_trades)
+        win_rate = (win_count / len(profit_data)) * 100 if len(profit_data) > 0 else 0
+        
+        total_pnl = profit_data.sum()
+        avg_pnl_pct = profit_pct_data.mean() if not profit_pct_data.empty else 0
+        max_profit = profit_pct_data.max() if not profit_pct_data.empty else 0
+        max_loss = profit_pct_data.min() if not profit_pct_data.empty else 0
+        
+        # Profit Factor
+        total_profit = winning_trades.sum() if win_count > 0 else 0
+        total_loss = abs(losing_trades.sum()) if loss_count > 0 else 0
+        profit_factor = total_profit / total_loss if total_loss > 0 else (total_profit if total_profit > 0 else 0)
+        
+        metrics.update({
+            'winning_trades': win_count,
+            'losing_trades': loss_count,
+            'win_rate': win_rate,
+            'total_pnl': total_pnl,
+            'avg_pnl_percent': avg_pnl_pct,
+            'max_profit': max_profit,
+            'max_loss': max_loss,
+            'profit_factor': profit_factor
+        })
     
-    # 현재 잔액
-    if 'balance' in trades_df.columns:
-        metrics['current_balance'] = trades_df.iloc[0]['balance']
-    else:
-        metrics['current_balance'] = 0
-    
-    # 마지막 거래 시간
-    if 'timestamp' in trades_df.columns:
-        metrics['last_trade_time'] = trades_df.iloc[0]['timestamp']
-    else:
-        metrics['last_trade_time'] = 'N/A'
+    # 보유 시간 계산
+    if 'exit_timestamp' in closed_trades_df.columns:
+        valid_times = closed_trades_df.dropna(subset=['exit_timestamp'])
+        if not valid_times.empty:
+            try:
+                hold_times = (valid_times['exit_timestamp'] - valid_times['timestamp']).dt.total_seconds() / 3600
+                avg_hours = hold_times.mean()
+                metrics['avg_hold_time'] = f"{avg_hours:.1f} hours"
+            except:
+                metrics['avg_hold_time'] = "계산불가"
     
     return metrics
 
-def create_price_chart(price_df, trades_df):
-    """가격 차트 생성"""
-    fig = go.Figure()
-    
-    if not price_df.empty:
-        # 가격 컬럼 찾기
-        price_col = None
-        for col in ['price', 'close', 'last_price', 'current_price']:
-            if col in price_df.columns:
-                price_col = col
-                break
-        
-        if price_col and 'timestamp' in price_df.columns:
-            # 시간순 정렬
-            price_df_sorted = price_df.sort_values('timestamp')
-            
-            fig.add_trace(go.Scatter(
-                x=price_df_sorted['timestamp'],
-                y=price_df_sorted[price_col],
-                mode='lines',
-                name='ETH Price',
-                line=dict(color='#00D4AA', width=2),
-                fill='tonexty',
-                fillcolor='rgba(0, 212, 170, 0.1)'
-            ))
-    
-    # 거래 포인트 추가
-    if not trades_df.empty and 'timestamp' in trades_df.columns:
-        action_col = None
-        price_col = None
-        
-        for col in ['action', 'side', 'type']:
-            if col in trades_df.columns:
-                action_col = col
-                break
-        
-        for col in ['price', 'executed_price', 'fill_price']:
-            if col in trades_df.columns:
-                price_col = col
-                break
-        
-        if action_col and price_col:
-            for _, trade in trades_df.iterrows():
-                try:
-                    action = str(trade[action_col]).upper()
-                    color = '#10B981' if 'BUY' in action else '#EF4444'
-                    symbol = 'triangle-up' if 'BUY' in action else 'triangle-down'
-                    
-                    fig.add_trace(go.Scatter(
-                        x=[trade['timestamp']],
-                        y=[trade[price_col]],
-                        mode='markers',
-                        marker=dict(
-                            color=color,
-                            size=10,
-                            symbol=symbol
-                        ),
-                        name=f"{action} - ${trade[price_col]:.2f}",
-                        showlegend=False,
-                        hovertemplate=f"<b>{action}</b><br>" +
-                                      f"Price: ${trade[price_col]:.2f}<br>" +
-                                      f"Time: {trade['timestamp']}<extra></extra>"
-                    ))
-                except:
-                    continue
-    
-    fig.update_layout(
-        title="Ethereum Price with Trading Points",
-        xaxis_title="Time",
-        yaxis_title="Price (USD)",
-        template="plotly_dark",
-        height=450,
-        showlegend=True
-    )
-    
-    return fig
-
+# ===== 메인 대시보드 =====
 def main():
-    # Streamlit 설정 적용 (경고 메시지 제거)
-    setup_streamlit_config()
-    
     # 헤더
-    st.markdown('<h1 class="main-header">🚀 Ethereum Day Trading Dashboard</h1>', unsafe_allow_html=True)
+    st.title("🚀 Ethereum Day Trading Dashboard")
+    st.markdown("---")
     
-    # 사이드바
-    with st.sidebar:
-        st.header("📊 Dashboard Control")
+    # 새로고침 버튼
+    col_refresh, col_time = st.columns([1, 4])
+    with col_refresh:
+        if st.button("🔄 새로고침"):
+            st.cache_data.clear()
+            st.experimental_rerun()
+    
+    with col_time:
+        st.write(f"**마지막 업데이트**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    # 데이터 로드
+    trades_df, ai_analysis_df = load_data_from_db()
+    
+    # 데이터 상태 확인
+    st.sidebar.header("📊 데이터 상태")
+    st.sidebar.write(f"**거래 기록**: {len(trades_df)}건")
+    st.sidebar.write(f"**AI 분석**: {len(ai_analysis_df)}건")
+    
+    if trades_df.empty and ai_analysis_df.empty:
+        st.warning("⚠️ 데이터베이스에서 데이터를 찾을 수 없습니다.")
+        st.info("💡 봇이 실행되고 있는지, 데이터베이스 파일 경로가 올바른지 확인해주세요.")
+        return
+    
+    # ===== 사이드바 필터 =====
+    st.sidebar.header("🔍 필터 설정")
+    
+    filtered_trades = trades_df.copy()
+    
+    if not trades_df.empty:
+        # 날짜 필터
+        min_date = trades_df['timestamp'].min().date()
+        max_date = trades_df['timestamp'].max().date()
         
-        # 로그 파일 상태
-        log_exists = check_log_file_exists()
-        db_exists = check_database_exists()
-        
-        st.subheader("📁 File Status")
-        st.write(f"🗄️ Database: {'✅' if db_exists else '❌'}")
-        st.write(f"📋 Log File: {'✅' if log_exists else '❌'}")
-        
-        # 데이터베이스 정보 표시
-        if db_exists:
-            db_info = get_database_info()
-            if db_info:
-                st.write(f"📊 DB Size: {db_info['total_size']:,} bytes")
-                st.write("📋 Tables:")
-                for table_name, table_info in db_info['tables'].items():
-                    st.write(f"  • {table_name}: {table_info['row_count']:,} records")
-        
-        if log_exists:
-            log_size = os.path.getsize("output.log")
-            st.write(f"📝 Log Size: {log_size:,} bytes")
-        
-        st.markdown("---")
-        
-        # 새로고침 및 자동 업데이트 설정
-        refresh_col1, refresh_col2 = st.columns(2)
-        with refresh_col1:
-            if st.button("🔄 Refresh"):
-                st.cache_data.clear()
-                st.rerun()
-        
-        with refresh_col2:
-            auto_refresh = st.checkbox("⚡ Auto (30s)", value=False)
-        
-        # 로그 설정
-        st.subheader("📋 Log Settings")
-        log_lines = st.slider("Log Lines", 50, 1000, 200, 50)
-        
-        log_filter = st.selectbox(
-            "Log Filter",
-            ["All", "Errors Only", "Warnings+", "Trading Only", "Info+"]
+        date_range = st.sidebar.date_input(
+            "📅 날짜 범위",
+            value=(min_date, max_date),
+            min_value=min_date,
+            max_value=max_date
         )
         
-        # 포지션 설정
-        st.subheader("📊 Position Settings")
-        show_tp_sl = st.checkbox("Show TP/SL Lines", value=True)
-        show_entry = st.checkbox("Show Entry Line", value=True)
-        
-        # 포지션 정보 표시 방식
-        position_display = st.selectbox(
-            "Position Display",
-            ["Detailed", "Compact", "Minimal"]
+        # 상태 필터
+        status_options = trades_df['status'].unique().tolist()
+        status_filter = st.sidebar.multiselect(
+            "📊 거래 상태",
+            options=status_options,
+            default=status_options
         )
         
-        if auto_refresh:
-            time.sleep(30)
-            st.rerun()
-        
-        st.markdown("---")
-        
-        # 데이터 필터 옵션
-        st.subheader("🔍 Data Filters")
-        
-        time_range = st.selectbox(
-            "Time Range",
-            ["Last 1 Hour", "Last 6 Hours", "Last 24 Hours", "Last 7 Days", "All Time"]
+        # 방향 필터
+        action_options = trades_df['action'].unique().tolist()
+        action_filter = st.sidebar.multiselect(
+            "🎯 거래 방향",
+            options=action_options,
+            default=action_options
         )
         
-        max_records = st.slider("Max Records", 50, 1000, 200, 50)
+        # 필터 적용
+        if len(date_range) == 2:
+            start_date, end_date = date_range
+            filtered_trades = trades_df[
+                (trades_df['timestamp'].dt.date >= start_date) &
+                (trades_df['timestamp'].dt.date <= end_date) &
+                (trades_df['status'].isin(status_filter)) &
+                (trades_df['action'].isin(action_filter))
+            ]
     
-    # 탭 구성
-    tab1, tab2 = st.tabs(["📊 Trading Dashboard", "📋 Live Logs"])
+    # ===== 성과 메트릭 =====
+    metrics = calculate_performance_metrics(filtered_trades)
     
-    with tab1:
-        # 기존 대시보드 기능
+    st.subheader("📈 실시간 성과 모니터링")
+    
+    col1, col2, col3, col4, col5 = st.columns(5)
+    
+    with col1:
+        st.metric(
+            label="🎯 총 거래 수",
+            value=f"{metrics['total_trades']:,}",
+            delta=f"오픈: {metrics['open_trades']}"
+        )
+    
+    with col2:
+        win_rate = metrics['win_rate']
+        closed = metrics['closed_trades']
+        st.metric(
+            label="🎖️ 승률",
+            value=f"{win_rate:.1f}%",
+            delta=f"완료: {closed}건"
+        )
+    
+    with col3:
+        pnl = metrics['total_pnl']
+        st.metric(
+            label="💰 총 손익",
+            value=f"${pnl:,.2f}",
+            delta=f"{metrics['avg_pnl_percent']:.2f}% 평균"
+        )
+    
+    with col4:
+        max_profit = metrics['max_profit']
+        max_loss = metrics['max_loss']
+        st.metric(
+            label="📊 최고/최저 수익률",
+            value=f"{max_profit:.2f}%",
+            delta=f"최저: {max_loss:.2f}%"
+        )
+    
+    with col5:
+        pf = metrics['profit_factor']
+        st.metric(
+            label="⚡ Profit Factor",
+            value=f"{pf:.2f}",
+            delta=f"보유시간: {metrics['avg_hold_time']}"
+        )
+    
+    st.markdown("---")
+    
+    # ===== 차트 섹션 =====
+    col_left, col_right = st.columns([2, 1])
+    
+    with col_left:
+        st.subheader("📊 거래 분석")
         
-        # 데이터베이스 존재 확인
-        if not db_exists:
-            st.error("❌ ethereum_daytrading.db 파일을 찾을 수 없습니다!")
-            st.info("💡 거래 봇을 먼저 실행하여 데이터베이스를 생성해주세요.")
+        tab1, tab2, tab3 = st.tabs(["📈 수익률 추이", "🎯 거래 분포", "⚖️ 레버리지 분석"])
+        
+        with tab1:
+            closed_trades = filtered_trades[filtered_trades['status'] == 'CLOSED'].copy()
             
-            # 현재 디렉토리의 파일들 표시
-            current_files = [f for f in os.listdir('.') if f.endswith('.db')]
-            if current_files:
-                st.write("📁 현재 디렉토리의 데이터베이스 파일들:")
-                for file in current_files:
-                    st.write(f"  • {file}")
-        else:
-            # 데이터 로드
-            trades_df = load_trades_data(max_records)
-            price_df = load_price_data(max_records)
-            balance_df = load_balance_data()
-            
-            # 메트릭스 계산
-            metrics = get_latest_metrics(trades_df)
-            
-            # 메인 메트릭스 표시
-            col1, col2, col3, col4 = st.columns(4)
-            
-            with col1:
-                st.metric(
-                    label="💰 Current Balance",
-                    value=f"${metrics['current_balance']:,.2f}",
-                    delta=None
-                )
-            
-            with col2:
-                profit_color = "normal" if metrics['total_profit'] >= 0 else "inverse"
-                st.metric(
-                    label="📈 Total Profit/Loss",
-                    value=f"${metrics['total_profit']:.2f}",
-                    delta_color=profit_color
-                )
-            
-            with col3:
-                st.metric(
-                    label="🔄 Total Trades",
-                    value=f"{metrics['total_trades']:,}"
-                )
-            
-            with col4:
-                st.metric(
-                    label="🎯 Win Rate",
-                    value=f"{metrics['win_rate']:.1f}%"
-                )
-            
-            # 봇 상태 표시 (로그 기반으로 업데이트)
-            if log_exists:
-                log_lines_data = read_log_file("output.log", 100)
-                log_stats = parse_log_statistics(log_lines_data)
+            if not closed_trades.empty and 'profit_loss' in closed_trades.columns:
+                valid_pnl = closed_trades.dropna(subset=['profit_loss']).sort_values('timestamp')
                 
-                # 상태별 아이콘과 색상
-                status_icons = {
-                    'Running': '🟢',
-                    'Idle': '🟡', 
-                    'Stopped': '🔴',
-                    'Unknown': '⚫'
-                }
-                
-                bot_status = f"{status_icons.get(log_stats['bot_status'], '⚫')} {log_stats['bot_status']}"
-                last_activity = log_stats['last_update'].strftime('%H:%M:%S')
-                
-                # 마지막 활동으로부터 경과시간 계산
-                time_diff = datetime.now() - log_stats['last_update']
-                if time_diff.total_seconds() < 60:
-                    time_ago = f"{int(time_diff.total_seconds())}s ago"
-                elif time_diff.total_seconds() < 3600:
-                    time_ago = f"{int(time_diff.total_seconds()/60)}m ago"
-                else:
-                    time_ago = f"{int(time_diff.total_seconds()/3600)}h ago"
-                
-                status_text = f"{bot_status} | Last Activity: {last_activity} ({time_ago}) | Errors: {log_stats['error_count']} | Warnings: {log_stats['warning_count']}"
-                
-                # 상태별 색상 적용하여 표시
-                if log_stats['bot_status'] == 'Running':
-                    st.success(f"🤖 Bot Status: {status_text}")
-                elif log_stats['bot_status'] == 'Idle':
-                    st.warning(f"🤖 Bot Status: {status_text}")
-                elif log_stats['bot_status'] == 'Stopped':
-                    st.error(f"🤖 Bot Status: {status_text}")
-                else:
-                    st.info(f"🤖 Bot Status: {status_text}")
-                
-            else:
-                bot_status = "🟢 Running" if metrics['total_trades'] > 0 else "🔴 Stopped"
-                last_activity = metrics['last_trade_time']
-                
-                if isinstance(last_activity, pd.Timestamp):
-                    time_since = datetime.now() - last_activity.to_pydatetime()
-                    if time_since.total_seconds() < 3600:  # 1시간 미만
-                        status_text = f"{bot_status} | Last Activity: {int(time_since.total_seconds()/60)}m ago"
-                    else:
-                        status_text = f"{bot_status} | Last Activity: {last_activity.strftime('%Y-%m-%d %H:%M')}"
-                else:
-                    status_text = f"{bot_status} | Last Activity: {last_activity}"
-                
-                st.info(f"🤖 Bot Status: {status_text}")
-            
-            st.markdown("---")
-            
-            # 차트 섹션 (원래대로 2컬럼)
-            chart_col1, chart_col2 = st.columns([2, 1])
-            
-            with chart_col1:
-                st.subheader("📊 Price Chart & Trading Points")
-                
-                if not price_df.empty or not trades_df.empty:
-                    fig = create_price_chart(price_df, trades_df)
-                    st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.warning("📊 가격 데이터를 찾을 수 없습니다.")
-            
-            with chart_col2:
-                st.subheader("💰 Portfolio Performance")
-                
-                # 잔액 변화 차트
-                if not trades_df.empty and 'balance' in trades_df.columns:
-                    trades_sorted = trades_df.sort_values('timestamp')
+                if not valid_pnl.empty:
+                    # 누적 손익 계산
+                    valid_pnl['cumulative_pnl'] = valid_pnl['profit_loss'].cumsum()
                     
-                    fig2 = go.Figure()
-                    fig2.add_trace(go.Scatter(
-                        x=trades_sorted['timestamp'],
-                        y=trades_sorted['balance'],
+                    fig = go.Figure()
+                    
+                    # 누적 PnL 라인
+                    fig.add_trace(go.Scatter(
+                        x=valid_pnl['timestamp'],
+                        y=valid_pnl['cumulative_pnl'],
                         mode='lines+markers',
-                        name='Balance',
-                        line=dict(color='#8B5CF6', width=3),
+                        name='누적 손익',
+                        line=dict(color='#00CC96', width=3),
                         marker=dict(size=6)
                     ))
                     
-                    fig2.update_layout(
-                        title="Balance Over Time",
-                        xaxis_title="Time",
-                        yaxis_title="Balance (USD)",
-                        template="plotly_dark",
-                        height=450
+                    # 개별 거래 포인트
+                    colors = ['green' if x > 0 else 'red' for x in valid_pnl['profit_loss']]
+                    fig.add_trace(go.Scatter(
+                        x=valid_pnl['timestamp'],
+                        y=valid_pnl['profit_loss'],
+                        mode='markers',
+                        name='개별 거래',
+                        marker=dict(color=colors, size=8, opacity=0.7),
+                        yaxis='y2'
+                    ))
+                    
+                    fig.update_layout(
+                        title="거래 성과 추이",
+                        xaxis_title="시간",
+                        yaxis=dict(title="누적 손익 (USDT)", side='left'),
+                        yaxis2=dict(title="거래별 손익 (USDT)", side='right', overlaying='y'),
+                        height=400,
+                        hovermode='x unified'
                     )
                     
-                    st.plotly_chart(fig2, use_container_width=True)
+                    st.plotly_chart(fig, use_container_width=True)
                 else:
-                    st.info("📊 잔액 데이터를 찾을 수 없습니다.")
-            
-            # 최근 거래 내역
-            st.subheader("📋 Recent Trading Activity")
-            
-            if not trades_df.empty:
-                # 표시할 컬럼 선택 (데이터에 따라 동적으로)
-                display_columns = []
-                column_mapping = {
-                    'timestamp': 'Time',
-                    'action': 'Action',
-                    'side': 'Side',
-                    'type': 'Type',
-                    'price': 'Price',
-                    'executed_price': 'Executed Price',
-                    'amount': 'Amount',
-                    'quantity': 'Quantity',
-                    'profit': 'Profit/Loss',
-                    'pnl': 'P&L',
-                    'balance': 'Balance',
-                    'fee': 'Fee'
-                }
-                
-                for col in trades_df.columns:
-                    if col in column_mapping:
-                        display_columns.append(col)
-                
-                if display_columns:
-                    display_df = trades_df[display_columns].copy()
-                    
-                    # 데이터 포맷팅
-                    for col in display_df.columns:
-                        if 'price' in col.lower() or 'balance' in col.lower():
-                            display_df[col] = display_df[col].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "N/A")
-                        elif 'profit' in col.lower() or 'pnl' in col.lower():
-                            display_df[col] = display_df[col].apply(
-                                lambda x: f"${x:.2f}" if pd.notna(x) and x >= 0 else f"-${abs(x):.2f}" if pd.notna(x) else "N/A"
-                            )
-                        elif 'timestamp' in col.lower() and 'time' in col.lower():
-                            display_df[col] = pd.to_datetime(display_df[col]).dt.strftime('%Y-%m-%d %H:%M:%S')
-                    
-                    # 컬럼명 변경
-                    display_df.columns = [column_mapping.get(col, col.title()) for col in display_df.columns]
-                    
-                    st.dataframe(
-                        display_df.head(20),  # 최신 20개만 표시
-                        use_container_width=True,
-                        height=400
-                    )
-                else:
-                    st.write(trades_df.head(10))
+                    st.info("📊 완료된 거래의 손익 데이터가 없습니다.")
             else:
-                st.info("📋 거래 데이터를 찾을 수 없습니다.")
-    
-    with tab2:
-        # 로그 모니터링 탭
-        st.subheader("📋 Real-time Log Monitoring")
+                st.info("📊 표시할 완료된 거래가 없습니다.")
         
-        if not log_exists:
-            st.error("❌ output.log 파일을 찾을 수 없습니다!")
-            st.info("💡 자동매매 봇을 실행하여 로그 파일을 생성해주세요.")
-            
-            # 현재 디렉토리의 로그 파일들 표시
-            current_logs = [f for f in os.listdir('.') if f.endswith('.log') or f.endswith('.out')]
-            if current_logs:
-                st.write("📁 현재 디렉토리의 로그 파일들:")
-                for log_file in current_logs:
-                    st.write(f"  • {log_file}")
-        else:
-            # 로그 데이터 로드
-            log_lines_data = read_log_file("output.log", log_lines)
-            log_stats = parse_log_statistics(log_lines_data)
-            
-            # 포지션 정보 추출
-            position_info = extract_position_info(log_lines_data)
-            
-            # 가격 데이터 추출
-            price_data = extract_price_from_logs(log_lines_data, 50)
-            current_price = price_data[-1]['price'] if price_data else None
-            
-            # 포지션 정보 표시
-            if position_info['is_active'] and position_info['entry_price']:
-                if position_display == "Detailed":
-                    st.subheader("📈 Active Position Status")
-                elif position_display == "Compact":
-                    st.subheader("📈 Position")
-                else:  # Minimal
-                    st.subheader("📊 Pos")
+        with tab2:
+            if not filtered_trades.empty:
+                col_a, col_b = st.columns(2)
                 
-                # 수익률 계산
-                pnl_pct, pnl_usd = calculate_pnl(
-                    position_info['entry_price'], 
-                    current_price, 
-                    position_info['position_type'], 
-                    position_info['leverage']
+                with col_a:
+                    # 거래 방향 분포
+                    action_counts = filtered_trades['action'].value_counts()
+                    fig_pie = px.pie(
+                        values=action_counts.values,
+                        names=action_counts.index,
+                        title="거래 방향 분포",
+                        color_discrete_map={'long': '#00CC96', 'short': '#EF553B'}
+                    )
+                    fig_pie.update_traces(textposition='inside', textinfo='percent+label')
+                    st.plotly_chart(fig_pie, use_container_width=True)
+                
+                with col_b:
+                    # 거래 상태 분포
+                    status_counts = filtered_trades['status'].value_counts()
+                    fig_status = px.bar(
+                        x=status_counts.index,
+                        y=status_counts.values,
+                        title="거래 상태 분포",
+                        color=status_counts.values,
+                        color_continuous_scale='viridis'
+                    )
+                    fig_status.update_xaxes(title="상태")
+                    fig_status.update_yaxes(title="거래 수")
+                    st.plotly_chart(fig_status, use_container_width=True)
+        
+        with tab3:
+            if not filtered_trades.empty and 'leverage' in filtered_trades.columns:
+                # 레버리지 분포
+                leverage_data = filtered_trades['leverage'].value_counts().sort_index()
+                
+                fig_leverage = px.bar(
+                    x=leverage_data.index,
+                    y=leverage_data.values,
+                    title="레버리지 사용 분포",
+                    labels={'x': '레버리지 (배)', 'y': '거래 수'},
+                    color=leverage_data.values,
+                    color_continuous_scale='blues'
                 )
-                
-                # TP/SL 진행률 계산
-                tp_progress, sl_risk, tp_remaining, sl_remaining = calculate_tp_sl_progress(
-                    position_info['entry_price'],
-                    current_price,
-                    position_info['take_profit'],
-                    position_info['stop_loss'],
-                    position_info['position_type']
-                )
-                
-                # 표시 방식에 따른 메트릭 구성
-                if position_display == "Minimal":
-                    # 간단한 1줄 표시
-                    min_col1, min_col2, min_col3 = st.columns(3)
-                    with min_col1:
-                        position_emoji = "🟢" if position_info['position_type'] == 'long' else "🔴"
-                        st.metric("Position", f"{position_emoji} {position_info['position_type'].upper()}")
-                    with min_col2:
-                        st.metric("Entry", f"${position_info['entry_price']:,.2f}")
-                    with min_col3:
-                        pnl_color = "normal" if pnl_pct >= 0 else "inverse"
-                        st.metric("P&L", f"{pnl_pct:+.2f}%", delta_color=pnl_color)
-                
-                else:
-                    # Detailed 또는 Compact 표시
-                    pos_col1, pos_col2, pos_col3, pos_col4, pos_col5 = st.columns(5)
-                    
-                    with pos_col1:
-                        st.metric(
-                            label="🎯 Entry Price",
-                            value=f"${position_info['entry_price']:,.2f}"
-                        )
-                    
-                    with pos_col2:
-                        position_emoji = "🟢" if position_info['position_type'] == 'long' else "🔴"
-                        st.metric(
-                            label="📊 Position",
-                            value=f"{position_emoji} {position_info['position_type'].upper()}"
-                        )
-                    
-                    with pos_col3:
-                        st.metric(
-                            label="⚡ Leverage",
-                            value=f"{position_info['leverage']}x"
-                        )
-                    
-                    with pos_col4:
-                        if current_price:
-                            st.metric(
-                                label="💰 Current Price",
-                                value=f"${current_price:,.2f}",
-                                delta=f"{current_price - position_info['entry_price']:+.2f}"
-                            )
-                        else:
-                            st.metric(
-                                label="💰 Current Price",
-                                value="N/A"
-                            )
-                    
-                    with pos_col5:
-                        pnl_color = "normal" if pnl_pct >= 0 else "inverse"
-                        st.metric(
-                            label="📈 P&L",
-                            value=f"{pnl_pct:+.2f}%",
-                            delta=f"${pnl_usd:+.2f}",
-                            delta_color=pnl_color
-                        )
-                    
-                    # Detailed 모드에서만 TP/SL 정보 표시
-                    if position_display == "Detailed" and (position_info['take_profit'] or position_info['stop_loss']):
-                        st.markdown("**🎯 Take Profit & Stop Loss**")
-                        
-                        tp_sl_col1, tp_sl_col2, tp_sl_col3, tp_sl_col4 = st.columns(4)
-                        
-                        with tp_sl_col1:
-                            if position_info['take_profit']:
-                                st.metric(
-                                    label="🟢 Take Profit",
-                                    value=f"${position_info['take_profit']:,.2f}",
-                                    delta=f"{tp_remaining:+.2f}" if tp_remaining is not None else None
-                                )
-                            else:
-                                st.metric(label="🟢 Take Profit", value="Not Set")
-                        
-                        with tp_sl_col2:
-                            if position_info['stop_loss']:
-                                st.metric(
-                                    label="🔴 Stop Loss",
-                                    value=f"${position_info['stop_loss']:,.2f}",
-                                    delta=f"{sl_remaining:+.2f}" if sl_remaining is not None else None
-                                )
-                            else:
-                                st.metric(label="🔴 Stop Loss", value="Not Set")
-                        
-                        with tp_sl_col3:
-                            if tp_progress is not None:
-                                tp_color = "normal" if tp_progress >= 0 else "inverse"
-                                st.metric(
-                                    label="📊 TP Progress",
-                                    value=f"{tp_progress:.1f}%",
-                                    delta_color=tp_color
-                                )
-                            else:
-                                st.metric(label="📊 TP Progress", value="N/A")
-                        
-                        with tp_sl_col4:
-                            if sl_risk is not None:
-                                sl_color = "inverse" if sl_risk > 50 else "normal"
-                                st.metric(
-                                    label="⚠️ SL Risk",
-                                    value=f"{sl_risk:.1f}%",
-                                    delta_color=sl_color
-                                )
-                            else:
-                                st.metric(label="⚠️ SL Risk", value="N/A")
-                
-                # 포지션 상태 종합 표시 (Detailed 모드에서만)
-                if position_display == "Detailed":
-                    status_messages = []
-                    
-                    # P&L 상태
-                    if pnl_pct >= 0:
-                        status_messages.append(f"🟢 Position in Profit: {pnl_pct:+.2f}% ({pnl_usd:+.2f} USD)")
-                    else:
-                        status_messages.append(f"🔴 Position in Loss: {pnl_pct:+.2f}% ({pnl_usd:+.2f} USD)")
-                    
-                    # TP/SL 경고
-                    if tp_progress is not None and tp_progress >= 80:
-                        status_messages.append(f"🎯 Near Take Profit! {tp_progress:.1f}% achieved")
-                    elif sl_risk is not None and sl_risk >= 80:
-                        status_messages.append(f"⚠️ Approaching Stop Loss! {sl_risk:.1f}% risk")
-                    
-                    # 메시지 표시
-                    for message in status_messages:
-                        if "Profit" in message or "Near Take" in message:
-                            st.success(message)
-                        elif "Loss" in message or "Stop Loss" in message:
-                            st.error(message)
-                        else:
-                            st.info(message)
-                    
-                    # 포지션 진입 시간 표시 (있는 경우)
-                    if position_info['entry_time']:
-                        time_since_entry = datetime.now() - position_info['entry_time']
-                        hours = int(time_since_entry.total_seconds() // 3600)
-                        minutes = int((time_since_entry.total_seconds() % 3600) // 60)
-                        st.info(f"⏰ Position Duration: {hours}h {minutes}m")
-                
-                st.markdown("---")
-            
+                st.plotly_chart(fig_leverage, use_container_width=True)
             else:
-                st.info("📊 No Active Position Found")
-                st.markdown("---")
-            
-            # 가격 차트 표시
-            if price_data:
-                st.subheader("📈 Real-time Price Tracking")
-                
-                # 사이드바 설정에 따라 TP/SL 표시 여부 결정
-                entry_to_show = position_info['entry_price'] if (position_info['is_active'] and show_entry) else None
-                tp_to_show = position_info['take_profit'] if (position_info['is_active'] and show_tp_sl) else None
-                sl_to_show = position_info['stop_loss'] if (position_info['is_active'] and show_tp_sl) else None
-                
-                # TP/SL 정보와 함께 차트 생성
-                fig_price = create_log_price_chart(
-                    price_data,
-                    entry_price=entry_to_show,
-                    take_profit=tp_to_show,
-                    stop_loss=sl_to_show
-                )
-                
-                if fig_price:
-                    st.plotly_chart(fig_price, use_container_width=True)
-                    
-                    # 가격 통계
-                    prices = [p['price'] for p in price_data]
-                    price_col1, price_col2, price_col3, price_col4 = st.columns(4)
-                    
-                    with price_col1:
-                        st.metric("Current", f"${prices[-1]:,.2f}")
-                    with price_col2:
-                        st.metric("High", f"${max(prices):,.2f}")
-                    with price_col3:
-                        st.metric("Low", f"${min(prices):,.2f}")
-                    with price_col4:
-                        price_change = prices[-1] - prices[0] if len(prices) > 1 else 0
-                        st.metric("Change", f"${price_change:+.2f}")
-            
-            st.markdown("---")
-            
-            # 로그 통계 표시
-            stat_col1, stat_col2, stat_col3, stat_col4 = st.columns(4)
-            
-            with stat_col1:
-                st.metric("📄 Total Lines", log_stats['total_lines'])
-            
-            with stat_col2:
-                st.metric("❌ Errors", log_stats['error_count'])
-            
-            with stat_col3:
-                st.metric("⚠️ Warnings", log_stats['warning_count'])
-            
-            with stat_col4:
-                st.metric("💱 Trades", log_stats['trade_count'])
-            
-            st.markdown("---")
-            
-            # 로그 필터링
-            filtered_logs = log_lines_data
-            
-            if log_filter == "Errors Only":
-                filtered_logs = [line for line in log_lines_data if categorize_log_line(line) == 'error']
-            elif log_filter == "Warnings+":
-                filtered_logs = [line for line in log_lines_data if categorize_log_line(line) in ['error', 'warning']]
-            elif log_filter == "Trading Only":
-                filtered_logs = [line for line in log_lines_data if categorize_log_line(line) == 'trade']
-            elif log_filter == "Info+":
-                filtered_logs = [line for line in log_lines_data if categorize_log_line(line) in ['error', 'warning', 'info', 'trade']]
-            
-            # 로그 표시 영역
-            st.subheader(f"📝 Live Logs ({len(filtered_logs)} lines)")
-            
-            # HTML 형식으로 로그 표시
-            log_html = ""
-            for line in filtered_logs[-100:]:  # 최신 100라인만 표시
-                log_html += format_log_line_html(line) + "\n"
-            
-            st.markdown(f'<div class="log-container">{log_html}</div>', unsafe_allow_html=True)
-            
-            # 최근 중요 이벤트 요약
-            if log_stats['error_count'] > 0 or log_stats['warning_count'] > 0:
-                st.markdown("---")
-                st.subheader("⚠️ Recent Issues")
-                
-                error_logs = [line for line in log_lines_data[-50:] if categorize_log_line(line) in ['error', 'warning']]
-                
-                for line in error_logs[-10:]:  # 최근 10개 문제만 표시
-                    category = categorize_log_line(line)
-                    if category == 'error':
-                        st.error(line.strip())
-                    elif category == 'warning':
-                        st.warning(line.strip())
+                st.info("📊 레버리지 데이터가 없습니다.")
     
-    # 푸터
-    st.markdown("---")
-    st.markdown(
-        "<div style='text-align: center; color: #6B7280; font-size: 0.9rem;'>"
-        "🚀 Ethereum Day Trading Bot Dashboard with Live Log Monitoring | "
-        f"Database: {'✅' if db_exists else '❌'} | "
-        f"Logs: {'✅' if log_exists else '❌'} | "
-        f"Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        "</div>",
-        unsafe_allow_html=True
-    )
+    with col_right:
+        st.subheader("🔴 실시간 상태")
+        
+        # 현재 오픈 포지션
+        open_positions = filtered_trades[filtered_trades['status'] == 'OPEN']
+        
+        if not open_positions.empty:
+            st.write("**💼 현재 오픈 포지션**")
+            for _, pos in open_positions.iterrows():
+                with st.container():
+                    action_emoji = "🟢" if pos['action'] == 'long' else "🔴"
+                    st.write(f"{action_emoji} **{pos['action'].upper()}**")
+                    st.write(f"레버리지: {pos.get('leverage', 'N/A')}x")
+                    st.write(f"진입가: ${pos.get('entry_price', 0):,.2f}")
+                    
+                    if pd.notna(pos.get('sl_price')):
+                        st.write(f"손절가: ${pos['sl_price']:,.2f}")
+                    if pd.notna(pos.get('tp_price')):
+                        st.write(f"익절가: ${pos['tp_price']:,.2f}")
+                    if pd.notna(pos.get('investment_amount')):
+                        st.write(f"투입금: ${pos['investment_amount']:,.0f}")
+                    
+                    st.write(f"⏰ {pos['timestamp'].strftime('%m/%d %H:%M')}")
+                    st.divider()
+        else:
+            st.info("💼 현재 오픈된 포지션이 없습니다.")
+        
+        # 최근 AI 분석
+        if not ai_analysis_df.empty:
+            st.write("**🤖 최근 AI 분석**")
+            recent_ai = ai_analysis_df.head(5)
+            
+            for _, analysis in recent_ai.iterrows():
+                direction = analysis.get('direction', 'N/A')
+                direction_emoji = "🟢" if direction == 'LONG' else "🔴" if direction == 'SHORT' else "⚪"
+                
+                with st.container():
+                    st.write(f"{direction_emoji} **{direction}**")
+                    
+                    if pd.notna(analysis.get('recommended_leverage')):
+                        st.write(f"레버리지: {analysis['recommended_leverage']}x")
+                    if pd.notna(analysis.get('recommended_position_size')):
+                        st.write(f"포지션: {analysis['recommended_position_size']*100:.0f}%")
+                    
+                    st.write(f"⏰ {analysis['timestamp'].strftime('%m/%d %H:%M')}")
+                    
+                    if pd.notna(analysis.get('reasoning')):
+                        reasoning = analysis['reasoning'][:100] + "..." if len(str(analysis['reasoning'])) > 100 else analysis['reasoning']
+                        with st.expander("📝 분석 근거"):
+                            st.write(reasoning)
+                    
+                    st.divider()
+    
+    # ===== 거래 내역 테이블 =====
+    st.subheader("📋 거래 내역")
+    
+    if not filtered_trades.empty:
+        # 표시할 컬럼 선택
+        display_cols = ['timestamp', 'action', 'entry_price', 'exit_price', 'amount', 
+                       'leverage', 'investment_amount', 'profit_loss', 'profit_loss_percentage', 'status']
+        
+        # 존재하는 컬럼만 선택
+        available_cols = [col for col in display_cols if col in filtered_trades.columns]
+        display_df = filtered_trades[available_cols].copy()
+        
+        # 타임스탬프 포맷
+        display_df['timestamp'] = display_df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+        
+        # 컬럼명 한글화
+        column_names = {
+            'timestamp': '시간',
+            'action': '방향', 
+            'entry_price': '진입가',
+            'exit_price': '청산가',
+            'amount': '수량(ETH)',
+            'leverage': '레버리지',
+            'investment_amount': '투입마진',
+            'profit_loss': '손익(USDT)',
+            'profit_loss_percentage': '수익률(%)',
+            'status': '상태'
+        }
+        
+        display_df = display_df.rename(columns=column_names)
+        
+        # 스타일 적용
+        def style_dataframe(df):
+            def highlight_pnl(row):
+                styles = [''] * len(row)
+                if '손익(USDT)' in row.index and pd.notna(row['손익(USDT)']):
+                    if row['손익(USDT)'] > 0:
+                        styles = ['background-color: #d4edda'] * len(row)
+                    elif row['손익(USDT)'] < 0:
+                        styles = ['background-color: #f8d7da'] * len(row)
+                return styles
+            
+            return df.style.apply(highlight_pnl, axis=1)
+        
+        if '손익(USDT)' in display_df.columns:
+            styled_df = style_dataframe(display_df)
+            st.dataframe(styled_df, use_container_width=True)
+        else:
+            st.dataframe(display_df, use_container_width=True)
+        
+        # 다운로드 버튼
+        csv = display_df.to_csv(index=False, encoding='utf-8-sig')
+        st.download_button(
+            label="📥 CSV 다운로드",
+            data=csv,
+            file_name=f"eth_trades_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime='text/csv'
+        )
+    
+    else:
+        st.info("📋 선택한 필터 조건에 맞는 거래가 없습니다.")
+    
+    # ===== 자동 새로고침 =====
+    st.sidebar.markdown("---")
+    auto_refresh = st.sidebar.checkbox("🔄 자동 새로고침 (30초)")
+    if auto_refresh:
+        time.sleep(30)
+        st.experimental_rerun()
 
 if __name__ == "__main__":
     main()
