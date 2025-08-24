@@ -227,6 +227,105 @@ def categorize_log_line(line):
     else:
         return 'default'
 
+def extract_price_from_logs(log_lines, max_prices=30):
+    """로그에서 이더리움 가격 정보 추출"""
+    price_data = []
+    
+    # 가격 추출 패턴들
+    price_patterns = [
+        r'현재가[:\s]+\$?([0-9,]+\.?[0-9]*)',  # 현재가: $3,245.67
+        r'ETH\s*Price[:\s]+\$?([0-9,]+\.?[0-9]*)',  # ETH Price: 3245.67
+        r'price[:\s]+\$?([0-9,]+\.?[0-9]*)',  # price: 3245.67
+        r'ETH[:\s]+\$([0-9,]+\.?[0-9]*)',  # ETH: $3,245.67
+        r'이더리움[:\s]+\$?([0-9,]+\.?[0-9]*)',  # 이더리움: 3245.67
+        r'\$([0-9,]+\.?[0-9]*)\s*(USD|USDT)',  # $3245.67 USD
+        r'([0-9,]+\.?[0-9]*)\s*USD',  # 3245.67 USD
+    ]
+    
+    # 시간 패턴들
+    time_patterns = [
+        r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})',
+        r'(\d{2}:\d{2}:\d{2})',
+        r'(\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2})',
+        r'(\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})',
+    ]
+    
+    for line in log_lines:
+        # 시간 정보 추출
+        timestamp = None
+        for pattern in time_patterns:
+            time_match = re.search(pattern, line)
+            if time_match:
+                time_str = time_match.group(1)
+                try:
+                    if re.match(r'\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}', time_str):
+                        timestamp = datetime.strptime(time_str, '%Y-%m-%d %H:%M:%S')
+                    elif re.match(r'\d{2}:\d{2}:\d{2}', time_str):
+                        today = datetime.now().date()
+                        timestamp = datetime.combine(today, datetime.strptime(time_str, '%H:%M:%S').time())
+                    elif re.match(r'\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2}', time_str):
+                        timestamp = datetime.strptime(time_str, '%Y/%m/%d %H:%M:%S')
+                    break
+                except:
+                    continue
+        
+        # 가격 정보 추출
+        for pattern in price_patterns:
+            price_match = re.search(pattern, line, re.IGNORECASE)
+            if price_match:
+                try:
+                    price_str = price_match.group(1).replace(',', '')
+                    price = float(price_str)
+                    
+                    # 합리적인 이더리움 가격 범위 체크 ($100 ~ $10,000)
+                    if 100 <= price <= 10000:
+                        price_data.append({
+                            'timestamp': timestamp or datetime.now(),
+                            'price': price,
+                            'log_line': line.strip()
+                        })
+                        break
+                except:
+                    continue
+    
+    # 최신 데이터부터 최대 max_prices개 반환
+    return price_data[-max_prices:] if len(price_data) > max_prices else price_data
+
+def create_log_price_chart(price_data):
+    """로그에서 추출한 가격 데이터로 차트 생성"""
+    if not price_data:
+        return None
+    
+    df = pd.DataFrame(price_data)
+    df = df.sort_values('timestamp')
+    
+    fig = go.Figure()
+    
+    fig.add_trace(go.Scatter(
+        x=df['timestamp'],
+        y=df['price'],
+        mode='lines+markers',
+        name='ETH Price (from logs)',
+        line=dict(color='#00D4AA', width=2),
+        marker=dict(size=4, color='#00D4AA'),
+        hovertemplate='<b>ETH Price</b><br>' +
+                      'Time: %{x}<br>' +
+                      'Price: $%{y:.2f}<br>' +
+                      '<extra></extra>'
+    ))
+    
+    fig.update_layout(
+        title="Real-time ETH Price from Logs",
+        xaxis_title="Time",
+        yaxis_title="Price (USD)",
+        template="plotly_dark",
+        height=300,
+        showlegend=False,
+        margin=dict(l=40, r=40, t=40, b=40)
+    )
+    
+    return fig
+
 def parse_log_statistics(log_lines):
     """로그에서 통계 정보 추출"""
     stats = {
@@ -241,6 +340,14 @@ def parse_log_statistics(log_lines):
     current_time = datetime.now()
     recent_logs = []
     
+    # 로그 파일 자체의 최종 수정 시간도 확인
+    try:
+        if os.path.exists("output.log"):
+            file_mtime = datetime.fromtimestamp(os.path.getmtime("output.log"))
+            recent_logs.append(file_mtime)
+    except:
+        pass
+    
     for line in log_lines[-50:]:  # 최근 50개 라인만 분석
         category = categorize_log_line(line)
         
@@ -251,24 +358,65 @@ def parse_log_statistics(log_lines):
         elif category == 'trade':
             stats['trade_count'] += 1
         
-        # 최근 로그에서 시간 정보 추출 시도
-        time_match = re.search(r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})', line)
-        if time_match:
-            try:
-                log_time = datetime.strptime(time_match.group(1), '%Y-%m-%d %H:%M:%S')
-                recent_logs.append(log_time)
-            except:
-                pass
+        # 다양한 시간 형식 파싱 시도
+        time_patterns = [
+            r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})',  # 2024-08-24 13:36:59
+            r'(\d{2}:\d{2}:\d{2})',  # 13:36:59
+            r'(\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2})',  # 2024/08/24 13:36:59
+            r'(\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})',  # Aug 24 13:36:59
+        ]
+        
+        for pattern in time_patterns:
+            time_match = re.search(pattern, line)
+            if time_match:
+                time_str = time_match.group(1)
+                try:
+                    # 다양한 형식으로 파싱 시도
+                    if re.match(r'\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}', time_str):
+                        log_time = datetime.strptime(time_str, '%Y-%m-%d %H:%M:%S')
+                    elif re.match(r'\d{2}:\d{2}:\d{2}', time_str):
+                        # 오늘 날짜로 가정
+                        today = datetime.now().date()
+                        log_time = datetime.combine(today, datetime.strptime(time_str, '%H:%M:%S').time())
+                    elif re.match(r'\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2}', time_str):
+                        log_time = datetime.strptime(time_str, '%Y/%m/%d %H:%M:%S')
+                    else:
+                        continue
+                    
+                    recent_logs.append(log_time)
+                    break
+                except:
+                    continue
     
-    # 봇 상태 판단 (최근 5분 이내 활동이 있으면 실행중)
+    # 봇 상태 판단
     if recent_logs:
         latest_log = max(recent_logs)
         time_diff = current_time - latest_log
+        
         if time_diff.total_seconds() < 300:  # 5분
             stats['bot_status'] = 'Running'
-            stats['last_update'] = latest_log
-        else:
+        elif time_diff.total_seconds() < 1800:  # 30분
             stats['bot_status'] = 'Idle'
+        else:
+            stats['bot_status'] = 'Stopped'
+        
+        stats['last_update'] = latest_log
+    else:
+        # 로그에서 시간을 파싱할 수 없지만 로그가 있다면
+        if len(log_lines) > 0:
+            # 파일 수정 시간 기준으로 판단
+            try:
+                file_mtime = datetime.fromtimestamp(os.path.getmtime("output.log"))
+                time_diff = current_time - file_mtime
+                if time_diff.total_seconds() < 300:  # 5분
+                    stats['bot_status'] = 'Running'
+                elif time_diff.total_seconds() < 1800:  # 30분
+                    stats['bot_status'] = 'Idle'
+                else:
+                    stats['bot_status'] = 'Stopped'
+                stats['last_update'] = file_mtime
+            except:
+                stats['bot_status'] = 'Unknown'
     
     return stats
 
@@ -643,10 +791,57 @@ def main():
             if log_exists:
                 log_lines_data = read_log_file("output.log", 100)
                 log_stats = parse_log_statistics(log_lines_data)
-                bot_status = f"🟢 {log_stats['bot_status']}" if log_stats['bot_status'] == 'Running' else f"🟡 {log_stats['bot_status']}"
-                last_activity = log_stats['last_update'].strftime('%Y-%m-%d %H:%M:%S')
                 
-                status_text = f"{bot_status} | Last Log: {last_activity} | Errors: {log_stats['error_count']} | Warnings: {log_stats['warning_count']}"
+                # 상태별 아이콘과 색상
+                status_icons = {
+                    'Running': '🟢',
+                    'Idle': '🟡', 
+                    'Stopped': '🔴',
+                    'Unknown': '⚫'
+                }
+                
+                bot_status = f"{status_icons.get(log_stats['bot_status'], '⚫')} {log_stats['bot_status']}"
+                last_activity = log_stats['last_update'].strftime('%H:%M:%S')
+                
+                # 마지막 활동으로부터 경과시간 계산
+                time_diff = datetime.now() - log_stats['last_update']
+                if time_diff.total_seconds() < 60:
+                    time_ago = f"{int(time_diff.total_seconds())}s ago"
+                elif time_diff.total_seconds() < 3600:
+                    time_ago = f"{int(time_diff.total_seconds()/60)}m ago"
+                else:
+                    time_ago = f"{int(time_diff.total_seconds()/3600)}h ago"
+                
+                status_text = f"{bot_status} | Last Activity: {last_activity} ({time_ago}) | Errors: {log_stats['error_count']} | Warnings: {log_stats['warning_count']}"
+                
+                # 상태별 색상 적용하여 표시
+                if log_stats['bot_status'] == 'Running':
+                    st.success(f"🤖 Bot Status: {status_text}")
+                elif log_stats['bot_status'] == 'Idle':
+                    st.warning(f"🤖 Bot Status: {status_text}")
+                elif log_stats['bot_status'] == 'Stopped':
+                    st.error(f"🤖 Bot Status: {status_text}")
+                else:
+                    st.info(f"🤖 Bot Status: {status_text}")
+                
+                # 최신 로그 3줄 표시
+                st.markdown("**📝 Latest Log Entries:**")
+                with st.container():
+                    if log_lines_data:
+                        latest_logs = log_lines_data[-3:] if len(log_lines_data) >= 3 else log_lines_data
+                        for i, line in enumerate(latest_logs):
+                            category = categorize_log_line(line)
+                            if category == 'error':
+                                st.error(f"📄 {line.strip()}")
+                            elif category == 'warning':
+                                st.warning(f"📄 {line.strip()}")
+                            elif category == 'trade':
+                                st.info(f"💱 {line.strip()}")
+                            else:
+                                st.text(f"📄 {line.strip()}")
+                    else:
+                        st.text("No recent log entries found.")
+                
             else:
                 bot_status = "🟢 Running" if metrics['total_trades'] > 0 else "🔴 Stopped"
                 last_activity = metrics['last_trade_time']
@@ -659,13 +854,13 @@ def main():
                         status_text = f"{bot_status} | Last Activity: {last_activity.strftime('%Y-%m-%d %H:%M')}"
                 else:
                     status_text = f"{bot_status} | Last Activity: {last_activity}"
-            
-            st.info(f"🤖 Bot Status: {status_text}")
+                
+                st.info(f"🤖 Bot Status: {status_text}")
             
             st.markdown("---")
             
-            # 차트 섹션
-            chart_col1, chart_col2 = st.columns([2, 1])
+            # 차트 섹션 (3개 컬럼으로 확장)
+            chart_col1, chart_col2, chart_col3 = st.columns([3, 2, 2])
             
             with chart_col1:
                 st.subheader("📊 Price Chart & Trading Points")
@@ -704,6 +899,40 @@ def main():
                     st.plotly_chart(fig2, use_container_width=True)
                 else:
                     st.info("📊 잔액 데이터를 찾을 수 없습니다.")
+            
+            with chart_col3:
+                st.subheader("🔴 Live Price (Logs)")
+                
+                # 로그에서 가격 데이터 추출 및 차트 생성
+                if log_exists:
+                    log_lines_for_price = read_log_file("output.log", 500)  # 더 많은 라인에서 가격 추출
+                    price_data = extract_price_from_logs(log_lines_for_price, 30)
+                    
+                    if price_data:
+                        fig3 = create_log_price_chart(price_data)
+                        if fig3:
+                            st.plotly_chart(fig3, use_container_width=True)
+                            
+                            # 최신 가격 표시
+                            latest_price = price_data[-1]['price']
+                            st.metric(
+                                label="Latest Price",
+                                value=f"${latest_price:,.2f}",
+                                delta=None
+                            )
+                            
+                            # 가격 데이터 개수 표시
+                            st.caption(f"📊 {len(price_data)} price points from logs")
+                        else:
+                            st.info("📊 로그에서 가격 차트를 생성할 수 없습니다.")
+                    else:
+                        st.warning("📊 로그에서 가격 정보를 찾을 수 없습니다.")
+                        st.caption("로그에서 다음 패턴을 찾습니다:")
+                        st.caption("• 현재가: $3,245.67")
+                        st.caption("• ETH Price: 3245.67") 
+                        st.caption("• price: 3245.67")
+                else:
+                    st.warning("📊 로그 파일이 없습니다.")
             
             # 최근 거래 내역
             st.subheader("📋 Recent Trading Activity")
@@ -775,6 +1004,30 @@ def main():
             # 로그 데이터 로드
             log_lines_data = read_log_file("output.log", log_lines)
             log_stats = parse_log_statistics(log_lines_data)
+            
+            # 상단에 가격 차트 추가
+            price_data = extract_price_from_logs(log_lines_data, 50)
+            if price_data:
+                st.subheader("📈 Real-time Price Tracking")
+                fig_price = create_log_price_chart(price_data)
+                if fig_price:
+                    st.plotly_chart(fig_price, use_container_width=True)
+                    
+                    # 가격 통계
+                    prices = [p['price'] for p in price_data]
+                    price_col1, price_col2, price_col3, price_col4 = st.columns(4)
+                    
+                    with price_col1:
+                        st.metric("Current", f"${prices[-1]:,.2f}")
+                    with price_col2:
+                        st.metric("High", f"${max(prices):,.2f}")
+                    with price_col3:
+                        st.metric("Low", f"${min(prices):,.2f}")
+                    with price_col4:
+                        price_change = prices[-1] - prices[0] if len(prices) > 1 else 0
+                        st.metric("Change", f"${price_change:+.2f}")
+            
+            st.markdown("---")
             
             # 로그 통계 표시
             stat_col1, stat_col2, stat_col3, stat_col4 = st.columns(4)
