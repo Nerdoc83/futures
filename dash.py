@@ -824,24 +824,6 @@ def main():
                 else:
                     st.info(f"🤖 Bot Status: {status_text}")
                 
-                # 최신 로그 3줄 표시
-                st.markdown("**📝 Latest Log Entries:**")
-                with st.container():
-                    if log_lines_data:
-                        latest_logs = log_lines_data[-3:] if len(log_lines_data) >= 3 else log_lines_data
-                        for i, line in enumerate(latest_logs):
-                            category = categorize_log_line(line)
-                            if category == 'error':
-                                st.error(f"📄 {line.strip()}")
-                            elif category == 'warning':
-                                st.warning(f"📄 {line.strip()}")
-                            elif category == 'trade':
-                                st.info(f"💱 {line.strip()}")
-                            else:
-                                st.text(f"📄 {line.strip()}")
-                    else:
-                        st.text("No recent log entries found.")
-                
             else:
                 bot_status = "🟢 Running" if metrics['total_trades'] > 0 else "🔴 Stopped"
                 last_activity = metrics['last_trade_time']
@@ -859,8 +841,8 @@ def main():
             
             st.markdown("---")
             
-            # 차트 섹션 (3개 컬럼으로 확장)
-            chart_col1, chart_col2, chart_col3 = st.columns([3, 2, 2])
+            # 차트 섹션 (원래대로 2컬럼)
+            chart_col1, chart_col2 = st.columns([2, 1])
             
             with chart_col1:
                 st.subheader("📊 Price Chart & Trading Points")
@@ -899,40 +881,6 @@ def main():
                     st.plotly_chart(fig2, use_container_width=True)
                 else:
                     st.info("📊 잔액 데이터를 찾을 수 없습니다.")
-            
-            with chart_col3:
-                st.subheader("🔴 Live Price (Logs)")
-                
-                # 로그에서 가격 데이터 추출 및 차트 생성
-                if log_exists:
-                    log_lines_for_price = read_log_file("output.log", 500)  # 더 많은 라인에서 가격 추출
-                    price_data = extract_price_from_logs(log_lines_for_price, 30)
-                    
-                    if price_data:
-                        fig3 = create_log_price_chart(price_data)
-                        if fig3:
-                            st.plotly_chart(fig3, use_container_width=True)
-                            
-                            # 최신 가격 표시
-                            latest_price = price_data[-1]['price']
-                            st.metric(
-                                label="Latest Price",
-                                value=f"${latest_price:,.2f}",
-                                delta=None
-                            )
-                            
-                            # 가격 데이터 개수 표시
-                            st.caption(f"📊 {len(price_data)} price points from logs")
-                        else:
-                            st.info("📊 로그에서 가격 차트를 생성할 수 없습니다.")
-                    else:
-                        st.warning("📊 로그에서 가격 정보를 찾을 수 없습니다.")
-                        st.caption("로그에서 다음 패턴을 찾습니다:")
-                        st.caption("• 현재가: $3,245.67")
-                        st.caption("• ETH Price: 3245.67") 
-                        st.caption("• price: 3245.67")
-                else:
-                    st.warning("📊 로그 파일이 없습니다.")
             
             # 최근 거래 내역
             st.subheader("📋 Recent Trading Activity")
