@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Ethereum Day Trading Bot - Streamlit Dashboard
-기존 ethereum_daytrading.db를 활용한 실시간 대시보드
+Ethereum Day Trading Bot - Streamlit Dashboard with Log Monitoring
+기존 ethereum_daytrading.db를 활용한 실시간 대시보드 + output.log 모니터링
 """
 
 import streamlit as st
@@ -16,6 +16,7 @@ import time
 import warnings
 import logging
 from pathlib import Path
+import re
 
 # 모든 경고와 로그 메시지 숨기기
 warnings.filterwarnings('ignore')
@@ -33,7 +34,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# CSS 스타일
+# CSS 스타일 (로그 스타일 추가)
 st.markdown("""
 <style>
     .main-header {
@@ -63,6 +64,57 @@ st.markdown("""
     }
     .status-stopped {
         color: #EF4444;
+    }
+    .log-container {
+        background: #0F172A;
+        border-radius: 8px;
+        padding: 1rem;
+        height: 400px;
+        overflow-y: auto;
+        font-family: 'Courier New', monospace;
+        font-size: 0.85rem;
+        border: 1px solid #334155;
+    }
+    .log-error {
+        color: #EF4444;
+        background: rgba(239, 68, 68, 0.1);
+        padding: 2px 4px;
+        border-radius: 3px;
+        margin: 1px 0;
+    }
+    .log-warning {
+        color: #F59E0B;
+        background: rgba(245, 158, 11, 0.1);
+        padding: 2px 4px;
+        border-radius: 3px;
+        margin: 1px 0;
+    }
+    .log-info {
+        color: #10B981;
+        background: rgba(16, 185, 129, 0.1);
+        padding: 2px 4px;
+        border-radius: 3px;
+        margin: 1px 0;
+    }
+    .log-debug {
+        color: #6B7280;
+        background: rgba(107, 114, 128, 0.1);
+        padding: 2px 4px;
+        border-radius: 3px;
+        margin: 1px 0;
+    }
+    .log-trade {
+        color: #8B5CF6;
+        background: rgba(139, 92, 246, 0.1);
+        padding: 2px 4px;
+        border-radius: 3px;
+        margin: 1px 0;
+        font-weight: bold;
+    }
+    .log-default {
+        color: #E5E7EB;
+        padding: 2px 4px;
+        margin: 1px 0;
     }
     .sidebar .sidebar-content {
         background: linear-gradient(145deg, #1F2937, #374151);
@@ -103,6 +155,11 @@ def check_database_exists():
     db_path = "ethereum_daytrading.db"
     return os.path.exists(db_path)
 
+def check_log_file_exists():
+    """로그 파일 존재 확인"""
+    log_path = "output.log"
+    return os.path.exists(log_path)
+
 def get_database_info():
     """데이터베이스 스키마 정보 조회"""
     if not check_database_exists():
@@ -138,6 +195,89 @@ def get_database_info():
     
     conn.close()
     return db_info
+
+# 로그 관련 함수들
+def read_log_file(file_path="output.log", max_lines=500):
+    """로그 파일을 읽어서 최근 라인들을 반환"""
+    try:
+        if not os.path.exists(file_path):
+            return []
+        
+        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            lines = f.readlines()
+            # 최근 max_lines 만큼만 반환
+            return lines[-max_lines:] if len(lines) > max_lines else lines
+    except Exception as e:
+        return [f"Error reading log file: {str(e)}"]
+
+def categorize_log_line(line):
+    """로그 라인의 종류를 분류"""
+    line_upper = line.upper()
+    
+    if 'ERROR' in line_upper or '에러' in line:
+        return 'error'
+    elif 'WARNING' in line_upper or 'WARN' in line_upper or '경고' in line:
+        return 'warning'
+    elif 'INFO' in line_upper or '정보' in line:
+        return 'info'
+    elif 'DEBUG' in line_upper or 'TRACE' in line_upper:
+        return 'debug'
+    elif any(word in line_upper for word in ['매수', '매도', 'BUY', 'SELL', 'TRADE', 'ORDER']):
+        return 'trade'
+    else:
+        return 'default'
+
+def parse_log_statistics(log_lines):
+    """로그에서 통계 정보 추출"""
+    stats = {
+        'total_lines': len(log_lines),
+        'error_count': 0,
+        'warning_count': 0,
+        'trade_count': 0,
+        'last_update': datetime.now(),
+        'bot_status': 'Unknown'
+    }
+    
+    current_time = datetime.now()
+    recent_logs = []
+    
+    for line in log_lines[-50:]:  # 최근 50개 라인만 분석
+        category = categorize_log_line(line)
+        
+        if category == 'error':
+            stats['error_count'] += 1
+        elif category == 'warning':
+            stats['warning_count'] += 1
+        elif category == 'trade':
+            stats['trade_count'] += 1
+        
+        # 최근 로그에서 시간 정보 추출 시도
+        time_match = re.search(r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})', line)
+        if time_match:
+            try:
+                log_time = datetime.strptime(time_match.group(1), '%Y-%m-%d %H:%M:%S')
+                recent_logs.append(log_time)
+            except:
+                pass
+    
+    # 봇 상태 판단 (최근 5분 이내 활동이 있으면 실행중)
+    if recent_logs:
+        latest_log = max(recent_logs)
+        time_diff = current_time - latest_log
+        if time_diff.total_seconds() < 300:  # 5분
+            stats['bot_status'] = 'Running'
+            stats['last_update'] = latest_log
+        else:
+            stats['bot_status'] = 'Idle'
+    
+    return stats
+
+def format_log_line_html(line):
+    """로그 라인을 HTML로 포맷팅"""
+    category = categorize_log_line(line)
+    escaped_line = line.replace('<', '&lt;').replace('>', '&gt;').strip()
+    
+    return f'<div class="log-{category}">{escaped_line}</div>'
 
 # 캐시 데코레이터를 조건부로 적용
 def conditional_cache(func):
@@ -381,43 +521,51 @@ def main():
     # 헤더
     st.markdown('<h1 class="main-header">🚀 Ethereum Day Trading Dashboard</h1>', unsafe_allow_html=True)
     
-    # 데이터베이스 존재 확인
-    if not check_database_exists():
-        st.error("❌ ethereum_daytrading.db 파일을 찾을 수 없습니다!")
-        st.info("💡 거래 봇을 먼저 실행하여 데이터베이스를 생성해주세요.")
-        
-        # 현재 디렉토리의 파일들 표시
-        current_files = [f for f in os.listdir('.') if f.endswith('.db')]
-        if current_files:
-            st.write("📁 현재 디렉토리의 데이터베이스 파일들:")
-            for file in current_files:
-                st.write(f"  • {file}")
-        return
-    
-    # 데이터베이스 정보 표시
-    db_info = get_database_info()
-    
     # 사이드바
     with st.sidebar:
         st.header("📊 Dashboard Control")
         
-        # 데이터베이스 정보
-        st.subheader("🗄️ Database Info")
-        if db_info:
-            st.write(f"📁 Size: {db_info['total_size']:,} bytes")
-            st.write("📋 Tables:")
-            for table_name, table_info in db_info['tables'].items():
-                st.write(f"  • {table_name}: {table_info['row_count']:,} records")
+        # 로그 파일 상태
+        log_exists = check_log_file_exists()
+        db_exists = check_database_exists()
+        
+        st.subheader("📁 File Status")
+        st.write(f"🗄️ Database: {'✅' if db_exists else '❌'}")
+        st.write(f"📋 Log File: {'✅' if log_exists else '❌'}")
+        
+        # 데이터베이스 정보 표시
+        if db_exists:
+            db_info = get_database_info()
+            if db_info:
+                st.write(f"📊 DB Size: {db_info['total_size']:,} bytes")
+                st.write("📋 Tables:")
+                for table_name, table_info in db_info['tables'].items():
+                    st.write(f"  • {table_name}: {table_info['row_count']:,} records")
+        
+        if log_exists:
+            log_size = os.path.getsize("output.log")
+            st.write(f"📝 Log Size: {log_size:,} bytes")
         
         st.markdown("---")
         
-        # 새로고침 버튼
-        if st.button("🔄 Refresh Data"):
-            st.cache_data.clear()
-            st.rerun()
+        # 새로고침 및 자동 업데이트 설정
+        refresh_col1, refresh_col2 = st.columns(2)
+        with refresh_col1:
+            if st.button("🔄 Refresh"):
+                st.cache_data.clear()
+                st.rerun()
         
-        # 자동 새로고침 설정
-        auto_refresh = st.checkbox("⚡ Auto Refresh (30s)", value=False)
+        with refresh_col2:
+            auto_refresh = st.checkbox("⚡ Auto (30s)", value=False)
+        
+        # 로그 설정
+        st.subheader("📋 Log Settings")
+        log_lines = st.slider("Log Lines", 50, 1000, 200, 50)
+        
+        log_filter = st.selectbox(
+            "Log Filter",
+            ["All", "Errors Only", "Warnings+", "Trading Only", "Info+"]
+        )
         
         if auto_refresh:
             time.sleep(30)
@@ -425,7 +573,7 @@ def main():
         
         st.markdown("---")
         
-        # 필터 옵션
+        # 데이터 필터 옵션
         st.subheader("🔍 Data Filters")
         
         time_range = st.selectbox(
@@ -435,218 +583,259 @@ def main():
         
         max_records = st.slider("Max Records", 50, 1000, 200, 50)
     
-    # 데이터 로드
-    trades_df = load_trades_data(max_records)
-    price_df = load_price_data(max_records)
-    balance_df = load_balance_data()
+    # 탭 구성
+    tab1, tab2 = st.tabs(["📊 Trading Dashboard", "📋 Live Logs"])
     
-    # 메트릭스 계산
-    metrics = get_latest_metrics(trades_df)
-    
-    # 메인 메트릭스 표시
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.metric(
-            label="💰 Current Balance",
-            value=f"${metrics['current_balance']:,.2f}",
-            delta=None
-        )
-    
-    with col2:
-        profit_color = "normal" if metrics['total_profit'] >= 0 else "inverse"
-        st.metric(
-            label="📈 Total Profit/Loss",
-            value=f"${metrics['total_profit']:.2f}",
-            delta_color=profit_color
-        )
-    
-    with col3:
-        st.metric(
-            label="🔄 Total Trades",
-            value=f"{metrics['total_trades']:,}"
-        )
-    
-    with col4:
-        st.metric(
-            label="🎯 Win Rate",
-            value=f"{metrics['win_rate']:.1f}%"
-        )
-    
-    # 봇 상태 표시
-    bot_status = "🟢 Running" if metrics['total_trades'] > 0 else "🔴 Stopped"
-    last_activity = metrics['last_trade_time']
-    
-    if isinstance(last_activity, pd.Timestamp):
-        time_since = datetime.now() - last_activity.to_pydatetime()
-        if time_since.total_seconds() < 3600:  # 1시간 미만
-            status_text = f"{bot_status} | Last Activity: {int(time_since.total_seconds()/60)}m ago"
+    with tab1:
+        # 기존 대시보드 기능
+        
+        # 데이터베이스 존재 확인
+        if not db_exists:
+            st.error("❌ ethereum_daytrading.db 파일을 찾을 수 없습니다!")
+            st.info("💡 거래 봇을 먼저 실행하여 데이터베이스를 생성해주세요.")
+            
+            # 현재 디렉토리의 파일들 표시
+            current_files = [f for f in os.listdir('.') if f.endswith('.db')]
+            if current_files:
+                st.write("📁 현재 디렉토리의 데이터베이스 파일들:")
+                for file in current_files:
+                    st.write(f"  • {file}")
         else:
-            status_text = f"{bot_status} | Last Activity: {last_activity.strftime('%Y-%m-%d %H:%M')}"
-    else:
-        status_text = f"{bot_status} | Last Activity: {last_activity}"
-    
-    st.info(f"🤖 Bot Status: {status_text}")
-    
-    st.markdown("---")
-    
-    # 차트 섹션
-    chart_col1, chart_col2 = st.columns([2, 1])
-    
-    with chart_col1:
-        st.subheader("📊 Price Chart & Trading Points")
-        
-        if not price_df.empty or not trades_df.empty:
-            fig = create_price_chart(price_df, trades_df)
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.warning("📊 가격 데이터를 찾을 수 없습니다.")
-    
-    with chart_col2:
-        st.subheader("💰 Portfolio Performance")
-        
-        # 잔액 변화 차트
-        if not trades_df.empty and 'balance' in trades_df.columns:
-            trades_sorted = trades_df.sort_values('timestamp')
+            # 데이터 로드
+            trades_df = load_trades_data(max_records)
+            price_df = load_price_data(max_records)
+            balance_df = load_balance_data()
             
-            fig2 = go.Figure()
-            fig2.add_trace(go.Scatter(
-                x=trades_sorted['timestamp'],
-                y=trades_sorted['balance'],
-                mode='lines+markers',
-                name='Balance',
-                line=dict(color='#8B5CF6', width=3),
-                marker=dict(size=6)
-            ))
+            # 메트릭스 계산
+            metrics = get_latest_metrics(trades_df)
             
-            fig2.update_layout(
-                title="Balance Over Time",
-                xaxis_title="Time",
-                yaxis_title="Balance (USD)",
-                template="plotly_dark",
-                height=450
-            )
+            # 메인 메트릭스 표시
+            col1, col2, col3, col4 = st.columns(4)
             
-            st.plotly_chart(fig2, use_container_width=True)
-        else:
-            st.info("📊 잔액 데이터를 찾을 수 없습니다.")
-    
-    # 최근 거래 내역
-    st.subheader("📋 Recent Trading Activity")
-    
-    if not trades_df.empty:
-        # 표시할 컬럼 선택 (데이터에 따라 동적으로)
-        display_columns = []
-        column_mapping = {
-            'timestamp': 'Time',
-            'action': 'Action',
-            'side': 'Side',
-            'type': 'Type',
-            'price': 'Price',
-            'executed_price': 'Executed Price',
-            'amount': 'Amount',
-            'quantity': 'Quantity',
-            'profit': 'Profit/Loss',
-            'pnl': 'P&L',
-            'balance': 'Balance',
-            'fee': 'Fee'
-        }
-        
-        for col in trades_df.columns:
-            if col in column_mapping:
-                display_columns.append(col)
-        
-        if display_columns:
-            display_df = trades_df[display_columns].copy()
+            with col1:
+                st.metric(
+                    label="💰 Current Balance",
+                    value=f"${metrics['current_balance']:,.2f}",
+                    delta=None
+                )
             
-            # 데이터 포맷팅
-            for col in display_df.columns:
-                if 'price' in col.lower() or 'balance' in col.lower():
-                    display_df[col] = display_df[col].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "N/A")
-                elif 'profit' in col.lower() or 'pnl' in col.lower():
-                    display_df[col] = display_df[col].apply(
-                        lambda x: f"${x:.2f}" if pd.notna(x) and x >= 0 else f"-${abs(x):.2f}" if pd.notna(x) else "N/A"
+            with col2:
+                profit_color = "normal" if metrics['total_profit'] >= 0 else "inverse"
+                st.metric(
+                    label="📈 Total Profit/Loss",
+                    value=f"${metrics['total_profit']:.2f}",
+                    delta_color=profit_color
+                )
+            
+            with col3:
+                st.metric(
+                    label="🔄 Total Trades",
+                    value=f"{metrics['total_trades']:,}"
+                )
+            
+            with col4:
+                st.metric(
+                    label="🎯 Win Rate",
+                    value=f"{metrics['win_rate']:.1f}%"
+                )
+            
+            # 봇 상태 표시 (로그 기반으로 업데이트)
+            if log_exists:
+                log_lines_data = read_log_file("output.log", 100)
+                log_stats = parse_log_statistics(log_lines_data)
+                bot_status = f"🟢 {log_stats['bot_status']}" if log_stats['bot_status'] == 'Running' else f"🟡 {log_stats['bot_status']}"
+                last_activity = log_stats['last_update'].strftime('%Y-%m-%d %H:%M:%S')
+                
+                status_text = f"{bot_status} | Last Log: {last_activity} | Errors: {log_stats['error_count']} | Warnings: {log_stats['warning_count']}"
+            else:
+                bot_status = "🟢 Running" if metrics['total_trades'] > 0 else "🔴 Stopped"
+                last_activity = metrics['last_trade_time']
+                
+                if isinstance(last_activity, pd.Timestamp):
+                    time_since = datetime.now() - last_activity.to_pydatetime()
+                    if time_since.total_seconds() < 3600:  # 1시간 미만
+                        status_text = f"{bot_status} | Last Activity: {int(time_since.total_seconds()/60)}m ago"
+                    else:
+                        status_text = f"{bot_status} | Last Activity: {last_activity.strftime('%Y-%m-%d %H:%M')}"
+                else:
+                    status_text = f"{bot_status} | Last Activity: {last_activity}"
+            
+            st.info(f"🤖 Bot Status: {status_text}")
+            
+            st.markdown("---")
+            
+            # 차트 섹션
+            chart_col1, chart_col2 = st.columns([2, 1])
+            
+            with chart_col1:
+                st.subheader("📊 Price Chart & Trading Points")
+                
+                if not price_df.empty or not trades_df.empty:
+                    fig = create_price_chart(price_df, trades_df)
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.warning("📊 가격 데이터를 찾을 수 없습니다.")
+            
+            with chart_col2:
+                st.subheader("💰 Portfolio Performance")
+                
+                # 잔액 변화 차트
+                if not trades_df.empty and 'balance' in trades_df.columns:
+                    trades_sorted = trades_df.sort_values('timestamp')
+                    
+                    fig2 = go.Figure()
+                    fig2.add_trace(go.Scatter(
+                        x=trades_sorted['timestamp'],
+                        y=trades_sorted['balance'],
+                        mode='lines+markers',
+                        name='Balance',
+                        line=dict(color='#8B5CF6', width=3),
+                        marker=dict(size=6)
+                    ))
+                    
+                    fig2.update_layout(
+                        title="Balance Over Time",
+                        xaxis_title="Time",
+                        yaxis_title="Balance (USD)",
+                        template="plotly_dark",
+                        height=450
                     )
-                elif 'timestamp' in col.lower() and 'time' in col.lower():
-                    display_df[col] = pd.to_datetime(display_df[col]).dt.strftime('%Y-%m-%d %H:%M:%S')
+                    
+                    st.plotly_chart(fig2, use_container_width=True)
+                else:
+                    st.info("📊 잔액 데이터를 찾을 수 없습니다.")
             
-            # 컬럼명 변경
-            display_df.columns = [column_mapping.get(col, col.title()) for col in display_df.columns]
+            # 최근 거래 내역
+            st.subheader("📋 Recent Trading Activity")
             
-            st.dataframe(
-                display_df.head(20),  # 최신 20개만 표시
-                use_container_width=True,
-                height=400
-            )
-        else:
-            st.write(trades_df.head(10))
-    else:
-        st.info("📋 거래 데이터를 찾을 수 없습니다.")
+            if not trades_df.empty:
+                # 표시할 컬럼 선택 (데이터에 따라 동적으로)
+                display_columns = []
+                column_mapping = {
+                    'timestamp': 'Time',
+                    'action': 'Action',
+                    'side': 'Side',
+                    'type': 'Type',
+                    'price': 'Price',
+                    'executed_price': 'Executed Price',
+                    'amount': 'Amount',
+                    'quantity': 'Quantity',
+                    'profit': 'Profit/Loss',
+                    'pnl': 'P&L',
+                    'balance': 'Balance',
+                    'fee': 'Fee'
+                }
+                
+                for col in trades_df.columns:
+                    if col in column_mapping:
+                        display_columns.append(col)
+                
+                if display_columns:
+                    display_df = trades_df[display_columns].copy()
+                    
+                    # 데이터 포맷팅
+                    for col in display_df.columns:
+                        if 'price' in col.lower() or 'balance' in col.lower():
+                            display_df[col] = display_df[col].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "N/A")
+                        elif 'profit' in col.lower() or 'pnl' in col.lower():
+                            display_df[col] = display_df[col].apply(
+                                lambda x: f"${x:.2f}" if pd.notna(x) and x >= 0 else f"-${abs(x):.2f}" if pd.notna(x) else "N/A"
+                            )
+                        elif 'timestamp' in col.lower() and 'time' in col.lower():
+                            display_df[col] = pd.to_datetime(display_df[col]).dt.strftime('%Y-%m-%d %H:%M:%S')
+                    
+                    # 컬럼명 변경
+                    display_df.columns = [column_mapping.get(col, col.title()) for col in display_df.columns]
+                    
+                    st.dataframe(
+                        display_df.head(20),  # 최신 20개만 표시
+                        use_container_width=True,
+                        height=400
+                    )
+                else:
+                    st.write(trades_df.head(10))
+            else:
+                st.info("📋 거래 데이터를 찾을 수 없습니다.")
     
-    # 상세 통계
-    if not trades_df.empty:
-        st.markdown("---")
-        st.subheader("📈 Detailed Statistics")
+    with tab2:
+        # 로그 모니터링 탭
+        st.subheader("📋 Real-time Log Monitoring")
         
-        stats_col1, stats_col2, stats_col3 = st.columns(3)
-        
-        with stats_col1:
-            st.write("**📊 Trade Analysis**")
+        if not log_exists:
+            st.error("❌ output.log 파일을 찾을 수 없습니다!")
+            st.info("💡 자동매매 봇을 실행하여 로그 파일을 생성해주세요.")
             
-            # 거래 유형별 분석
-            if 'action' in trades_df.columns:
-                action_counts = trades_df['action'].value_counts()
-                for action, count in action_counts.items():
-                    st.write(f"• {action}: {count}")
+            # 현재 디렉토리의 로그 파일들 표시
+            current_logs = [f for f in os.listdir('.') if f.endswith('.log') or f.endswith('.out')]
+            if current_logs:
+                st.write("📁 현재 디렉토리의 로그 파일들:")
+                for log_file in current_logs:
+                    st.write(f"  • {log_file}")
+        else:
+            # 로그 데이터 로드
+            log_lines_data = read_log_file("output.log", log_lines)
+            log_stats = parse_log_statistics(log_lines_data)
             
-            # 평균 거래 크기
-            if 'amount' in trades_df.columns:
-                avg_amount = trades_df['amount'].mean()
-                st.write(f"• Avg Trade Size: {avg_amount:.4f} ETH")
-        
-        with stats_col2:
-            st.write("**💰 Performance Metrics**")
+            # 로그 통계 표시
+            stat_col1, stat_col2, stat_col3, stat_col4 = st.columns(4)
             
-            profit_col = 'profit' if 'profit' in trades_df.columns else 'pnl' if 'pnl' in trades_df.columns else None
+            with stat_col1:
+                st.metric("📄 Total Lines", log_stats['total_lines'])
             
-            if profit_col:
-                profitable_trades = trades_df[trades_df[profit_col] > 0]
-                losing_trades = trades_df[trades_df[profit_col] < 0]
-                
-                st.write(f"• Profitable: {len(profitable_trades)}")
-                st.write(f"• Losing: {len(losing_trades)}")
-                
-                if len(profitable_trades) > 0:
-                    avg_win = profitable_trades[profit_col].mean()
-                    st.write(f"• Avg Win: ${avg_win:.2f}")
-                
-                if len(losing_trades) > 0:
-                    avg_loss = abs(losing_trades[profit_col].mean())
-                    st.write(f"• Avg Loss: ${avg_loss:.2f}")
-        
-        with stats_col3:
-            st.write("**📈 Best/Worst**")
+            with stat_col2:
+                st.metric("❌ Errors", log_stats['error_count'])
             
-            if profit_col:
-                max_profit = trades_df[profit_col].max()
-                max_loss = trades_df[profit_col].min()
+            with stat_col3:
+                st.metric("⚠️ Warnings", log_stats['warning_count'])
+            
+            with stat_col4:
+                st.metric("💱 Trades", log_stats['trade_count'])
+            
+            st.markdown("---")
+            
+            # 로그 필터링
+            filtered_logs = log_lines_data
+            
+            if log_filter == "Errors Only":
+                filtered_logs = [line for line in log_lines_data if categorize_log_line(line) == 'error']
+            elif log_filter == "Warnings+":
+                filtered_logs = [line for line in log_lines_data if categorize_log_line(line) in ['error', 'warning']]
+            elif log_filter == "Trading Only":
+                filtered_logs = [line for line in log_lines_data if categorize_log_line(line) == 'trade']
+            elif log_filter == "Info+":
+                filtered_logs = [line for line in log_lines_data if categorize_log_line(line) in ['error', 'warning', 'info', 'trade']]
+            
+            # 로그 표시 영역
+            st.subheader(f"📝 Live Logs ({len(filtered_logs)} lines)")
+            
+            # HTML 형식으로 로그 표시
+            log_html = ""
+            for line in filtered_logs[-100:]:  # 최신 100라인만 표시
+                log_html += format_log_line_html(line) + "\n"
+            
+            st.markdown(f'<div class="log-container">{log_html}</div>', unsafe_allow_html=True)
+            
+            # 최근 중요 이벤트 요약
+            if log_stats['error_count'] > 0 or log_stats['warning_count'] > 0:
+                st.markdown("---")
+                st.subheader("⚠️ Recent Issues")
                 
-                st.write(f"• Best Trade: ${max_profit:.2f}")
-                st.write(f"• Worst Trade: ${max_loss:.2f}")
+                error_logs = [line for line in log_lines_data[-50:] if categorize_log_line(line) in ['error', 'warning']]
                 
-                # 샤프 비율 등 추가 메트릭스
-                if len(trades_df) > 1:
-                    returns = trades_df[profit_col].pct_change().dropna()
-                    if len(returns) > 0 and returns.std() != 0:
-                        sharpe = returns.mean() / returns.std() * np.sqrt(252)
-                        st.write(f"• Sharpe Ratio: {sharpe:.2f}")
+                for line in error_logs[-10:]:  # 최근 10개 문제만 표시
+                    category = categorize_log_line(line)
+                    if category == 'error':
+                        st.error(line.strip())
+                    elif category == 'warning':
+                        st.warning(line.strip())
     
     # 푸터
     st.markdown("---")
     st.markdown(
         "<div style='text-align: center; color: #6B7280; font-size: 0.9rem;'>"
-        "🚀 Ethereum Day Trading Bot Dashboard | "
-        f"Database: ethereum_daytrading.db | "
+        "🚀 Ethereum Day Trading Bot Dashboard with Live Log Monitoring | "
+        f"Database: {'✅' if db_exists else '❌'} | "
+        f"Logs: {'✅' if log_exists else '❌'} | "
         f"Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         "</div>",
         unsafe_allow_html=True
