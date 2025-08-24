@@ -1620,7 +1620,7 @@ print("\n=== Enhanced Ethereum Day Trading Bot v2.7 (Optional On-Chain) Started 
 print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 print("Trading Pair:", symbol)
 print("Strategy: Day Trading (5m/15m/1h analysis)")
-print("AI Engine: Google Gemini 1.5 Flash")
+print("AI Engine: Google Gemini 2.5 Flash")
 print("Asset: Ethereum Futures")
 print("Leverage Range: 5-35x (Dynamic)")
 print("SL/TP Range: 10-60% on margin (Dynamic)")
