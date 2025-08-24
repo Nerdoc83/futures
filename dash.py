@@ -227,6 +227,228 @@ def categorize_log_line(line):
     else:
         return 'default'
 
+def extract_position_info(log_lines):
+    """로그에서 포지션 정보 (진입가, 포지션 타입, 레버리지, TP/SL) 추출"""
+    position_data = {
+        'entry_price': None,
+        'position_type': None,  # 'long' or 'short'
+        'leverage': 1,
+        'take_profit': None,
+        'stop_loss': None,
+        'entry_time': None,
+        'is_active': False
+    }
+    
+    # 포지션 관련 패턴들
+    entry_patterns = [
+        r'진입가[:\s]+\$?([0-9,]+\.?[0-9]*)',
+        r'entry\s*price[:\s]+\$?([0-9,]+\.?[0-9]*)',
+        r'매수가[:\s]+\$?([0-9,]+\.?[0-9]*)',
+        r'매도가[:\s]+\$?([0-9,]+\.?[0-9]*)',
+        r'포지션\s*진입[:\s]+\$?([0-9,]+\.?[0-9]*)',
+        r'position\s*opened[:\s]+\$?([0-9,]+\.?[0-9]*)',
+    ]
+    
+    position_patterns = [
+        r'(long|롱|매수|buy)',
+        r'(short|숏|매도|sell)',
+    ]
+    
+    leverage_patterns = [
+        r'레버리지[:\s]*([0-9]+)배?',
+        r'leverage[:\s]*([0-9]+)x?',
+        r'([0-9]+)배\s*레버리지',
+        r'([0-9]+)x\s*leverage',
+    ]
+    
+    # TP/SL 패턴들
+    tp_patterns = [
+        r'TP[:\s]+\$?([0-9,]+\.?[0-9]*)',
+        r'take\s*profit[:\s]+\$?([0-9,]+\.?[0-9]*)',
+        r'익절[:\s]+\$?([0-9,]+\.?[0-9]*)',
+        r'목표가[:\s]+\$?([0-9,]+\.?[0-9]*)',
+        r'target[:\s]+\$?([0-9,]+\.?[0-9]*)',
+        r'T\.P[:\s]+\$?([0-9,]+\.?[0-9]*)',
+    ]
+    
+    sl_patterns = [
+        r'SL[:\s]+\$?([0-9,]+\.?[0-9]*)',
+        r'stop\s*loss[:\s]+\$?([0-9,]+\.?[0-9]*)',
+        r'손절[:\s]+\$?([0-9,]+\.?[0-9]*)',
+        r'스탑[:\s]+\$?([0-9,]+\.?[0-9]*)',
+        r'stop[:\s]+\$?([0-9,]+\.?[0-9]*)',
+        r'S\.L[:\s]+\$?([0-9,]+\.?[0-9]*)',
+    ]
+    
+    close_patterns = [
+        r'포지션\s*청산',
+        r'position\s*closed',
+        r'청산\s*완료',
+        r'포지션\s*종료',
+        r'익절|손절',
+    ]
+    
+    # 최근 로그부터 역순으로 검색 (최신 포지션 정보 우선)
+    for line in reversed(log_lines[-200:]):  # 최근 200줄에서 검색
+        line_lower = line.lower()
+        
+        # 포지션 청산 확인
+        for pattern in close_patterns:
+            if re.search(pattern, line, re.IGNORECASE):
+                position_data['is_active'] = False
+                return position_data  # 청산되었으면 비활성 상태로 반환
+        
+        # 진입가 추출
+        if position_data['entry_price'] is None:
+            for pattern in entry_patterns:
+                match = re.search(pattern, line, re.IGNORECASE)
+                if match:
+                    try:
+                        price_str = match.group(1).replace(',', '')
+                        price = float(price_str)
+                        if 100 <= price <= 10000:  # 합리적한 ETH 가격 범위
+                            position_data['entry_price'] = price
+                            position_data['is_active'] = True
+                            
+                            # 시간 정보도 추출
+                            time_patterns = [
+                                r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})',
+                                r'(\d{2}:\d{2}:\d{2})',
+                            ]
+                            for time_pattern in time_patterns:
+                                time_match = re.search(time_pattern, line)
+                                if time_match:
+                                    try:
+                                        time_str = time_match.group(1)
+                                        if re.match(r'\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}', time_str):
+                                            position_data['entry_time'] = datetime.strptime(time_str, '%Y-%m-%d %H:%M:%S')
+                                        elif re.match(r'\d{2}:\d{2}:\d{2}', time_str):
+                                            today = datetime.now().date()
+                                            position_data['entry_time'] = datetime.combine(today, datetime.strptime(time_str, '%H:%M:%S').time())
+                                        break
+                                    except:
+                                        continue
+                            break
+                    except:
+                        continue
+        
+        # 포지션 타입 추출
+        if position_data['position_type'] is None:
+            for pattern in position_patterns:
+                match = re.search(pattern, line, re.IGNORECASE)
+                if match:
+                    pos_type = match.group(1).lower()
+                    if pos_type in ['long', '롱', '매수', 'buy']:
+                        position_data['position_type'] = 'long'
+                    elif pos_type in ['short', '숏', '매도', 'sell']:
+                        position_data['position_type'] = 'short'
+                    break
+        
+        # 레버리지 추출
+        if position_data['leverage'] == 1:
+            for pattern in leverage_patterns:
+                match = re.search(pattern, line, re.IGNORECASE)
+                if match:
+                    try:
+                        leverage = int(match.group(1))
+                        if 1 <= leverage <= 100:  # 합리적인 레버리지 범위
+                            position_data['leverage'] = leverage
+                            break
+                    except:
+                        continue
+        
+        # TP 추출
+        if position_data['take_profit'] is None:
+            for pattern in tp_patterns:
+                match = re.search(pattern, line, re.IGNORECASE)
+                if match:
+                    try:
+                        tp_str = match.group(1).replace(',', '')
+                        tp = float(tp_str)
+                        if 100 <= tp <= 10000:  # 합리적한 TP 가격 범위
+                            position_data['take_profit'] = tp
+                            break
+                    except:
+                        continue
+        
+        # SL 추출
+        if position_data['stop_loss'] is None:
+            for pattern in sl_patterns:
+                match = re.search(pattern, line, re.IGNORECASE)
+                if match:
+                    try:
+                        sl_str = match.group(1).replace(',', '')
+                        sl = float(sl_str)
+                        if 100 <= sl <= 10000:  # 합리적한 SL 가격 범위
+                            position_data['stop_loss'] = sl
+                            break
+                    except:
+                        continue
+        
+        # 모든 정보가 수집되었으면 반복 중단
+        if (position_data['entry_price'] is not None and 
+            position_data['position_type'] is not None and 
+            position_data['leverage'] != 1 and
+            position_data['take_profit'] is not None and
+            position_data['stop_loss'] is not None):
+            break
+    
+    return position_data
+
+def calculate_tp_sl_progress(entry_price, current_price, take_profit, stop_loss, position_type):
+    """TP/SL 달성률 계산"""
+    if not all([entry_price, current_price, take_profit, stop_loss]):
+        return None, None, None, None
+    
+    if position_type == 'long':
+        # Long 포지션: entry -> current -> TP (상승), entry -> current -> SL (하락)
+        tp_distance_total = take_profit - entry_price
+        tp_distance_current = current_price - entry_price
+        tp_progress = (tp_distance_current / tp_distance_total * 100) if tp_distance_total != 0 else 0
+        
+        sl_distance_total = entry_price - stop_loss
+        sl_distance_current = entry_price - current_price
+        sl_risk = (sl_distance_current / sl_distance_total * 100) if sl_distance_total != 0 else 0
+        
+    elif position_type == 'short':
+        # Short 포지션: entry -> current -> TP (하락), entry -> current -> SL (상승) 
+        tp_distance_total = entry_price - take_profit
+        tp_distance_current = entry_price - current_price
+        tp_progress = (tp_distance_current / tp_distance_total * 100) if tp_distance_total != 0 else 0
+        
+        sl_distance_total = stop_loss - entry_price
+        sl_distance_current = current_price - entry_price
+        sl_risk = (sl_distance_current / sl_distance_total * 100) if sl_distance_total != 0 else 0
+    else:
+        return None, None, None, None
+    
+    # TP까지 남은 거리 및 SL까지 남은 거리
+    tp_remaining = take_profit - current_price if position_type == 'long' else current_price - take_profit
+    sl_remaining = current_price - stop_loss if position_type == 'long' else stop_loss - current_price
+    
+    return tp_progress, sl_risk, tp_remaining, sl_remaining
+
+def calculate_pnl(entry_price, current_price, position_type, leverage):
+    """수익률 계산"""
+    if entry_price is None or current_price is None:
+        return 0, 0
+    
+    if position_type == 'long':
+        price_change_pct = (current_price - entry_price) / entry_price * 100
+    elif position_type == 'short':
+        price_change_pct = (entry_price - current_price) / entry_price * 100
+    else:
+        return 0, 0
+    
+    # 레버리지 적용한 수익률
+    leveraged_pnl_pct = price_change_pct * leverage
+    
+    # 절대 수익 (1000 USDT 기준으로 가정, 실제로는 포지션 크기를 로그에서 추출해야 함)
+    position_size = 1000  # USD
+    pnl_usd = position_size * leveraged_pnl_pct / 100
+    
+    return leveraged_pnl_pct, pnl_usd
+
 def extract_price_from_logs(log_lines, max_prices=30):
     """로그에서 이더리움 가격 정보 추출"""
     price_data = []
@@ -291,8 +513,8 @@ def extract_price_from_logs(log_lines, max_prices=30):
     # 최신 데이터부터 최대 max_prices개 반환
     return price_data[-max_prices:] if len(price_data) > max_prices else price_data
 
-def create_log_price_chart(price_data):
-    """로그에서 추출한 가격 데이터로 차트 생성"""
+def create_log_price_chart(price_data, entry_price=None, take_profit=None, stop_loss=None):
+    """로그에서 추출한 가격 데이터로 차트 생성 (TP/SL 라인 포함)"""
     if not price_data:
         return None
     
@@ -314,8 +536,56 @@ def create_log_price_chart(price_data):
                       '<extra></extra>'
     ))
     
+    # Entry Price 라인 추가
+    if entry_price:
+        fig.add_hline(
+            y=entry_price,
+            line_dash="dash",
+            line_color="#FFD700",  # 금색
+            line_width=2,
+            annotation_text=f"Entry: ${entry_price:.2f}",
+            annotation_position="top right",
+            annotation=dict(
+                bgcolor="rgba(255, 215, 0, 0.8)",
+                bordercolor="#FFD700",
+                borderwidth=1
+            )
+        )
+    
+    # Take Profit 라인 추가
+    if take_profit:
+        fig.add_hline(
+            y=take_profit,
+            line_dash="dot",
+            line_color="#10B981",  # 초록색
+            line_width=2,
+            annotation_text=f"TP: ${take_profit:.2f}",
+            annotation_position="top left",
+            annotation=dict(
+                bgcolor="rgba(16, 185, 129, 0.8)",
+                bordercolor="#10B981",
+                borderwidth=1
+            )
+        )
+    
+    # Stop Loss 라인 추가
+    if stop_loss:
+        fig.add_hline(
+            y=stop_loss,
+            line_dash="dot",
+            line_color="#EF4444",  # 빨간색
+            line_width=2,
+            annotation_text=f"SL: ${stop_loss:.2f}",
+            annotation_position="bottom left",
+            annotation=dict(
+                bgcolor="rgba(239, 68, 68, 0.8)",
+                bordercolor="#EF4444",
+                borderwidth=1
+            )
+        )
+    
     fig.update_layout(
-        title="Real-time ETH Price from Logs",
+        title="Real-time ETH Price with Entry/TP/SL Levels",
         xaxis_title="Time",
         yaxis_title="Price (USD)",
         template="plotly_dark",
@@ -715,6 +985,17 @@ def main():
             ["All", "Errors Only", "Warnings+", "Trading Only", "Info+"]
         )
         
+        # 포지션 설정
+        st.subheader("📊 Position Settings")
+        show_tp_sl = st.checkbox("Show TP/SL Lines", value=True)
+        show_entry = st.checkbox("Show Entry Line", value=True)
+        
+        # 포지션 정보 표시 방식
+        position_display = st.selectbox(
+            "Position Display",
+            ["Detailed", "Compact", "Minimal"]
+        )
+        
         if auto_refresh:
             time.sleep(30)
             st.rerun()
@@ -953,11 +1234,200 @@ def main():
             log_lines_data = read_log_file("output.log", log_lines)
             log_stats = parse_log_statistics(log_lines_data)
             
-            # 상단에 가격 차트 추가
+            # 포지션 정보 추출
+            position_info = extract_position_info(log_lines_data)
+            
+            # 가격 데이터 추출
             price_data = extract_price_from_logs(log_lines_data, 50)
+            current_price = price_data[-1]['price'] if price_data else None
+            
+            # 포지션 정보 표시
+            if position_info['is_active'] and position_info['entry_price']:
+                if position_display == "Detailed":
+                    st.subheader("📈 Active Position Status")
+                elif position_display == "Compact":
+                    st.subheader("📈 Position")
+                else:  # Minimal
+                    st.subheader("📊 Pos")
+                
+                # 수익률 계산
+                pnl_pct, pnl_usd = calculate_pnl(
+                    position_info['entry_price'], 
+                    current_price, 
+                    position_info['position_type'], 
+                    position_info['leverage']
+                )
+                
+                # TP/SL 진행률 계산
+                tp_progress, sl_risk, tp_remaining, sl_remaining = calculate_tp_sl_progress(
+                    position_info['entry_price'],
+                    current_price,
+                    position_info['take_profit'],
+                    position_info['stop_loss'],
+                    position_info['position_type']
+                )
+                
+                # 표시 방식에 따른 메트릭 구성
+                if position_display == "Minimal":
+                    # 간단한 1줄 표시
+                    min_col1, min_col2, min_col3 = st.columns(3)
+                    with min_col1:
+                        position_emoji = "🟢" if position_info['position_type'] == 'long' else "🔴"
+                        st.metric("Position", f"{position_emoji} {position_info['position_type'].upper()}")
+                    with min_col2:
+                        st.metric("Entry", f"${position_info['entry_price']:,.2f}")
+                    with min_col3:
+                        pnl_color = "normal" if pnl_pct >= 0 else "inverse"
+                        st.metric("P&L", f"{pnl_pct:+.2f}%", delta_color=pnl_color)
+                
+                else:
+                    # Detailed 또는 Compact 표시
+                    pos_col1, pos_col2, pos_col3, pos_col4, pos_col5 = st.columns(5)
+                    
+                    with pos_col1:
+                        st.metric(
+                            label="🎯 Entry Price",
+                            value=f"${position_info['entry_price']:,.2f}"
+                        )
+                    
+                    with pos_col2:
+                        position_emoji = "🟢" if position_info['position_type'] == 'long' else "🔴"
+                        st.metric(
+                            label="📊 Position",
+                            value=f"{position_emoji} {position_info['position_type'].upper()}"
+                        )
+                    
+                    with pos_col3:
+                        st.metric(
+                            label="⚡ Leverage",
+                            value=f"{position_info['leverage']}x"
+                        )
+                    
+                    with pos_col4:
+                        if current_price:
+                            st.metric(
+                                label="💰 Current Price",
+                                value=f"${current_price:,.2f}",
+                                delta=f"{current_price - position_info['entry_price']:+.2f}"
+                            )
+                        else:
+                            st.metric(
+                                label="💰 Current Price",
+                                value="N/A"
+                            )
+                    
+                    with pos_col5:
+                        pnl_color = "normal" if pnl_pct >= 0 else "inverse"
+                        st.metric(
+                            label="📈 P&L",
+                            value=f"{pnl_pct:+.2f}%",
+                            delta=f"${pnl_usd:+.2f}",
+                            delta_color=pnl_color
+                        )
+                    
+                    # Detailed 모드에서만 TP/SL 정보 표시
+                    if position_display == "Detailed" and (position_info['take_profit'] or position_info['stop_loss']):
+                        st.markdown("**🎯 Take Profit & Stop Loss**")
+                        
+                        tp_sl_col1, tp_sl_col2, tp_sl_col3, tp_sl_col4 = st.columns(4)
+                        
+                        with tp_sl_col1:
+                            if position_info['take_profit']:
+                                st.metric(
+                                    label="🟢 Take Profit",
+                                    value=f"${position_info['take_profit']:,.2f}",
+                                    delta=f"{tp_remaining:+.2f}" if tp_remaining is not None else None
+                                )
+                            else:
+                                st.metric(label="🟢 Take Profit", value="Not Set")
+                        
+                        with tp_sl_col2:
+                            if position_info['stop_loss']:
+                                st.metric(
+                                    label="🔴 Stop Loss",
+                                    value=f"${position_info['stop_loss']:,.2f}",
+                                    delta=f"{sl_remaining:+.2f}" if sl_remaining is not None else None
+                                )
+                            else:
+                                st.metric(label="🔴 Stop Loss", value="Not Set")
+                        
+                        with tp_sl_col3:
+                            if tp_progress is not None:
+                                tp_color = "normal" if tp_progress >= 0 else "inverse"
+                                st.metric(
+                                    label="📊 TP Progress",
+                                    value=f"{tp_progress:.1f}%",
+                                    delta_color=tp_color
+                                )
+                            else:
+                                st.metric(label="📊 TP Progress", value="N/A")
+                        
+                        with tp_sl_col4:
+                            if sl_risk is not None:
+                                sl_color = "inverse" if sl_risk > 50 else "normal"
+                                st.metric(
+                                    label="⚠️ SL Risk",
+                                    value=f"{sl_risk:.1f}%",
+                                    delta_color=sl_color
+                                )
+                            else:
+                                st.metric(label="⚠️ SL Risk", value="N/A")
+                
+                # 포지션 상태 종합 표시 (Detailed 모드에서만)
+                if position_display == "Detailed":
+                    status_messages = []
+                    
+                    # P&L 상태
+                    if pnl_pct >= 0:
+                        status_messages.append(f"🟢 Position in Profit: {pnl_pct:+.2f}% ({pnl_usd:+.2f} USD)")
+                    else:
+                        status_messages.append(f"🔴 Position in Loss: {pnl_pct:+.2f}% ({pnl_usd:+.2f} USD)")
+                    
+                    # TP/SL 경고
+                    if tp_progress is not None and tp_progress >= 80:
+                        status_messages.append(f"🎯 Near Take Profit! {tp_progress:.1f}% achieved")
+                    elif sl_risk is not None and sl_risk >= 80:
+                        status_messages.append(f"⚠️ Approaching Stop Loss! {sl_risk:.1f}% risk")
+                    
+                    # 메시지 표시
+                    for message in status_messages:
+                        if "Profit" in message or "Near Take" in message:
+                            st.success(message)
+                        elif "Loss" in message or "Stop Loss" in message:
+                            st.error(message)
+                        else:
+                            st.info(message)
+                    
+                    # 포지션 진입 시간 표시 (있는 경우)
+                    if position_info['entry_time']:
+                        time_since_entry = datetime.now() - position_info['entry_time']
+                        hours = int(time_since_entry.total_seconds() // 3600)
+                        minutes = int((time_since_entry.total_seconds() % 3600) // 60)
+                        st.info(f"⏰ Position Duration: {hours}h {minutes}m")
+                
+                st.markdown("---")
+            
+            else:
+                st.info("📊 No Active Position Found")
+                st.markdown("---")
+            
+            # 가격 차트 표시
             if price_data:
                 st.subheader("📈 Real-time Price Tracking")
-                fig_price = create_log_price_chart(price_data)
+                
+                # 사이드바 설정에 따라 TP/SL 표시 여부 결정
+                entry_to_show = position_info['entry_price'] if (position_info['is_active'] and show_entry) else None
+                tp_to_show = position_info['take_profit'] if (position_info['is_active'] and show_tp_sl) else None
+                sl_to_show = position_info['stop_loss'] if (position_info['is_active'] and show_tp_sl) else None
+                
+                # TP/SL 정보와 함께 차트 생성
+                fig_price = create_log_price_chart(
+                    price_data,
+                    entry_price=entry_to_show,
+                    take_profit=tp_to_show,
+                    stop_loss=sl_to_show
+                )
+                
                 if fig_price:
                     st.plotly_chart(fig_price, use_container_width=True)
                     
