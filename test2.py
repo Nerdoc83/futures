@@ -833,7 +833,7 @@ gemini_api_key = os.getenv("GEMINI_API_KEY")
 if not gemini_api_key:
     raise ValueError("CRITICAL: GEMINI_API_KEY must be set.")
 genai.configure(api_key=gemini_api_key)
-model = genai.GenerativeModel('gemini-1.5-flash')
+model = genai.GenerativeModel('gemini-2.5-flash')
 
 # SQLite 데이터베이스 설정
 DB_FILE = "ethereum_daytrading.db"
