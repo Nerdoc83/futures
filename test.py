@@ -1091,6 +1091,10 @@ def fetch_multi_timeframe_data(emergency_mode=False):
                     "atr": float(df['ATR'].iloc[-1]) if not pd.isna(df['ATR'].iloc[-1]) else (df['high'].iloc[-1] - df['low'].iloc[-1]) * 0.02,
                     "volume": float(df['volume'].iloc[-1])
                 }
+
+                if trend_analysis:
+                    current_indicators['trend_analysis'] = trend_analysis
+                    
             except IndexError as idx_error:
                 print(f"Index error in {tf_name} indicators extraction: {idx_error}")
                 continue
