@@ -1662,30 +1662,39 @@ ANALYSIS PROCESS:
    - COUNTER_TREND: Short-term signal opposes long-term trend → Low conviction scalping, smaller position, tight TP/SL
    - NEUTRAL: Unclear trends → Medium conviction, standard approach
 3. MARKET EVENTS: Check if sudden event detected - adjust strategy accordingly
-4. TIMEFRAME PRIORITY: If 1m data available (emergency mode), prioritize 1m signals for ultra-fast response
+4. TIMEFRAME PRIORITY: 
+    -If 1m data available (emergency mode), prioritize 1m signals for ultra-fast response
+    -For day trading, prioritize signals from the 5m and 15m charts. The 1h chart should be used as a secondary confirmation, but a strong 5m/15m signal can be acted upon even if the 1h signal is not yet fully formed.
 5. NEWS SENTIMENT: BULLISH news supports LONG, BEARISH supports SHORT
 6. MOMENTUM: Use RSI, MACD, Stochastic for entry timing
 7. MARKET SENTIMENT: Funding rate, OI, L/S ratio for contrarian signals
 8. ETH VOLATILITY: Can move 5-10% in hours, 1-3% in minutes during events
 
 TREND STRATEGY RULES:
-A) WITH_TREND (追势交易):
+A) WITH_TREND :
    - When short-term signal aligns with daily/weekly trend
    - High conviction: 0.4-0.7 margin, 20-40x leverage
    - Wider TP: 3.5-5.0 * ATR (let profits run with trend)
    - Standard SL: 1.5-2.0 * ATR
 
-B) COUNTER_TREND (逆势交易/短线回调):
+B) COUNTER_TREND :
    - When short-term signal opposes daily/weekly trend
    - Low conviction scalping: 0.1-0.25 margin, 8-15x leverage  
    - Tight TP: 1.5-2.5 * ATR (quick profits against the tide)
    - Tight SL: 1.0-1.5 * ATR (fast exit if wrong)
 
-C) NEUTRAL (中性):
+C) NEUTRAL :
    - Unclear or sideways trends
    - Medium conviction: 0.2-0.4 margin, 10-25x leverage
    - Standard TP: 2.5-3.5 * ATR
    - Standard SL: 1.2-1.8 * ATR
+
+D) SIDEWAYS / NEUTRAL STRATEGY:
+   - When long-term trends are "SIDEWAYS" or "UNKNOWN".
+   - Focus on mean-reversion (range trading) on the 15m chart.
+   - Enter LONG when short-term indicators (RSI < 35, Stoch < 25) show oversold conditions.
+   - Enter SHORT when indicators show overbought (RSI > 65, Stoch > 75).
+   - This is a scalping strategy: use COUNTER_TREND risk parameters (low leverage, small size, tight TP/SL).
 
 POSITION SIZING MODIFIERS:
 - Strong trends (STRONG_UPTREND/STRONG_DOWNTREND): +0.1 to position size
