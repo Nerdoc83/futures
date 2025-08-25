@@ -1,51 +1,53 @@
 """
-AI 멀티코인 데이트레이딩 봇 - Gemini + 고급 지표 (v3.0 - Multi-Coin Selection)
+AI 멀티코인 데이트레이딩 봇 - Gemini + 고급 지표 (v4.0 - Multi-Position + 1M + 4H Timeout)
 --------------------------------------------------------
 기능:
-- 멀티코인 스캔 (BTC, ETH, SOL) - 최고 확률 기회 선택
-- 데이트레이딩 최적화 (5분, 15분, 1시간 차트)
+- 멀티코인 스캔 (BTC, ETH, SOL) - 최고 확률 기회 선택 또는 동시 매수
+- 데이트레이딩 최적화 (1분, 5분, 15분, 1시간 차트)
 - 고급 모멘텀 지표 (RSI, MACD, Stochastic, Williams %R)
 - 시장 심리 분석 (펀딩비, 미결제약정, 롱숏비율, 청산 데이터)
 - Gemini API 기반 AI 분석
 - 동적 레버리지 및 포지션 사이징 (3-50배)
 - 개선된 SL/TP 설정 (원금 대비 8-70% 범위)
+- 4시간 타임아웃 (수익 포지션 자동 정리)
 - 24시간 무제한 거래
-- 최소 투자금액: 100 USDT
+- 최소 투자금액: 50-100 USDT
 --------------------------------------------------------
 """
-# ===== 필요한 라이브러리 임포트 (기존과 동일) =====
-import ccxt  # 암호화폐 거래소 API 라이브러리
-import os  # 환경 변수 및 파일 시스템 접근
-import math  # 수학 연산
-import time  # 시간 지연 및 타임스탬프
-import pandas as pd  # 데이터 분석 및 조작
-import numpy as np  # 수치 계산
-import requests  # HTTP 요청
-import json  # JSON 데이터 처리
-import sqlite3  # 로컬 데이터베이스
-from dotenv import load_dotenv  # 환경 변수 로드
-load_dotenv()  # .env 파일에서 환경 변수 로드
-import google.generativeai as genai  # Gemini API
-from datetime import datetime  # 날짜 및 시간 처리
 
-# ===== 멀티코인 설정 (추가) =====
+# ===== 필요한 라이브러리 임포트 =====
+import ccxt
+import os
+import math
+import time
+import pandas as pd
+import numpy as np
+import requests
+import json
+import sqlite3
+from dotenv import load_dotenv
+load_dotenv()
+import google.generativeai as genai
+from datetime import datetime
+
+# ===== 멀티코인 설정 =====
 TRADING_PAIRS = {
     "BTC": {
         "symbol": "BTC/USDT",
         "binance_symbol": "BTCUSDT",
         "min_investment": 100,
         "leverage_range": (5, 50),
-        "volatility_factor": 1.0,  # 기준
-        "sl_range": (0.08, 0.25),  # BTC는 상대적으로 안정적
+        "volatility_factor": 1.0,
+        "sl_range": (0.08, 0.25),
         "tp_range": (0.15, 0.50),
-        "precision": 5  # 소수점 자리수
+        "precision": 5
     },
     "ETH": {
         "symbol": "ETH/USDT", 
         "binance_symbol": "ETHUSDT",
         "min_investment": 100,
         "leverage_range": (5, 35),
-        "volatility_factor": 1.3,  # BTC보다 변동성 높음
+        "volatility_factor": 1.3,
         "sl_range": (0.10, 0.30),
         "tp_range": (0.20, 0.60),
         "precision": 4
@@ -55,14 +57,32 @@ TRADING_PAIRS = {
         "binance_symbol": "SOLUSDT", 
         "min_investment": 50,
         "leverage_range": (3, 25),
-        "volatility_factor": 1.8,  # 가장 변동성 높음
+        "volatility_factor": 1.8,
         "sl_range": (0.12, 0.35),
         "tp_range": (0.25, 0.70),
         "precision": 3
     }
 }
 
-# ===== 모멘텀 지표 계산 함수들 (기존과 동일) =====
+# ===== 설정 및 초기화 =====
+api_key = os.getenv("BINANCE_API_KEY")
+secret = os.getenv("BINANCE_SECRET_KEY")
+exchange = ccxt.binance({
+    'apiKey': api_key,
+    'secret': secret,
+    'enableRateLimit': True,
+    'options': {
+        'defaultType': 'future',
+        'adjustForTimeDifference': True
+    }
+})
+
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+model = genai.GenerativeModel('gemini-2.5-flash')
+
+DB_FILE = "multi_coin_daytrading.db"
+
+# ===== 모멘텀 지표 계산 함수들 =====
 def calculate_rsi(prices, window=14):
     """RSI 계산 함수"""
     delta = prices.diff()
@@ -106,34 +126,12 @@ def calculate_atr(df, window=14):
     atr = true_range.rolling(window=window).mean()
     return atr
 
-# ===== 설정 및 초기화 (기존과 동일하되 심볼 제거) =====
-# 바이낸스 API 설정
-api_key = os.getenv("BINANCE_API_KEY")
-secret = os.getenv("BINANCE_SECRET_KEY")
-exchange = ccxt.binance({
-    'apiKey': api_key,
-    'secret': secret,
-    'enableRateLimit': True,
-    'options': {
-        'defaultType': 'future',
-        'adjustForTimeDifference': True
-    }
-})
-
-# Gemini API 설정
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-model = genai.GenerativeModel('gemini-2.5-flash')
-
-# SQLite 데이터베이스 설정
-DB_FILE = "multi_coin_daytrading.db"  # 멀티코인용 데이터베이스 파일
-
-# ===== 데이터베이스 관련 함수 (기존 로직 + coin_symbol 필드 추가) =====
+# ===== 데이터베이스 관련 함수 =====
 def setup_database():
     """데이터베이스 및 필요한 테이블 생성"""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     
-    # 거래 기록 테이블 (coin_symbol 필드 추가)
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS trades (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -157,7 +155,6 @@ def setup_database():
     )
     ''')
     
-    # AI 분석 결과 테이블 (coin_symbol 및 multi_coin_scores 필드 추가)
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS ai_analysis (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -183,7 +180,7 @@ def setup_database():
     print("멀티코인 데이터베이스 설정 완료")
 
 def save_ai_analysis(analysis_data, trade_id=None):
-    """AI 분석 결과를 데이터베이스에 저장 (멀티코인 스코어 포함)"""
+    """AI 분석 결과를 데이터베이스에 저장"""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     
@@ -216,7 +213,7 @@ def save_ai_analysis(analysis_data, trade_id=None):
     return analysis_id
 
 def save_trade(trade_data, coin_symbol):
-    """거래 정보를 데이터베이스에 저장 (코인 심볼 포함)"""
+    """거래 정보를 데이터베이스에 저장"""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     
@@ -245,93 +242,8 @@ def save_trade(trade_data, coin_symbol):
     conn.close()
     return trade_id
 
-def check_trade_timeout():
-    """4시간이 지난 수익 거래를 확인하고 타임아웃 처리"""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    
-    # 4시간 이상 지난 OPEN 거래 찾기
-    cursor.execute('''
-    SELECT id, coin_symbol, action, entry_price, amount, leverage
-    FROM trades
-    WHERE status = 'OPEN' 
-    AND datetime(timestamp) <= datetime('now', '-4 hours')
-    ''')
-    
-    timeout_trades = cursor.fetchall()
-    conn.close()
-    
-    for trade in timeout_trades:
-        trade_id, coin_symbol, action, entry_price, amount, leverage = trade
-        
-        try:
-            # 현재 가격 가져오기
-            coin_config = TRADING_PAIRS.get(coin_symbol)
-            if not coin_config:
-                continue
-                
-            current_price = exchange.fetch_ticker(coin_config['symbol'])['last']
-            
-            # 수익 여부 확인
-            is_profitable = False
-            if action == 'long' and current_price > entry_price:
-                is_profitable = True
-            elif action == 'short' and current_price < entry_price:
-                is_profitable = True
-            
-            if is_profitable:
-                print(f"\n=== 4시간 타임아웃: {coin_symbol} {action.upper()} 수익 포지션 정리 ===")
-                print(f"Entry: ${entry_price:,.2f}, Current: ${current_price:,.2f}")
-                
-                # 기존 주문들 취소
-                try:
-                    open_orders = exchange.fetch_open_orders(coin_config['symbol'])
-                    for order in open_orders:
-                        exchange.cancel_order(order['id'], coin_config['symbol'])
-                    print(f"기존 SL/TP 주문 취소됨")
-                except Exception as e:
-                    print(f"주문 취소 오류: {e}")
-                
-                # 포지션 정리 (시장가 주문)
-                try:
-                    if action == 'long':
-                        exchange.create_market_sell_order(coin_config['symbol'], amount)
-                    else:  # short
-                        exchange.create_market_buy_order(coin_config['symbol'], amount)
-                    
-                    # 수익률 계산
-                    if action == 'long':
-                        profit_loss = (current_price - entry_price) * amount
-                        profit_loss_percentage = ((current_price / entry_price) - 1) * leverage * 100
-                    else:  # short
-                        profit_loss = (entry_price - current_price) * amount
-                        profit_loss_percentage = ((entry_price / current_price) - 1) * leverage * 100
-                    
-                    # 데이터베이스 업데이트
-                    update_trade_status(
-                        trade_id,
-                        'CLOSED_TIMEOUT',
-                        exit_price=current_price,
-                        exit_timestamp=datetime.now().isoformat(),
-                        profit_loss=profit_loss,
-                        profit_loss_percentage=profit_loss_percentage
-                    )
-                    
-                    print(f"타임아웃 정리 완료: P/L ${profit_loss:,.2f} ({profit_loss_percentage:.2f}%)")
-                    print("=== 새로운 스캔을 시작합니다 ===")
-                    
-                except Exception as e:
-                    print(f"포지션 정리 오류: {e}")
-            else:
-                print(f"{coin_symbol} {action} 포지션이 손실 상태이므로 타임아웃 처리하지 않음")
-                
-        except Exception as e:
-            print(f"타임아웃 체크 오류 ({coin_symbol}): {e}")
-    
-    return len(timeout_trades)
-
 def update_trade_status(trade_id, status, exit_price=None, exit_timestamp=None, profit_loss=None, profit_loss_percentage=None):
-    """거래 상태를 업데이트합니다 (기존과 동일)"""
+    """거래 상태를 업데이트합니다"""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     
@@ -361,8 +273,8 @@ def update_trade_status(trade_id, status, exit_price=None, exit_timestamp=None, 
     conn.commit()
     conn.close()
 
-def get_latest_open_trade():
-    """가장 최근의 열린 거래 정보를 가져옵니다 (코인 심볼 포함)"""
+def get_all_open_trades():
+    """모든 열린 거래 정보를 가져옵니다"""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     
@@ -371,14 +283,14 @@ def get_latest_open_trade():
     FROM trades
     WHERE status = 'OPEN'
     ORDER BY timestamp DESC
-    LIMIT 1
     ''')
     
-    result = cursor.fetchone()
+    results = cursor.fetchall()
     conn.close()
     
-    if result:
-        return {
+    open_trades = []
+    for result in results:
+        open_trades.append({
             'id': result[0],
             'coin_symbol': result[1],
             'action': result[2],
@@ -387,11 +299,12 @@ def get_latest_open_trade():
             'leverage': result[5],
             'sl_price': result[6],
             'tp_price': result[7]
-        }
-    return None
+        })
+    
+    return open_trades
 
 def get_trade_summary(days=7):
-    """지정된 일수 동안의 거래 요약 정보를 가져옵니다 (기존과 동일)"""
+    """지정된 일수 동안의 거래 요약 정보를 가져옵니다"""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     
@@ -421,7 +334,7 @@ def get_trade_summary(days=7):
     return None
 
 def get_historical_trading_data(limit=5):
-    """과거 거래 내역 가져오기 (코인별)"""
+    """과거 거래 내역 가져오기"""
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
@@ -446,7 +359,7 @@ def get_historical_trading_data(limit=5):
     return historical_data
 
 def get_performance_metrics():
-    """거래 성과 메트릭스를 계산합니다 (기존과 동일)"""
+    """거래 성과 메트릭스를 계산합니다"""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     
@@ -479,17 +392,101 @@ def get_performance_metrics():
     
     return metrics
 
-# ===== 데이터 수집 함수 (기존 로직을 코인별로 적용) =====
+def check_trade_timeout():
+    """4시간이 지난 수익 거래를 확인하고 타임아웃 처리"""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+    SELECT id, coin_symbol, action, entry_price, amount, leverage
+    FROM trades
+    WHERE status = 'OPEN' 
+    AND datetime(timestamp) <= datetime('now', '-4 hours')
+    ''')
+    
+    timeout_trades = cursor.fetchall()
+    conn.close()
+    
+    timeout_count = 0
+    
+    for trade in timeout_trades:
+        trade_id, coin_symbol, action, entry_price, amount, leverage = trade
+        
+        try:
+            coin_config = TRADING_PAIRS.get(coin_symbol)
+            if not coin_config:
+                continue
+                
+            current_price = exchange.fetch_ticker(coin_config['symbol'])['last']
+            
+            is_profitable = False
+            if action == 'long' and current_price > entry_price:
+                is_profitable = True
+            elif action == 'short' and current_price < entry_price:
+                is_profitable = True
+            
+            if is_profitable:
+                print(f"\n=== 4시간 타임아웃: {coin_symbol} {action.upper()} 수익 포지션 정리 ===")
+                print(f"Entry: ${entry_price:,.2f}, Current: ${current_price:,.2f}")
+                
+                try:
+                    open_orders = exchange.fetch_open_orders(coin_config['symbol'])
+                    for order in open_orders:
+                        exchange.cancel_order(order['id'], coin_config['symbol'])
+                    print(f"기존 SL/TP 주문 취소됨")
+                except Exception as e:
+                    print(f"주문 취소 오류: {e}")
+                
+                try:
+                    if action == 'long':
+                        exchange.create_market_sell_order(coin_config['symbol'], amount)
+                    else:
+                        exchange.create_market_buy_order(coin_config['symbol'], amount)
+                    
+                    if action == 'long':
+                        profit_loss = (current_price - entry_price) * amount
+                        profit_loss_percentage = ((current_price / entry_price) - 1) * leverage * 100
+                    else:
+                        profit_loss = (entry_price - current_price) * amount
+                        profit_loss_percentage = ((entry_price / current_price) - 1) * leverage * 100
+                    
+                    update_trade_status(
+                        trade_id,
+                        'CLOSED_TIMEOUT',
+                        exit_price=current_price,
+                        exit_timestamp=datetime.now().isoformat(),
+                        profit_loss=profit_loss,
+                        profit_loss_percentage=profit_loss_percentage
+                    )
+                    
+                    print(f"타임아웃 정리 완료: P/L ${profit_loss:,.2f} ({profit_loss_percentage:.2f}%)")
+                    timeout_count += 1
+                    
+                except Exception as e:
+                    print(f"포지션 정리 오류: {e}")
+            else:
+                print(f"{coin_symbol} {action} 포지션이 손실 상태이므로 타임아웃 처리하지 않음")
+                
+        except Exception as e:
+            print(f"타임아웃 체크 오류 ({coin_symbol}): {e}")
+    
+    if timeout_count > 0:
+        print("=== 타임아웃 정리 완료, 새로운 스캔을 시작합니다 ===")
+    
+    return timeout_count
+
+# ===== 데이터 수집 함수 =====
 def fetch_multi_timeframe_data_for_coin(symbol):
     """단일 코인의 멀티 타임프레임 데이터 수집"""
     timeframes = {
-        "3m": {"timeframe": "3m", "limit": 120},   # 6시간 데이터
-        "5m": {"timeframe": "5m", "limit": 100},   # 8시간 20분 데이터
-        "15m": {"timeframe": "15m", "limit": 96},  # 24시간 데이터
-        "1h": {"timeframe": "1h", "limit": 48}     # 48시간 데이터
+        "1m": {"timeframe": "1m", "limit": 120},
+        "5m": {"timeframe": "5m", "limit": 100},
+        "15m": {"timeframe": "15m", "limit": 96},
+        "1h": {"timeframe": "1h", "limit": 48}
     }
     
     multi_tf_data = {}
+    coin_name = symbol.split('/')[0]
     
     for tf_name, tf_params in timeframes.items():
         try:
@@ -499,55 +496,54 @@ def fetch_multi_timeframe_data_for_coin(symbol):
                 limit=tf_params["limit"]
             )
             
+            if not ohlcv or len(ohlcv) < 20:
+                print(f"Insufficient {tf_name} data for {symbol}")
+                continue
+            
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             
-            # ===== 모멘텀 지표 계산 (기존과 동일) =====
-            # RSI (14, 21)
+            # 모멘텀 지표 계산
             df['RSI_14'] = calculate_rsi(df['close'], window=14)
             df['RSI_21'] = calculate_rsi(df['close'], window=21)
             
-            # MACD
             macd, signal, histogram = calculate_macd(df['close'])
             df['MACD'] = macd
             df['MACD_signal'] = signal
             df['MACD_histogram'] = histogram
             
-            # Stochastic Oscillator
             stoch_k, stoch_d = calculate_stochastic(df['high'], df['low'], df['close'])
             df['Stoch_K'] = stoch_k
             df['Stoch_D'] = stoch_d
             
-            # Williams %R
             df['Williams_R'] = calculate_williams_r(df['high'], df['low'], df['close'])
-            
-            # ATR (변동성 측정)
             df['ATR'] = calculate_atr(df)
             
-            # NaN 값 제거
             df.dropna(inplace=True)
             
-            # 토큰 절약을 위해 최근 데이터와 핵심 지표만 저장
+            if len(df) < 5:
+                print(f"Insufficient valid {tf_name} data for {symbol} after indicator calculation")
+                continue
+            
+            latest_row = df.iloc[-1]
             current_indicators = {
-                "current_price": float(df['close'].iloc[-1]),
-                "rsi_14": float(df['RSI_14'].iloc[-1]),
-                "rsi_21": float(df['RSI_21'].iloc[-1]),
-                "macd": float(df['MACD'].iloc[-1]),
-                "macd_signal": float(df['MACD_signal'].iloc[-1]),
-                "macd_histogram": float(df['MACD_histogram'].iloc[-1]),
-                "stoch_k": float(df['Stoch_K'].iloc[-1]),
-                "stoch_d": float(df['Stoch_D'].iloc[-1]),
-                "williams_r": float(df['Williams_R'].iloc[-1]),
-                "atr": float(df['ATR'].iloc[-1]),
-                "volume": float(df['volume'].iloc[-1])
+                "current_price": float(latest_row['close']),
+                "rsi_14": float(latest_row['RSI_14']),
+                "rsi_21": float(latest_row['RSI_21']),
+                "macd": float(latest_row['MACD']),
+                "macd_signal": float(latest_row['MACD_signal']),
+                "macd_histogram": float(latest_row['MACD_histogram']),
+                "stoch_k": float(latest_row['Stoch_K']),
+                "stoch_d": float(latest_row['Stoch_D']),
+                "williams_r": float(latest_row['Williams_R']),
+                "atr": float(latest_row['ATR']),
+                "volume": float(latest_row['volume'])
             }
             
-            # JSON 직렬화 가능한 형태로 최근 캔들 데이터 변환
             recent_candles = df.tail(5).copy()
             recent_candles['timestamp'] = recent_candles['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
             recent_candles_dict = recent_candles.to_dict('records')
             
-            # float64를 일반 float로 변환
             for candle in recent_candles_dict:
                 for key, value in candle.items():
                     if isinstance(value, (np.integer, np.floating)):
@@ -560,12 +556,15 @@ def fetch_multi_timeframe_data_for_coin(symbol):
                 "recent_candles": recent_candles_dict
             }
             
+            print(f"Collected {coin_name} {tf_name} data with momentum indicators: {len(df)} candles")
+            
         except Exception as e:
             print(f"Error fetching {symbol} {tf_name} data: {e}")
+            continue
     
     return multi_tf_data
 
-# ===== 시장 심리 지표 수집 함수 (기존 로직을 코인별로 적용) =====
+# ===== 시장 심리 지표 수집 함수 =====
 def fetch_funding_rate_for_symbol(binance_symbol):
     """특정 코인의 펀딩비 데이터 수집"""
     try:
@@ -600,7 +599,6 @@ def fetch_open_interest_for_symbol(binance_symbol):
             current_data = response.json()
             current_oi = float(current_data.get('openInterest', 0))
             
-            # 과거 데이터도 가져오기 (24시간 전 비교용)
             url_historical = "https://fapi.binance.com/futures/data/openInterestHist"
             params_hist = {
                 'symbol': binance_symbol,
@@ -690,7 +688,7 @@ def fetch_liquidation_data_for_symbol(binance_symbol):
             total_long_liq = sum([float(order['executedQty']) for order in long_liquidations])
             total_short_liq = sum([float(order['executedQty']) for order in short_liquidations])
             
-            liq_ratio = total_long_liq / (total_short_liq + 0.0001)  # 0으로 나누기 방지
+            liq_ratio = total_long_liq / (total_short_liq + 0.0001)
             
             return {
                 "long_liquidations": total_long_liq,
@@ -717,34 +715,99 @@ def fetch_market_sentiment_for_coin(binance_symbol):
         "liquidations": liquidation_data
     }
 
-# ===== 멀티코인 데이터 통합 수집 함수 =====
+# ===== 객관적 스코어링 함수 추가 =====
+def calculate_objective_score(coin_data, coin_name):
+    """객관적 지표 기반 스코어 계산 (0-100점)"""
+    score = 0
+    
+    try:
+        # 5분봉 데이터를 기준으로 사용 (가장 신뢰성 높음)
+        if '5m' not in coin_data['technical_data'] or 'current_indicators' not in coin_data['technical_data']['5m']:
+            return 0
+            
+        indicators = coin_data['technical_data']['5m']['current_indicators']
+        
+        # RSI 오버솔드/오버봇 (40점 만점)
+        rsi_14 = indicators.get('rsi_14', 50)
+        if rsi_14 < 30:  # 오버솔드 (매수 신호)
+            score += 20
+            print(f"{coin_name} RSI 오버솔드: {rsi_14:.1f} (+20점)")
+        elif rsi_14 > 70:  # 오버봇 (매도 신호) 
+            score += 20
+            print(f"{coin_name} RSI 오버봇: {rsi_14:.1f} (+20점)")
+        
+        # MACD 크로스오버 (30점 만점)
+        macd = indicators.get('macd', 0)
+        macd_signal = indicators.get('macd_signal', 0)
+        if macd > macd_signal:  # 골든 크로스 (매수 신호)
+            score += 15
+            print(f"{coin_name} MACD 골든크로스 (+15점)")
+        
+        # 추가 지표들 (향후 확장 가능)
+        # Williams %R 극값
+        williams_r = indicators.get('williams_r', -50)
+        if williams_r < -80:  # 과매도
+            score += 10
+            print(f"{coin_name} Williams %R 과매도: {williams_r:.1f} (+10점)")
+        elif williams_r > -20:  # 과매수
+            score += 10
+            print(f"{coin_name} Williams %R 과매수: {williams_r:.1f} (+10점)")
+            
+        # 볼륨 확인 (거래량이 평소보다 높으면 가점)
+        volume = indicators.get('volume', 0)
+        if volume > 0:  # 볼륨이 있으면 신뢰성 가점
+            score += 5
+            
+        print(f"{coin_name} 객관적 스코어: {score}/100")
+        return min(score, 100)
+        
+    except Exception as e:
+        print(f"Error calculating objective score for {coin_name}: {e}")
+        return 0
+
+# ===== 멀티코인 데이터 통합 수집 함수 (스코어링 추가) =====
 def fetch_all_coins_data():
-    """모든 코인(BTC, ETH, SOL)의 데이터를 수집"""
+    """모든 코인(BTC, ETH, SOL)의 데이터를 수집하고 객관적 스코어 계산"""
     all_coins_data = {}
     
     for coin_name, coin_config in TRADING_PAIRS.items():
         try:
             print(f"Collecting {coin_name} data...")
             
-            # 기술적 지표 데이터
             technical_data = fetch_multi_timeframe_data_for_coin(coin_config["symbol"])
-            
-            # 시장 심리 데이터
             sentiment_data = fetch_market_sentiment_for_coin(coin_config["binance_symbol"])
             
-            # 현재 가격 추출
             current_price = 0
-            if technical_data and "5m" in technical_data:
-                current_price = technical_data["5m"]["current_indicators"]["current_price"]
+            if technical_data and any(tf_data for tf_data in technical_data.values()):
+                for tf in ["1m", "5m", "15m", "1h"]:
+                    if tf in technical_data and "current_indicators" in technical_data[tf]:
+                        current_price = technical_data[tf]["current_indicators"]["current_price"]
+                        break
             
-            all_coins_data[coin_name] = {
+            if current_price == 0:
+                print(f"No valid price data for {coin_name}, skipping...")
+                continue
+            
+            # 임시 코인 데이터 생성 (객관적 스코어 계산용)
+            temp_coin_data = {
                 "config": coin_config,
                 "technical_data": technical_data,
                 "sentiment_data": sentiment_data,
                 "current_price": current_price
             }
             
-            print(f"{coin_name}: ${current_price:,.2f}")
+            # 객관적 스코어 계산 추가
+            objective_score = calculate_objective_score(temp_coin_data, coin_name)
+            
+            all_coins_data[coin_name] = {
+                "config": coin_config,
+                "technical_data": technical_data,
+                "sentiment_data": sentiment_data,
+                "current_price": current_price,
+                "objective_score": objective_score  # 객관적 스코어 추가
+            }
+            
+            print(f"{coin_name}: ${current_price:,.2f} (객관적 스코어: {objective_score}/100)")
             
         except Exception as e:
             print(f"Error collecting {coin_name} data: {e}")
@@ -752,9 +815,9 @@ def fetch_all_coins_data():
     
     return all_coins_data
 
-# ===== 포지션 관리 함수 (기존 로직 + 멀티코인 지원) =====
+# ===== 포지션 관리 함수 =====
 def check_current_positions():
-    """모든 코인의 현재 포지션 상태 확인 (멀티 포지션 지원)"""
+    """모든 코인의 현재 포지션 상태 확인"""
     current_positions = []
     
     for coin_name, coin_config in TRADING_PAIRS.items():
@@ -779,45 +842,23 @@ def check_current_positions():
     
     return current_positions
 
-def get_all_open_trades():
-    """모든 열린 거래 정보를 가져옵니다"""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-    SELECT id, coin_symbol, action, entry_price, amount, leverage, sl_price, tp_price
-    FROM trades
-    WHERE status = 'OPEN'
-    ORDER BY timestamp DESC
-    ''')
-    
-    results = cursor.fetchall()
-    conn.close()
-    
-    open_trades = []
-    for result in results:
-        open_trades.append({
-            'id': result[0],
-            'coin_symbol': result[1],
-            'action': result[2],
-            'entry_price': result[3],
-            'amount': result[4],
-            'leverage': result[5],
-            'sl_price': result[6],
-            'tp_price': result[7]
-        })
-    
-    return open_trades
-
 def handle_position_closure(current_price, side, amount, coin_symbol, current_trade_id=None):
-    """포지션 종료 시 데이터베이스를 업데이트하고 결과를 표시합니다 (기존 로직 + 코인명 추가)"""
+    """포지션 종료 시 데이터베이스를 업데이트하고 결과를 표시합니다"""
     if current_trade_id is None:
-        latest_trade = get_latest_open_trade()
-        if latest_trade:
-            current_trade_id = latest_trade['id']
+        open_trades = get_all_open_trades()
+        for trade in open_trades:
+            if trade['coin_symbol'] == coin_symbol:
+                current_trade_id = trade['id']
+                break
     
     if current_trade_id:
-        latest_trade = get_latest_open_trade()
+        open_trades = get_all_open_trades()
+        latest_trade = None
+        for trade in open_trades:
+            if trade['id'] == current_trade_id:
+                latest_trade = trade
+                break
+        
         if latest_trade:
             entry_price = latest_trade['entry_price']
             action = latest_trade['action']
@@ -826,7 +867,7 @@ def handle_position_closure(current_price, side, amount, coin_symbol, current_tr
             if action == 'long':
                 profit_loss = (current_price - entry_price) * amount
                 profit_loss_percentage = ((current_price / entry_price) - 1) * leverage * 100
-            else: # short
+            else:
                 profit_loss = (entry_price - current_price) * amount
                 profit_loss_percentage = ((entry_price / current_price) - 1) * leverage * 100
                 
@@ -944,7 +985,6 @@ Return ONLY valid JSON (no markdown):
 """
     
     try:
-        # 데이터 준비
         market_analysis = {
             "coins_data": all_coins_data,
             "recent_trades": historical_data,
@@ -959,8 +999,6 @@ Return ONLY valid JSON (no markdown):
         ])
         
         response_content = response.text.strip()
-        
-        # JSON 형식 정리
         if response_content.startswith("```"):
             content_parts = response_content.split("\n", 1)
             if len(content_parts) > 1:
@@ -993,9 +1031,9 @@ Return ONLY valid JSON (no markdown):
         
     except Exception as e:
         print(f"AI Analysis Error: {e}")
-        return {"selected_coin": "NO_POSITION", "direction": "NO_POSITION"}
+        return {"trading_opportunities": [], "overall_strategy": "NO_POSITION"}
 
-# ===== 거래 실행 함수 (기존 로직 + 멀티 포지션 지원) =====
+# ===== 거래 실행 함수 =====
 def execute_multi_position_trades(trading_opportunities, all_coins_data):
     """여러 코인 동시 거래 실행"""
     if not trading_opportunities:
@@ -1009,7 +1047,6 @@ def execute_multi_position_trades(trading_opportunities, all_coins_data):
     print(f"Available Capital: ${available_capital:,.2f}")
     print(f"Number of Opportunities: {len(trading_opportunities)}")
     
-    # 각 거래 실행
     for i, opportunity in enumerate(trading_opportunities, 1):
         try:
             coin_name = opportunity['coin']
@@ -1035,7 +1072,6 @@ def execute_multi_position_trades(trading_opportunities, all_coins_data):
                 })
                 print(f"✅ {coin_name} trade executed successfully")
                 
-                # 자본 업데이트 (실제 사용된 마진만큼 차감)
                 used_margin = available_capital * opportunity['recommended_position_size']
                 available_capital -= used_margin
             else:
@@ -1054,21 +1090,18 @@ def execute_multi_position_trades(trading_opportunities, all_coins_data):
     return executed_trades
 
 def execute_single_trade(coin_name, coin_config, opportunity, current_price, available_capital):
-    """단일 코인 거래 실행 (멀티 포지션용)"""
+    """단일 코인 거래 실행"""
     try:
         symbol = coin_config["symbol"]
         action = opportunity["direction"].lower()
         
-        # 투자 금액 및 레버리지 계산
         position_size_percentage = opportunity['recommended_position_size']
         recommended_leverage = opportunity['recommended_leverage']
         sl_percentage = opportunity['stop_loss_percentage']
         tp_percentage = opportunity['take_profit_percentage']
         
-        # 실제 투입할 마진 계산
         investment_amount = available_capital * position_size_percentage
         
-        # 최소 주문 금액 확인
         min_investment = coin_config.get('min_investment', 100)
         if investment_amount < min_investment:
             investment_amount = min_investment
@@ -1076,11 +1109,9 @@ def execute_single_trade(coin_name, coin_config, opportunity, current_price, ava
 
         print(f"투입 마진: {investment_amount:.2f} USDT")
         
-        # 총 포지션 가치 계산
         total_position_value = investment_amount * recommended_leverage
         print(f"총 포지션 가치: {total_position_value:.2f} USDT")
 
-        # 주문 수량 계산 (코인별 정밀도 적용)
         precision = coin_config.get('precision', 4)
         multiplier = 10 ** precision
         amount = math.ceil((total_position_value / current_price) * multiplier) / multiplier
@@ -1091,23 +1122,19 @@ def execute_single_trade(coin_name, coin_config, opportunity, current_price, ava
         
         print(f"주문 수량: {amount} {coin_name}")
 
-        # 레버리지 설정
         exchange.set_leverage(recommended_leverage, symbol)
         print(f"레버리지 설정: {recommended_leverage}x")
 
-        # SL/TP 가격 계산
         sl_price_change_ratio = sl_percentage / recommended_leverage
         tp_price_change_ratio = tp_percentage / recommended_leverage
 
         if action == "long":
-            # 롱 포지션 진입
             order = exchange.create_market_buy_order(symbol, amount)
             entry_price = current_price
             
             sl_price = round(entry_price * (1 - sl_price_change_ratio), 2)
             tp_price = round(entry_price * (1 + tp_price_change_ratio), 2)
             
-            # SL/TP 주문 생성
             exchange.create_order(symbol, 'STOP_MARKET', 'sell', amount, None, {'stopPrice': sl_price})
             exchange.create_order(symbol, 'TAKE_PROFIT_MARKET', 'sell', amount, None, {'stopPrice': tp_price})
             
@@ -1115,21 +1142,18 @@ def execute_single_trade(coin_name, coin_config, opportunity, current_price, ava
             print(f"SL: ${sl_price:,.2f}, TP: ${tp_price:,.2f}")
             
         elif action == "short":
-            # 숏 포지션 진입
             order = exchange.create_market_sell_order(symbol, amount)
             entry_price = current_price
             
             sl_price = round(entry_price * (1 + sl_price_change_ratio), 2)
             tp_price = round(entry_price * (1 - tp_price_change_ratio), 2)
             
-            # SL/TP 주문 생성
             exchange.create_order(symbol, 'STOP_MARKET', 'buy', amount, None, {'stopPrice': sl_price})
             exchange.create_order(symbol, 'TAKE_PROFIT_MARKET', 'buy', amount, None, {'stopPrice': tp_price})
             
             print(f"{coin_name} SHORT Entry: ${entry_price:,.2f}")
             print(f"SL: ${sl_price:,.2f}, TP: ${tp_price:,.2f}")
         
-        # 거래 정보 데이터베이스에 저장
         trade_data = {
             'action': action,
             'entry_price': entry_price,
@@ -1151,144 +1175,163 @@ def execute_single_trade(coin_name, coin_config, opportunity, current_price, ava
         return None
 
 # ===== 메인 프로그램 시작 =====
-print("\n=== Multi-Coin Day Trading Bot Started (v4.0 - Multi-Position + 1M + 4H Timeout) ===")
-print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-print("Trading Pairs: BTC/USDT, ETH/USDT, SOL/USDT")
-print("Strategy: Multi-Position Simultaneous Trading (최대 3개 코인 동시)")
-print("AI Engine: Google Gemini 2.5 Flash")
-print("Timeframes: 3m, 5m, 15m, 1h")
-print("Leverage Range: 3-50x (Coin-specific)")
-print("SL/TP Range: 8-70% on margin (Dynamic)")
-print("Multi-Position: 75점+ 코인들 동시 거래 지원")
-print("Timeout: 4시간 후 수익 포지션 자동 정리")
-print("Capital Allocation: 스코어 기반 자동 분배")
-print("Market Sentiment: Funding Rate, OI, L/S Ratio, Liquidations")
-print("Momentum Indicators: RSI, MACD, Stochastic, Williams %R")
-print("Execution Frequency: Every 2 minutes")
-print("Trading Hours: 24/7 Unlimited")
-print("Min Margin: 50-100 USDT (Coin-specific)")
-print("===============================================\n")
+def main():
+    print("\n=== Multi-Coin Day Trading Bot Started (v4.0 - Multi-Position + 1M + 4H Timeout) ===")
+    print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("Trading Pairs: BTC/USDT, ETH/USDT, SOL/USDT")
+    print("Strategy: Multi-Position Simultaneous Trading (최대 3개 코인 동시)")
+    print("AI Engine: Google Gemini 2.5 Flash")
+    print("Timeframes: 1m, 5m, 15m, 1h (1분봉 스캘핑 지원)")
+    print("Leverage Range: 3-50x (Coin-specific)")
+    print("SL/TP Range: 8-70% on margin (Dynamic)")
+    print("Multi-Position: 75점+ 코인들 동시 거래 지원")
+    print("Timeout: 4시간 후 수익 포지션 자동 정리")
+    print("Capital Allocation: 스코어 기반 자동 분배")
+    print("Market Sentiment: Funding Rate, OI, L/S Ratio, Liquidations")
+    print("Momentum Indicators: RSI, MACD, Stochastic, Williams %R")
+    print("Execution Frequency: Every 2 minutes")
+    print("Trading Hours: 24/7 Unlimited")
+    print("Min Margin: 50-100 USDT (Coin-specific)")
+    print("===============================================\n")
 
-# 데이터베이스 설정
-setup_database()
+    setup_database()
 
-# ===== 메인 트레이딩 루프 =====
-while True:
-    try:
-        current_time = datetime.now().strftime('%H:%M:%S')
-        print(f"\n[{current_time}] === Multi-Coin Market Scan ===")
+    while True:
+        try:
+            current_time = datetime.now().strftime('%H:%M:%S')
+            print(f"\n[{current_time}] === Multi-Coin Market Scan ===")
 
-        # ===== 1. 현재 포지션 확인 + 타임아웃 체크 =====
-        current_positions = check_current_positions()
-        
-        # 4시간 타임아웃 체크 (수익 포지션 정리)
-        timeout_trades = check_trade_timeout()
-        if timeout_trades > 0:
-            print(f"타임아웃으로 {timeout_trades}개 거래 정리됨. 새로운 스캔 시작...")
-            time.sleep(10)  # 포지션 정리 후 잠시 대기
-            continue
-        
-        if current_positions:
-            # 포지션이 있으면 모든 활성 포지션 모니터링
-            print(f"Monitoring {len(current_positions)} active positions:")
-            for pos in current_positions:
-                current_price = exchange.fetch_ticker(pos['symbol'])['last']
-                print(f"  {pos['coin']}: {pos['side'].upper()} ${current_price:,.2f}")
+            current_positions = check_current_positions()
             
-            # 포지션 모니터링 후 대기
-            time.sleep(60)  # 1분마다 포지션 모니터링
-            continue
+            timeout_trades = check_trade_timeout()
+            if timeout_trades > 0:
+                print(f"타임아웃으로 {timeout_trades}개 거래 정리됨. 새로운 스캔 시작...")
+                time.sleep(10)
+                continue
+            
+            if current_positions:
+                print(f"Monitoring {len(current_positions)} active positions:")
+                for pos in current_positions:
+                    try:
+                        current_price = exchange.fetch_ticker(pos['symbol'])['last']
+                        print(f"  {pos['coin']}: {pos['side'].upper()} ${current_price:,.2f}")
+                    except Exception as e:
+                        print(f"  Error monitoring {pos['coin']}: {e}")
+                
+                time.sleep(60)
+                continue
 
-        # ===== 2. 포지션이 없는 경우 - 기존 주문 정리 =====
-        open_trades = get_all_open_trades()
-        if open_trades:
-            # 청산된 포지션들 처리
-            for trade in open_trades:
-                coin_name = trade['coin_symbol']
-                coin_config = TRADING_PAIRS.get(coin_name)
-                if coin_config:
-                    current_price = exchange.fetch_ticker(coin_config['symbol'])['last']
-                    handle_position_closure(current_price, trade['action'], 
-                                          trade['amount'], coin_name, trade['id'])
-        
-        # 모든 코인의 미결 주문 취소
-        for coin_name, coin_config in TRADING_PAIRS.items():
-            try:
-                open_orders = exchange.fetch_open_orders(coin_config['symbol'])
-                if open_orders:
-                    for order in open_orders:
-                        exchange.cancel_order(order['id'], coin_config['symbol'])
-                    print(f"Cancelled remaining {coin_name} orders")
-            except Exception as e:
-                print(f"Error cancelling {coin_name} orders: {e}")
-        
-        print("No positions. Scanning all coins for multi-position opportunities...")
-        time.sleep(5)
+            open_trades = get_all_open_trades()
+            if open_trades:
+                for trade in open_trades:
+                    coin_name = trade['coin_symbol']
+                    coin_config = TRADING_PAIRS.get(coin_name)
+                    if coin_config:
+                        try:
+                            current_price = exchange.fetch_ticker(coin_config['symbol'])['last']
+                            handle_position_closure(current_price, trade['action'], 
+                                                  trade['amount'], coin_name, trade['id'])
+                        except Exception as e:
+                            print(f"Error handling closure for {coin_name}: {e}")
+            
+            for coin_name, coin_config in TRADING_PAIRS.items():
+                try:
+                    open_orders = exchange.fetch_open_orders(coin_config['symbol'])
+                    if open_orders:
+                        for order in open_orders:
+                            exchange.cancel_order(order['id'], coin_config['symbol'])
+                        print(f"Cancelled remaining {coin_name} orders")
+                except Exception as e:
+                    print(f"Error cancelling {coin_name} orders: {e}")
+            
+            print("No positions. Scanning all coins for multi-position opportunities...")
+            time.sleep(5)
 
-        # ===== 3. 모든 코인 데이터 수집 =====
-        all_coins_data = fetch_all_coins_data()
-        
-        if len(all_coins_data) < 3:
-            print("Insufficient coin data collected. Waiting...")
-            time.sleep(120)
-            continue
+            all_coins_data = fetch_all_coins_data()
+            
+            if len(all_coins_data) < 1:
+                print("Insufficient coin data collected. Waiting...")
+                time.sleep(120)
+                continue
 
-        # ===== 4. 과거 거래 및 성능 데이터 =====
-        historical_trading_data = get_historical_trading_data(limit=3)
-        performance_metrics = get_performance_metrics()
+            historical_trading_data = get_historical_trading_data(limit=3)
+            performance_metrics = get_performance_metrics()
 
-        # ===== 5. Gemini AI 멀티포지션 분석 =====
-        trading_decision = analyze_multi_coin_with_ai(all_coins_data, historical_trading_data, performance_metrics)
+            trading_decision = analyze_multi_coin_with_ai(all_coins_data, historical_trading_data, performance_metrics)
 
-        # AI 분석 결과 저장 (기존 형식 유지하면서 멀티포지션 지원)
-        opportunities = trading_decision.get('trading_opportunities', [])
-        
-        if opportunities:
-            # 첫 번째 기회를 메인으로 저장 (기존 DB 구조 호환성)
-            main_opportunity = opportunities[0]
-            analysis_data = {
-                'selected_coin': main_opportunity['coin'],
-                'coin_scores': {
-                    'BTC': next((opp['score'] for opp in opportunities if opp['coin'] == 'BTC'), 0),
-                    'ETH': next((opp['score'] for opp in opportunities if opp['coin'] == 'ETH'), 0),
-                    'SOL': next((opp['score'] for opp in opportunities if opp['coin'] == 'SOL'), 0)
-                },
-                'current_price': all_coins_data.get(main_opportunity['coin'], {}).get('current_price', 0),
-                'direction': main_opportunity['direction'],
-                'recommended_position_size': main_opportunity['recommended_position_size'],
-                'recommended_leverage': main_opportunity['recommended_leverage'],
-                'stop_loss_percentage': main_opportunity['stop_loss_percentage'],
-                'take_profit_percentage': main_opportunity['take_profit_percentage'],
-                'reasoning': f"Multi-position strategy: {len(opportunities)} opportunities. " + main_opportunity['reasoning']
-            }
-        else:
-            analysis_data = {
-                'selected_coin': 'NO_POSITION',
-                'coin_scores': {'BTC': 0, 'ETH': 0, 'SOL': 0},
-                'current_price': 0,
-                'direction': 'NO_POSITION',
-                'recommended_position_size': 0,
-                'recommended_leverage': 0,
-                'stop_loss_percentage': 0,
-                'take_profit_percentage': 0,
-                'reasoning': trading_decision.get('capital_allocation_notes', 'No opportunities found')
-            }
-        
-        analysis_id = save_ai_analysis(analysis_data)
+            # 객관적 스코어 필터링 추가 (AI 결과와 결합)
+            opportunities = trading_decision.get('trading_opportunities', [])
+            filtered_opportunities = []
+            
+            for opportunity in opportunities:
+                coin_name = opportunity['coin']
+                ai_score = opportunity['score']
+                objective_score = all_coins_data.get(coin_name, {}).get('objective_score', 0)
+                
+                # 객관적 스코어가 30점 이상인 것만 거래 (추가 안전장치)
+                if objective_score >= 30:
+                    # AI 스코어와 객관적 스코어 결합 (가중평균)
+                    combined_score = (ai_score * 0.7) + (objective_score * 0.3)
+                    opportunity['combined_score'] = combined_score
+                    opportunity['objective_score'] = objective_score
+                    filtered_opportunities.append(opportunity)
+                    print(f"{coin_name} 통과: AI({ai_score}) + 객관적({objective_score}) = 결합({combined_score:.1f})")
+                else:
+                    print(f"{coin_name} 필터링됨: 객관적 스코어 부족 ({objective_score}/100)")
+            
+            # 필터링된 기회들로 trading_decision 업데이트
+            if filtered_opportunities:
+                trading_decision['trading_opportunities'] = filtered_opportunities
+                # 가장 높은 결합 스코어 순으로 정렬
+                trading_decision['trading_opportunities'].sort(key=lambda x: x.get('combined_score', x['score']), reverse=True)
+            else:
+                trading_decision['trading_opportunities'] = []
+                trading_decision['overall_strategy'] = 'NO_POSITION'
+                print("모든 코인이 객관적 스코어 필터링에서 제외됨")
 
-        # ===== 6. 거래 실행 (멀티포지션 지원) =====
-        strategy = trading_decision.get('overall_strategy', 'NO_POSITION')
-        
-        if strategy == "NO_POSITION" or not opportunities:
-            print("No high-probability setup found across BTC/ETH/SOL.")
-            time.sleep(120)  # 2분 대기
-            continue
+            opportunities = trading_decision.get('trading_opportunities', [])
+            
+            if opportunities:
+                main_opportunity = opportunities[0]
+                analysis_data = {
+                    'selected_coin': main_opportunity['coin'],
+                    'coin_scores': {
+                        'BTC': next((opp['score'] for opp in opportunities if opp['coin'] == 'BTC'), 0),
+                        'ETH': next((opp['score'] for opp in opportunities if opp['coin'] == 'ETH'), 0),
+                        'SOL': next((opp['score'] for opp in opportunities if opp['coin'] == 'SOL'), 0)
+                    },
+                    'current_price': all_coins_data.get(main_opportunity['coin'], {}).get('current_price', 0),
+                    'direction': main_opportunity['direction'],
+                    'recommended_position_size': main_opportunity['recommended_position_size'],
+                    'recommended_leverage': main_opportunity['recommended_leverage'],
+                    'stop_loss_percentage': main_opportunity['stop_loss_percentage'],
+                    'take_profit_percentage': main_opportunity['take_profit_percentage'],
+                    'reasoning': f"Multi-position strategy: {len(opportunities)} opportunities. " + main_opportunity['reasoning']
+                }
+            else:
+                analysis_data = {
+                    'selected_coin': 'NO_POSITION',
+                    'coin_scores': {'BTC': 0, 'ETH': 0, 'SOL': 0},
+                    'current_price': 0,
+                    'direction': 'NO_POSITION',
+                    'recommended_position_size': 0,
+                    'recommended_leverage': 0,
+                    'stop_loss_percentage': 0,
+                    'take_profit_percentage': 0,
+                    'reasoning': trading_decision.get('capital_allocation_notes', 'No opportunities found')
+                }
+            
+            analysis_id = save_ai_analysis(analysis_data)
 
-        # 멀티포지션 거래 실행
-        executed_trades = execute_multi_position_trades(opportunities, all_coins_data)
-        
-        if executed_trades:
-            # AI 분석과 첫 번째 거래만 연결 (기존 DB 구조 호환성)
+            strategy = trading_decision.get('overall_strategy', 'NO_POSITION')
+            
+            if strategy == "NO_POSITION" or not opportunities:
+                print("No high-probability setup found across BTC/ETH/SOL.")
+                time.sleep(120)
+                continue
+
+            executed_trades = execute_multi_position_trades(opportunities, all_coins_data)
+            
             if executed_trades:
                 main_trade_id = executed_trades[0]['trade_id']
                 conn = sqlite3.connect(DB_FILE)
@@ -1296,16 +1339,20 @@ while True:
                 cursor.execute("UPDATE ai_analysis SET trade_id = ? WHERE id = ?", (main_trade_id, analysis_id))
                 conn.commit()
                 conn.close()
-            
-            print(f"\n🚀 Multi-Position Strategy Executed Successfully!")
-            print(f"Strategy: {strategy}")
-            print(f"Active Trades: {len(executed_trades)}")
-            for trade in executed_trades:
-                print(f"  - {trade['coin']}: {trade['direction']} (Score: {trade['score']})")
-        
-        # ===== 7. 대기 시간 =====
-        time.sleep(120)  # 2분마다 스캔
+                
+                print(f"\n🚀 Multi-Position Strategy Executed Successfully!")
+                print(f"Strategy: {strategy}")
+                print(f"Active Trades: {len(executed_trades)}")
+                for trade in executed_trades:
+                    print(f"  - {trade['coin']}: {trade['direction']} (Score: {trade['score']})")
+            else:
+                print("No trades were executed successfully.")
 
-    except Exception as e:
-        print(f"\n Main Loop Error: {e}")
-        time.sleep(30)
+            time.sleep(120)
+
+        except Exception as e:
+            print(f"\n Main Loop Error: {e}")
+            time.sleep(30)
+
+if __name__ == "__main__":
+    main()

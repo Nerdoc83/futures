@@ -28,7 +28,7 @@ st.set_page_config(
 def load_data_from_db():
     """데이터베이스에서 데이터 로드"""
     try:
-        conn = sqlite3.connect('ethereum_daytrading.db')
+        conn = sqlite3.connect('multi_coin_daytrading.db')
         
         # 거래 데이터 - 모든 컬럼 선택
         trades_query = """
