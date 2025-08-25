@@ -1,4 +1,4 @@
-# dashboard.py
+# dashboard.py (로그 뷰어 기능 추가 버전)
 
 import streamlit as st
 import sqlite3
@@ -7,6 +7,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime
 import time
+import os
 
 # --- 페이지 기본 설정 ---
 st.set_page_config(
@@ -16,23 +17,35 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# --- 실시간 로그 파일 읽기 함수 (새로 추가) ---
+def read_log_file(file_path='output.log', max_lines=100):
+    """
+    로그 파일을 읽어 최신 순서로 정렬된 문자열을 반환합니다.
+    파일이 없으면 안내 메시지를 반환합니다.
+    """
+    if not os.path.exists(file_path):
+        return "로그 파일(output.log)을 찾을 수 없습니다. 봇이 실행 중인지 확인하세요."
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+            # 최신 로그가 위로 오도록 역순으로 정렬하고, 최대 라인 수만큼만 가져옴
+            reversed_lines = lines[::-1]
+            return "".join(reversed_lines[:max_lines])
+    except Exception as e:
+        return f"로그 파일을 읽는 중 오류 발생: {e}"
+
 # --- 데이터베이스 연결 및 데이터 로딩 함수 ---
-@st.cache_data(ttl=60)  # 60초마다 데이터 캐시 만료
+@st.cache_data(ttl=60)
 def load_data():
     """
     ethereum_daytrading.db에서 'trades'와 'ai_analysis' 테이블 데이터를 로드하고 전처리합니다.
     """
     try:
         conn = sqlite3.connect('ethereum_daytrading.db', timeout=10)
-        
-        # SQL 쿼리
         trades_query = "SELECT * FROM trades ORDER BY timestamp DESC"
         ai_analysis_query = "SELECT * FROM ai_analysis ORDER BY timestamp DESC"
-        
-        # 데이터 로드
         trades_df = pd.read_sql_query(trades_query, conn)
         ai_analysis_df = pd.read_sql_query(ai_analysis_query, conn)
-        
     except sqlite3.OperationalError as e:
         st.error(f"❌ 데이터베이스 연결에 실패했습니다: {e}")
         st.info("데이터베이스 파일('ethereum_daytrading.db')이 스크립트와 동일한 디렉토리에 있는지 확인하세요.")
@@ -41,13 +54,9 @@ def load_data():
         if 'conn' in locals() and conn:
             conn.close()
 
-    # --- 데이터 전처리 ---
     if not trades_df.empty:
-        # 타임스탬프 변환
         trades_df['timestamp'] = pd.to_datetime(trades_df['timestamp'], errors='coerce')
         trades_df['exit_timestamp'] = pd.to_datetime(trades_df['exit_timestamp'], errors='coerce')
-        
-        # 숫자형 데이터 변환 및 오류 처리
         numeric_cols = ['entry_price', 'exit_price', 'amount', 'leverage', 'investment_amount', 'profit_loss', 'profit_loss_percentage']
         for col in numeric_cols:
             if col in trades_df.columns:
@@ -72,14 +81,10 @@ def calculate_metrics(df):
     if closed_trades.empty:
         return metrics
 
-    # Null 값이 아닌 손익 데이터만 사용
     pnl_data = closed_trades['profit_loss'].dropna()
-    
     metrics['total_pnl'] = pnl_data.sum()
-    
     winning_trades = pnl_data[pnl_data > 0]
     losing_trades = pnl_data[pnl_data < 0]
-    
     metrics['winning_trades'] = len(winning_trades)
     metrics['losing_trades'] = len(losing_trades)
     
@@ -92,7 +97,7 @@ def calculate_metrics(df):
     if total_loss > 0:
         metrics['profit_factor'] = total_profit / total_loss
     elif total_profit > 0:
-        metrics['profit_factor'] = float('inf')  # 손실이 없으면 무한대
+        metrics['profit_factor'] = float('inf')
 
     if not closed_trades['profit_loss_percentage'].dropna().empty:
         metrics['avg_pnl_percent'] = closed_trades['profit_loss_percentage'].dropna().mean()
@@ -103,99 +108,86 @@ def calculate_metrics(df):
 def run_dashboard():
     st.title("🤖 이더리움 AI 트레이딩 대시보드")
 
-    # 데이터 로드
     trades_df, ai_analysis_df = load_data()
 
     if trades_df.empty:
         st.warning("⚠️ 거래 데이터가 없습니다. 트레이딩 봇이 실행 중인지 확인해주세요.")
-        return
+        # 거래 데이터가 없어도 로그는 표시될 수 있으므로 return하지 않음
 
     # --- 사이드바 ---
     st.sidebar.header("⚙️ 필터 및 설정")
-    
-    # 날짜 범위 필터
-    min_date = trades_df['timestamp'].min().date()
-    max_date = trades_df['timestamp'].max().date()
-    date_range = st.sidebar.date_input(
-        "📅 날짜 범위 선택",
-        (min_date, max_date),
-        min_value=min_date,
-        max_value=max_date
-    )
+    if not trades_df.empty:
+        min_date = trades_df['timestamp'].min().date()
+        max_date = trades_df['timestamp'].max().date()
+        date_range = st.sidebar.date_input(
+            "📅 날짜 범위 선택",
+            (min_date, max_date),
+            min_value=min_date,
+            max_value=max_date
+        )
+        if len(date_range) == 2:
+            start_date, end_date = date_range
+            filtered_df = trades_df[
+                (trades_df['timestamp'].dt.date >= start_date) &
+                (trades_df['timestamp'].dt.date <= end_date)
+            ]
+        else:
+            st.sidebar.warning("올바른 날짜 범위를 선택하세요.")
+            filtered_df = trades_df # 날짜 범위 오류 시 전체 데이터 표시
+    else:
+        filtered_df = pd.DataFrame() # trades_df가 비어있으면 filtered_df도 비어있게 함
 
-    if len(date_range) != 2:
-        st.sidebar.warning("올바른 날짜 범위를 선택하세요.")
-        return
-
-    start_date, end_date = date_range
-    
-    # 데이터 필터링
-    filtered_df = trades_df[
-        (trades_df['timestamp'].dt.date >= start_date) &
-        (trades_df['timestamp'].dt.date <= end_date)
-    ]
-    
-    # --- 핵심 성과 지표(KPI) 표시 ---
+    # --- KPI 표시 ---
     st.subheader("📈 주요 성과 지표")
-    metrics = calculate_metrics(filtered_df)
-    
-    cols = st.columns(4)
-    cols[0].metric("💰 총 손익 (USDT)", f"${metrics['total_pnl']:,.2f}")
-    cols[1].metric("🎯 승률", f"{metrics['win_rate']:.2f}%", f"{metrics['winning_trades']}승 / {metrics['losing_trades']}패")
-    cols[2].metric("⚡ 수익비 (Profit Factor)", f"{metrics['profit_factor']:.2f}")
-    cols[3].metric("📊 평균 수익률", f"{metrics['avg_pnl_percent']:.2f}%")
+    if not filtered_df.empty:
+        metrics = calculate_metrics(filtered_df)
+        cols = st.columns(4)
+        cols[0].metric("💰 총 손익 (USDT)", f"${metrics['total_pnl']:,.2f}")
+        cols[1].metric("🎯 승률", f"{metrics['win_rate']:.2f}%", f"{metrics['winning_trades']}승 / {metrics['losing_trades']}패")
+        cols[2].metric("⚡ 수익비 (Profit Factor)", f"{metrics['profit_factor']:.2f}")
+        cols[3].metric("📊 평균 수익률", f"{metrics['avg_pnl_percent']:.2f}%")
+    else:
+        st.info("표시할 거래 데이터가 없습니다.")
 
     st.markdown("---")
 
-    # --- 시각화 ---
+    # --- 시각화, 현재 포지션, AI 분석 등 (기존 코드와 동일) ---
     col1, col2 = st.columns([3, 2])
     
     with col1:
         st.subheader("💹 누적 손익 그래프")
-        closed_trades = filtered_df[filtered_df['status'] == 'CLOSED'].sort_values('timestamp')
-        if not closed_trades.empty:
-            closed_trades['cumulative_pnl'] = closed_trades['profit_loss'].cumsum()
-            fig = px.line(
-                closed_trades, 
-                x='timestamp', 
-                y='cumulative_pnl', 
-                title='시간에 따른 누적 손익 변화',
-                labels={'timestamp': '시간', 'cumulative_pnl': '누적 손익 (USDT)'},
-                template='plotly_white'
-            )
-            fig.update_traces(line=dict(color='royalblue', width=2))
-            st.plotly_chart(fig, use_container_width=True)
+        if not filtered_df.empty:
+            closed_trades = filtered_df[filtered_df['status'] == 'CLOSED'].sort_values('timestamp')
+            if not closed_trades.empty:
+                closed_trades['cumulative_pnl'] = closed_trades['profit_loss'].cumsum()
+                fig = px.line(closed_trades, x='timestamp', y='cumulative_pnl', title='시간에 따른 누적 손익 변화', labels={'timestamp': '시간', 'cumulative_pnl': '누적 손익 (USDT)'}, template='plotly_white')
+                fig.update_traces(line=dict(color='royalblue', width=2))
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("표시할 완료된 거래 데이터가 없습니다.")
         else:
-            st.info("표시할 완료된 거래 데이터가 없습니다.")
+            st.info("표시할 거래 데이터가 없습니다.")
 
     with col2:
         st.subheader("📊 거래 유형 분석")
         if not filtered_df.empty:
             action_counts = filtered_df['action'].value_counts()
-            fig = px.pie(
-                action_counts, 
-                values=action_counts.values, 
-                names=action_counts.index, 
-                title='Long vs Short 비율',
-                color_discrete_map={'long': 'forestgreen', 'short': 'crimson'}
-            )
+            fig = px.pie(action_counts, values=action_counts.values, names=action_counts.index, title='Long vs Short 비율', color_discrete_map={'long': 'forestgreen', 'short': 'crimson'})
             st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("거래 데이터가 없습니다.")
             
     st.markdown("---")
 
-    # --- 현재 포지션 및 AI 분석 ---
     col3, col4 = st.columns(2)
-    
     with col3:
         st.subheader("💼 현재 오픈 포지션")
-        open_positions = filtered_df[filtered_df['status'] == 'OPEN']
-        if not open_positions.empty:
-            st.dataframe(
-                open_positions[['timestamp', 'action', 'entry_price', 'leverage', 'investment_amount', 'sl_price', 'tp_price']],
-                use_container_width=True
-            )
+        if not filtered_df.empty:
+            open_positions = filtered_df[filtered_df['status'] == 'OPEN']
+            if not open_positions.empty:
+                st.dataframe(open_positions[['timestamp', 'action', 'entry_price', 'leverage', 'investment_amount', 'sl_price', 'tp_price']], use_container_width=True)
+            else:
+                st.success("✅ 현재 진행 중인 거래가 없습니다.")
         else:
             st.success("✅ 현재 진행 중인 거래가 없습니다.")
 
@@ -215,25 +207,23 @@ def run_dashboard():
 
     # --- 전체 거래 내역 ---
     st.subheader("📋 전체 거래 내역")
+    if not filtered_df.empty:
+        display_cols = ['timestamp', 'action', 'status', 'entry_price', 'exit_price', 'leverage', 'investment_amount', 'profit_loss', 'profit_loss_percentage']
+        display_cols_exist = [col for col in display_cols if col in filtered_df.columns]
+        st.dataframe(filtered_df[display_cols_exist].style.format({'entry_price': '${:,.2f}', 'exit_price': '${:,.2f}', 'investment_amount': '${:,.2f}', 'profit_loss': '{:,.2f}', 'profit_loss_percentage': '{:.2f}%'}), use_container_width=True)
+    else:
+        st.info("표시할 거래 데이터가 없습니다.")
+
+    st.markdown("---")
     
-    display_cols = [
-        'timestamp', 'action', 'status', 'entry_price', 'exit_price', 
-        'leverage', 'investment_amount', 'profit_loss', 'profit_loss_percentage'
-    ]
-    # 데이터프레임에 실제 존재하는 컬럼만 선택
-    display_cols_exist = [col for col in display_cols if col in filtered_df.columns]
-    
-    st.dataframe(filtered_df[display_cols_exist].style.format({
-        'entry_price': '${:,.2f}',
-        'exit_price': '${:,.2f}',
-        'investment_amount': '${:,.2f}',
-        'profit_loss': '{:,.2f}',
-        'profit_loss_percentage': '{:.2f}%'
-    }), use_container_width=True)
+    # --- 실시간 로그 표시 (새로 추가) ---
+    st.subheader("⚙️ 실시간 시스템 로그")
+    log_content = read_log_file()
+    st.text_area("Log Output", log_content, height=300, disabled=True)
 
     # --- 자동 새로고침 ---
     st.sidebar.markdown("---")
-    if st.sidebar.checkbox("🔄 30초마다 자동 새로고침"):
+    if st.sidebar.checkbox("🔄 30초마다 자동 새로고침", key="auto_refresh"):
         time.sleep(30)
         st.rerun()
 
