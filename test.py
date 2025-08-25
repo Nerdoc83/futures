@@ -1,14 +1,16 @@
 """
-AI 이더리움 데이트레이딩 봇 - Gemini + 고급 지표 + 뉴스 분석 (v2.2 - ATR Dynamic SL/TP)
+AI 이더리움 데이트레이딩 봇 - Gemini + 고급 지표 + 뉴스 분석 (v2.3 - Trend Analysis + Daily/Weekly)
 --------------------------------------------------------
 기능:
-- 데이트레이딩 최적화 (5분, 15분, 1시간 차트)
+- 데이트레이딩 최적화 (5분, 15분, 1시간, 일봉, 주봉 차트)
 - 고급 모멘텀 지표 (RSI, MACD, Stochastic, Williams %R)
+- 추세 분석 시스템 (장기 추세 vs 단기 신호)
+- 추세 순응/역추세 거래 전략
 - 시장 심리 분석 (펀딩비, 미결제약정, 롱숏비율, 청산 데이터)
 - 실시간 이더리움 뉴스 분석 (SERP API)
 - Gemini API 기반 AI 분석
 - 동적 레버리지 및 포지션 사이징 (5-50배)
-- 개선된 SL/TP 설정 (ATR 기반 동적 설정) # <--- 수정됨
+- 개선된 SL/TP 설정 (ATR 기반 동적 설정 + 추세별 조정)
 - 24시간 무제한 거래
 - 이더리움 선물 거래 최적화
 - 최소 투자금액: 100 USDT
@@ -72,6 +74,147 @@ def calculate_atr(df, window=14):
     true_range = ranges.max(axis=1)
     atr = true_range.rolling(window=window).mean()
     return atr
+
+def calculate_ema(prices, window):
+    """지수이동평균 계산"""
+    return prices.ewm(span=window).mean()
+
+def calculate_sma(prices, window):
+    """단순이동평균 계산"""
+    return prices.rolling(window=window).mean()
+
+# ===== 추세 분석 함수들 =====
+def analyze_trend_direction(df, short_ema=20, long_ema=50):
+    """추세 방향 분석 (EMA 기반) - 안전한 처리"""
+    try:
+        if len(df) < long_ema :  # 충분한 데이터가 없으면
+            print(f"Insufficient data for trend analysis: {len(df)} < {long_ema + 5}")
+            return {"trend_direction": "UNKNOWN", "ema_distance_pct": 0}
+        
+        df['EMA_short'] = calculate_ema(df['close'], short_ema)
+        df['EMA_long'] = calculate_ema(df['close'], long_ema)
+        
+        # NaN 제거 후 다시 체크
+        df_clean = df.dropna()
+        if len(df_clean) < 3:
+            print(f"Too little data after EMA calculation: {len(df_clean)}")
+            return {"trend_direction": "UNKNOWN", "ema_distance_pct": 0}
+        
+        current_short = df_clean['EMA_short'].iloc[-1]
+        current_long = df_clean['EMA_long'].iloc[-1]
+        current_price = df_clean['close'].iloc[-1]
+        
+        # 안전한 계산
+        if current_long == 0:
+            ema_distance_pct = 0
+        else:
+            ema_distance_pct = ((current_short - current_long) / current_long) * 100
+        
+        # 추세 방향 결정
+        if current_short > current_long and current_price > current_short:
+            if ema_distance_pct > 2.0:
+                trend = "STRONG_UPTREND"
+            elif ema_distance_pct > 0.5:
+                trend = "UPTREND"
+            else:
+                trend = "WEAK_UPTREND"
+        elif current_short < current_long and current_price < current_short:
+            if ema_distance_pct < -2.0:
+                trend = "STRONG_DOWNTREND"
+            elif ema_distance_pct < -0.5:
+                trend = "DOWNTREND"
+            else:
+                trend = "WEAK_DOWNTREND"
+        else:
+            trend = "SIDEWAYS"
+        
+        return {
+            "trend_direction": trend,
+            "ema_distance_pct": ema_distance_pct,
+            "current_price": current_price,
+            "ema_short": current_short,
+            "ema_long": current_long
+        }
+        
+    except Exception as e:
+        print(f"Error in trend analysis: {e}")
+        return {"trend_direction": "UNKNOWN", "ema_distance_pct": 0}
+
+def determine_trend_strategy(short_term_signal, daily_trend, weekly_trend):
+    """단기 신호와 장기 추세를 비교하여 전략 결정"""
+    try:
+        # 장기 추세 통합 판단 (주봉 > 일봉 우선순위)
+        weekly_direction = weekly_trend.get('trend_direction', 'UNKNOWN')
+        daily_direction = daily_trend.get('trend_direction', 'UNKNOWN')
+        
+        # 주봉 추세가 강하면 주봉 우선, 아니면 일봉 우선
+        if 'STRONG' in weekly_direction:
+            long_term_trend = weekly_direction
+            primary_timeframe = "WEEKLY"
+        else:
+            long_term_trend = daily_direction
+            primary_timeframe = "DAILY"
+        
+        # 단기 신호 방향 결정
+        short_signal_direction = "BULLISH" if short_term_signal.lower() == "long" else "BEARISH"
+        
+        # 장기 추세 방향 결정
+        long_trend_direction = "BULLISH" if "UP" in long_term_trend else "BEARISH" if "DOWN" in long_term_trend else "NEUTRAL"
+        
+        # 전략 결정
+        if short_signal_direction == long_trend_direction and long_trend_direction != "NEUTRAL":
+            # 추세 순응 거래
+            strategy_type = "WITH_TREND"
+            conviction_level = "HIGH"
+            
+            # 강한 추세일수록 더 높은 확신
+            if "STRONG" in long_term_trend:
+                conviction_level = "VERY_HIGH"
+                position_size_multiplier = 1.3
+                tp_atr_multiplier = 4.0  # 더 큰 익절 목표
+            else:
+                position_size_multiplier = 1.1
+                tp_atr_multiplier = 3.0
+            
+            sl_atr_multiplier = 1.8  # 표준 손절
+            
+        elif short_signal_direction != long_trend_direction and long_trend_direction != "NEUTRAL":
+            # 역추세 거래 (스캘핑)
+            strategy_type = "COUNTER_TREND"
+            conviction_level = "LOW"
+            position_size_multiplier = 0.7  # 작은 포지션
+            tp_atr_multiplier = 1.8  # 빠른 익절
+            sl_atr_multiplier = 1.2  # 타이트한 손절
+            
+        else:
+            # 중립 상황
+            strategy_type = "NEUTRAL"
+            conviction_level = "MEDIUM"
+            position_size_multiplier = 0.9
+            tp_atr_multiplier = 2.5
+            sl_atr_multiplier = 1.5
+        
+        return {
+            "strategy_type": strategy_type,
+            "conviction_level": conviction_level,
+            "long_term_trend": long_term_trend,
+            "short_signal_direction": short_signal_direction,
+            "primary_timeframe": primary_timeframe,
+            "position_size_multiplier": position_size_multiplier,
+            "tp_atr_multiplier": tp_atr_multiplier,
+            "sl_atr_multiplier": sl_atr_multiplier,
+            "trend_alignment": short_signal_direction == long_trend_direction
+        }
+        
+    except Exception as e:
+        print(f"Error in trend strategy determination: {e}")
+        return {
+            "strategy_type": "NEUTRAL",
+            "conviction_level": "MEDIUM",
+            "position_size_multiplier": 1.0,
+            "tp_atr_multiplier": 2.5,
+            "sl_atr_multiplier": 1.5
+        }
 
 # ===== 긴급 이벤트 감지 및 대응 시스템 =====
 def detect_sudden_market_event(current_price, timeframe_data):
@@ -351,7 +494,7 @@ def detect_flash_opportunity(current_price, event_data, market_sentiment):
         
         # 기존 5분봉+ 기준 플래시 기회
         else:
-            # 1. 과도한 상승 후 숏 기회 (오버익스텐션)
+            # 1. 과도한 상승 후 숏기회 (오버익스텐션)
             if direction == 'UP' and price_move > 5.0 and severity == 'HIGH':
                 # 펀딩비가 매우 높거나 롱숏비율이 극단적인 경우
                 funding_rate = market_sentiment['funding_rate']['funding_rate_percentage']
@@ -397,6 +540,7 @@ def detect_flash_opportunity(current_price, event_data, market_sentiment):
     except Exception as e:
         print(f"Error detecting flash opportunity: {e}")
         return None
+
 def fetch_ethereum_news():
     """최신 이더리움 뉴스 가져오기 함수"""
     try:
@@ -533,7 +677,9 @@ def setup_database():
         exit_price REAL,
         exit_timestamp TEXT,
         profit_loss REAL,
-        profit_loss_percentage REAL
+        profit_loss_percentage REAL,
+        trend_strategy TEXT,
+        conviction_level TEXT
     )
     ''')
     
@@ -552,6 +698,10 @@ def setup_database():
         tp_atr_multiplier REAL,
         reasoning TEXT NOT NULL,
         news_sentiment TEXT,
+        trend_strategy TEXT,
+        conviction_level TEXT,
+        daily_trend TEXT,
+        weekly_trend TEXT,
         trade_id INTEGER,
         FOREIGN KEY (trade_id) REFERENCES trades (id)
     )
@@ -582,6 +732,23 @@ def setup_database():
             cursor.execute('ALTER TABLE ai_analysis ADD COLUMN sl_atr_multiplier REAL')
         if 'tp_atr_multiplier' not in columns:
             cursor.execute('ALTER TABLE ai_analysis ADD COLUMN tp_atr_multiplier REAL')
+        if 'trend_strategy' not in columns:
+            cursor.execute('ALTER TABLE ai_analysis ADD COLUMN trend_strategy TEXT')
+        if 'conviction_level' not in columns:
+            cursor.execute('ALTER TABLE ai_analysis ADD COLUMN conviction_level TEXT')
+        if 'daily_trend' not in columns:
+            cursor.execute('ALTER TABLE ai_analysis ADD COLUMN daily_trend TEXT')
+        if 'weekly_trend' not in columns:
+            cursor.execute('ALTER TABLE ai_analysis ADD COLUMN weekly_trend TEXT')
+            
+        # trades 테이블에도 추세 관련 컬럼 추가
+        cursor.execute("PRAGMA table_info(trades)")
+        trade_columns = [column[1] for column in cursor.fetchall()]
+        
+        if 'trend_strategy' not in trade_columns:
+            cursor.execute('ALTER TABLE trades ADD COLUMN trend_strategy TEXT')
+        if 'conviction_level' not in trade_columns:
+            cursor.execute('ALTER TABLE trades ADD COLUMN conviction_level TEXT')
             
     except sqlite3.Error as e:
         print(f"Database migration note: {e}")
@@ -599,8 +766,9 @@ def save_ai_analysis(analysis_data, trade_id=None):
     INSERT INTO ai_analysis (
         timestamp, current_price, direction, recommended_position_size, 
         recommended_leverage, sl_atr_multiplier, tp_atr_multiplier,
-        reasoning, news_sentiment, trade_id
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        reasoning, news_sentiment, trend_strategy, conviction_level,
+        daily_trend, weekly_trend, trade_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (
         datetime.now().isoformat(),
         analysis_data.get('current_price', 0),
@@ -611,6 +779,10 @@ def save_ai_analysis(analysis_data, trade_id=None):
         analysis_data.get('tp_atr_multiplier', 0),
         analysis_data.get('reasoning', ''),
         analysis_data.get('news_sentiment', 'NEUTRAL'),
+        analysis_data.get('trend_strategy', 'NEUTRAL'),
+        analysis_data.get('conviction_level', 'MEDIUM'),
+        analysis_data.get('daily_trend', 'UNKNOWN'),
+        analysis_data.get('weekly_trend', 'UNKNOWN'),
         trade_id
     ))
 
@@ -650,8 +822,8 @@ def save_trade(trade_data):
     cursor.execute('''
     INSERT INTO trades (
         timestamp, action, entry_price, amount, leverage, sl_price, tp_price,
-        position_size_percentage, investment_amount
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        position_size_percentage, investment_amount, trend_strategy, conviction_level
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (
         datetime.now().isoformat(),
         trade_data.get('action', ''),
@@ -661,7 +833,9 @@ def save_trade(trade_data):
         trade_data.get('sl_price', 0),
         trade_data.get('tp_price', 0),
         trade_data.get('position_size_percentage', 0),
-        trade_data.get('investment_amount', 0)
+        trade_data.get('investment_amount', 0),
+        trade_data.get('trend_strategy', 'NEUTRAL'),
+        trade_data.get('conviction_level', 'MEDIUM')
     ))
     
     trade_id = cursor.lastrowid
@@ -767,7 +941,8 @@ def get_historical_trading_data(limit=5):
     cursor.execute('''
     SELECT 
         t.action, t.entry_price, t.exit_price, t.leverage,
-        t.profit_loss_percentage, a.reasoning
+        t.profit_loss_percentage, t.trend_strategy, t.conviction_level,
+        a.reasoning
     FROM trades t
     LEFT JOIN ai_analysis a ON t.id = a.trade_id
     WHERE t.status = 'CLOSED'
@@ -817,24 +992,28 @@ def get_performance_metrics():
     
     return metrics
 
-# ===== 데이터 수집 함수 (이더리움 최적화) =====
+# ===== 데이터 수집 함수 (이더리움 최적화 + 일봉/주봉 추가) =====
 def fetch_multi_timeframe_data(emergency_mode=False):
-    """이더리움 데이트레이딩 최적화된 멀티 타임프레임 데이터 수집"""
+    """이더리움 데이트레이딩 최적화된 멀티 타임프레임 데이터 수집 (일봉/주봉 포함)"""
     if emergency_mode:
         # 긴급 모드: 1분봉 추가로 더 빠른 감지
         timeframes = {
             "1m": {"timeframe": "1m", "limit": 60},    # 1시간 데이터 (긴급시에만)
-            "5m": {"timeframe": "5m", "limit": 60},    # 5시간 데이터 (축소)
-            "15m": {"timeframe": "15m", "limit": 48},  # 12시간 데이터 (축소)
-            "1h": {"timeframe": "1h", "limit": 24}     # 24시간 데이터 (축소)
+            "5m": {"timeframe": "5m", "limit": 60},    # 5시간 데이터
+            "15m": {"timeframe": "15m", "limit": 48},  # 12시간 데이터
+            "1h": {"timeframe": "1h", "limit": 24},    # 24시간 데이터
+            "1d": {"timeframe": "1d", "limit": 100},    # 60일 데이터 (추세 분석용) - 증가
+            "1w": {"timeframe": "1w", "limit": 100}     # 50주 데이터 (장기 추세) - 증가
         }
-        print("🚨 EMERGENCY MODE: 1분봉 포함 고속 분석")
+        print("🚨 EMERGENCY MODE: 1분봉 포함 + 일봉/주봉 추세 분석")
     else:
-        # 일반 모드: 기존과 동일
+        # 일반 모드: 기존 + 일봉/주봉 추가
         timeframes = {
             "5m": {"timeframe": "5m", "limit": 100},   # 8시간 20분 데이터
             "15m": {"timeframe": "15m", "limit": 96},  # 24시간 데이터
-            "1h": {"timeframe": "1h", "limit": 48}     # 48시간 데이터
+            "1h": {"timeframe": "1h", "limit": 48},    # 48시간 데이터
+            "1d": {"timeframe": "1d", "limit": 100},    # 60일 데이터 (추세 분석용) - 증가
+            "1w": {"timeframe": "1w", "limit": 100}     # 50주 데이터 (장기 추세) - 증가
         }
     
     multi_tf_data = {}
@@ -875,20 +1054,49 @@ def fetch_multi_timeframe_data(emergency_mode=False):
             # NaN 값 제거
             df.dropna(inplace=True)
             
-            # 토큰 절약을 위해 최근 데이터와 핵심 지표만 저장
-            current_indicators = {
-                "current_price": float(df['close'].iloc[-1]),
-                "rsi_14": float(df['RSI_14'].iloc[-1]),
-                "rsi_21": float(df['RSI_21'].iloc[-1]),
-                "macd": float(df['MACD'].iloc[-1]),
-                "macd_signal": float(df['MACD_signal'].iloc[-1]),
-                "macd_histogram": float(df['MACD_histogram'].iloc[-1]),
-                "stoch_k": float(df['Stoch_K'].iloc[-1]),
-                "stoch_d": float(df['Stoch_D'].iloc[-1]),
-                "williams_r": float(df['Williams_R'].iloc[-1]),
-                "atr": float(df['ATR'].iloc[-1]),
-                "volume": float(df['volume'].iloc[-1])
-            }
+            # 데이터 충분성 체크 (특히 일봉/주봉)
+            if len(df) < 10:
+                print(f"Warning: {tf_name} has insufficient data ({len(df)} candles) after indicator calculation")
+                if tf_name in ['1d', '1w']:
+                    # 일봉/주봉의 경우 최소한의 추세 분석이라도 시도
+                    if len(df) < 3:
+                        print(f"Skipping {tf_name} - too little data")
+                        continue
+                else:
+                    # 단기 타임프레임은 건너뛰기
+                    continue
+            
+            # ===== 추세 분석 (일봉/주봉용) =====
+            trend_analysis = None
+            if tf_name in ['1d', '1w'] and len(df) >= 10:  # 최소 10개 데이터 필요
+                try:
+                    trend_analysis = analyze_trend_direction(df.copy())
+                    print(f"{tf_name.upper()} Trend: {trend_analysis.get('trend_direction', 'UNKNOWN')}")
+                except Exception as trend_error:
+                    print(f"Error in {tf_name} trend analysis: {trend_error}")
+                    trend_analysis = {"trend_direction": "UNKNOWN", "ema_distance_pct": 0}
+            
+            # 현재 지표 안전하게 추출
+            try:
+                current_indicators = {
+                    "current_price": float(df['close'].iloc[-1]),
+                    "rsi_14": float(df['RSI_14'].iloc[-1]) if not pd.isna(df['RSI_14'].iloc[-1]) else 50.0,
+                    "rsi_21": float(df['RSI_21'].iloc[-1]) if not pd.isna(df['RSI_21'].iloc[-1]) else 50.0,
+                    "macd": float(df['MACD'].iloc[-1]) if not pd.isna(df['MACD'].iloc[-1]) else 0.0,
+                    "macd_signal": float(df['MACD_signal'].iloc[-1]) if not pd.isna(df['MACD_signal'].iloc[-1]) else 0.0,
+                    "macd_histogram": float(df['MACD_histogram'].iloc[-1]) if not pd.isna(df['MACD_histogram'].iloc[-1]) else 0.0,
+                    "stoch_k": float(df['Stoch_K'].iloc[-1]) if not pd.isna(df['Stoch_K'].iloc[-1]) else 50.0,
+                    "stoch_d": float(df['Stoch_D'].iloc[-1]) if not pd.isna(df['Stoch_D'].iloc[-1]) else 50.0,
+                    "williams_r": float(df['Williams_R'].iloc[-1]) if not pd.isna(df['Williams_R'].iloc[-1]) else -50.0,
+                    "atr": float(df['ATR'].iloc[-1]) if not pd.isna(df['ATR'].iloc[-1]) else (df['high'].iloc[-1] - df['low'].iloc[-1]) * 0.02,
+                    "volume": float(df['volume'].iloc[-1])
+                }
+            except IndexError as idx_error:
+                print(f"Index error in {tf_name} indicators extraction: {idx_error}")
+                continue
+            except Exception as ind_error:
+                print(f"Error extracting {tf_name} indicators: {ind_error}")
+                continue
             
             # 긴급 모드에서는 더 많은 최근 캔들 데이터 저장
             candle_count = 10 if emergency_mode and tf_name == "1m" else 5
@@ -910,6 +1118,9 @@ def fetch_multi_timeframe_data(emergency_mode=False):
             timeframe_display = tf_name.upper()
             if emergency_mode and tf_name == "1m":
                 timeframe_display += " (EMERGENCY)"
+            elif tf_name in ['1d', '1w']:
+                timeframe_display += " (TREND)"
+            
             print(f"Collected {timeframe_display} data: {len(df)} candles")
             
         except Exception as e:
@@ -1130,19 +1341,21 @@ def handle_position_closure(current_price, side, amount, current_trade_id=None):
                 print("=============================")
 
 # ===== 메인 프로그램 시작 =====
-print("\n=== Ethereum Day Trading Bot Started (v2.2 - ATR Dynamic SL/TP) ===") # <--- 수정됨
+print("\n=== Ethereum Day Trading Bot Started (v2.3 - Trend Analysis + Daily/Weekly) ===") 
 print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 print("Trading Pair:", symbol)
-print("Strategy: Day Trading (5m/15m/1h analysis)")
+print("Strategy: Day Trading + Trend Analysis (5m/15m/1h/1d/1w analysis)")
 print("AI Engine: Google Gemini 2.5 Flash")
 print("Asset: Ethereum Futures")
-print("Leverage Range: 5-35x (Dynamic)")
-print("SL/TP Range: Dynamic based on ATR (Volatility)") # <--- 수정됨
+print("Leverage Range: 5-50x (Dynamic)")
+print("SL/TP Range: Dynamic based on ATR + Trend Strategy")
+print("Trend Strategies: WITH_TREND (High Conviction) vs COUNTER_TREND (Scalping)")
 print("Market Sentiment: Funding Rate, OI, L/S Ratio, Liquidations")
 print("News Analysis: Real-time Ethereum news sentiment")
 print("Emergency System: Sudden event detection & response")
 print("Flash Trading: Rapid opportunity capture")
 print("Momentum Indicators: RSI, MACD, Stochastic, Williams %R")
+print("Trend Analysis: Daily & Weekly EMA-based trend detection")
 print("Execution Frequency: Every 2 minutes (30s during events)")
 print("Trading Hours: 24/7 Unlimited")
 print("Min Margin: 100 USDT")
@@ -1326,7 +1539,9 @@ while True:
                                 'sl_price': sl_price,
                                 'tp_price': tp_price,
                                 'position_size_percentage': position_size,
-                                'investment_amount': investment_amount
+                                'investment_amount': investment_amount,
+                                'trend_strategy': 'FLASH_TRADE',
+                                'conviction_level': 'HIGH' if is_ultra_fast else 'MEDIUM'
                             }
                             trade_id = save_trade(trade_data)
                             
@@ -1352,13 +1567,13 @@ while True:
                 continue
                 
             time.sleep(5)
-            print("No position. Analyzing market for ethereum day trading opportunities...")
+            print("No position. Analyzing market for ethereum day trading opportunities (with trend analysis)...")
 
-            # ===== 5. 일반적인 이더리움 데이트레이딩 분석 =====
+            # ===== 5. 일반적인 이더리움 데이트레이딩 분석 (추세 분석 포함) =====
             multi_tf_data = fetch_multi_timeframe_data()
             market_sentiment = fetch_market_sentiment()
             
-            # ===== 5. 이더리움 뉴스 분석 추가 =====
+            # ===== 6. 이더리움 뉴스 분석 추가 =====
             print("Fetching latest Ethereum news...")
             ethereum_news = fetch_ethereum_news()
             news_sentiment = analyze_news_sentiment(ethereum_news)
@@ -1378,13 +1593,37 @@ while True:
             historical_trading_data = get_historical_trading_data(limit=3)
             performance_metrics = get_performance_metrics()
             
-            # ===== 6. Gemini 분석을 위한 데이터 준비 =====
-            # 15분봉 ATR 값을 AI 분석에 포함 # <--- 추가됨 (Step 1)
+            # ===== 7. 추세 분석 및 전략 결정 =====
+            # 일봉과 주봉 추세 분석 데이터 추출 (안전한 처리)
+            daily_trend = {}
+            weekly_trend = {}
+            
+            if '1d' in multi_tf_data and 'trend_analysis' in multi_tf_data['1d']['current_indicators']:
+                daily_trend = multi_tf_data['1d']['current_indicators']['trend_analysis']
+            else:
+                daily_trend = {"trend_direction": "UNKNOWN", "ema_distance_pct": 0}
+            
+            if '1w' in multi_tf_data and 'trend_analysis' in multi_tf_data['1w']['current_indicators']:
+                weekly_trend = multi_tf_data['1w']['current_indicators']['trend_analysis']
+            else:
+                weekly_trend = {"trend_direction": "UNKNOWN", "ema_distance_pct": 0}
+            
+            print(f"\n=== TREND ANALYSIS ===")
+            print(f"Daily Trend: {daily_trend.get('trend_direction', 'UNKNOWN')}")
+            print(f"Weekly Trend: {weekly_trend.get('trend_direction', 'UNKNOWN')}")
+            if daily_trend.get('ema_distance_pct') is not None:
+                print(f"Daily EMA Distance: {daily_trend['ema_distance_pct']:.2f}%")
+            if weekly_trend.get('ema_distance_pct') is not None:
+                print(f"Weekly EMA Distance: {weekly_trend['ema_distance_pct']:.2f}%")
+            print("=====================")
+            
+            # ===== 8. Gemini 분석을 위한 데이터 준비 =====
+            # 15분봉 ATR 값을 AI 분석에 포함 
             main_tf_atr = multi_tf_data.get('15m', {}).get('current_indicators', {}).get('atr', 0)
 
             market_analysis = {
                 "current_price": current_price,
-                "current_atr_15m": main_tf_atr, # <--- 추가됨
+                "current_atr_15m": main_tf_atr,
                 "timeframes": multi_tf_data,
                 "market_sentiment": market_sentiment,
                 "news_analysis": {
@@ -1394,6 +1633,10 @@ while True:
                     "sentiment_strength": news_sentiment['sentiment_strength'],
                     "recent_headlines": [news['title'] for news in ethereum_news[:5]]
                 },
+                "trend_analysis": {
+                    "daily_trend": daily_trend,
+                    "weekly_trend": weekly_trend
+                },
                 "recent_trades": historical_trading_data,
                 "performance_summary": {
                     "total_trades": performance_metrics["total_trades"],
@@ -1402,33 +1645,53 @@ while True:
                 }
             }
             
-            # ===== 7. Gemini AI 트레이딩 결정 요청 (이더리움 + 뉴스 특화) =====
-            # <--- 수정됨 (Step 2)
+            # ===== 9. Gemini AI 트레이딩 결정 요청 (추세 분석 특화) =====
             system_prompt = """
-You are an expert Ethereum day trader. You MUST respond with ONLY a valid JSON object, no other text.
+You are an expert Ethereum day trader with advanced trend analysis capabilities. You MUST respond with ONLY a valid JSON object, no other text.
 
 CRITICAL: Your response must be ONLY valid JSON. No explanations, no markdown, no code blocks, no additional text.
 
 ANALYSIS PROCESS:
-1. MARKET EVENTS: Check if sudden event detected - adjust strategy accordingly
-2. TIMEFRAME PRIORITY: If 1m data available (emergency mode), prioritize 1m signals for ultra-fast response
-3. NEWS SENTIMENT: BULLISH news supports LONG, BEARISH supports SHORT
-4. MOMENTUM: Use RSI, MACD, Stochastic for entry timing
-5. MARKET SENTIMENT: Funding rate, OI, L/S ratio for contrarian signals
-6. ETH VOLATILITY: Can move 5-10% in hours, 1-3% in minutes during events
+1. TREND ANALYSIS FIRST: Check daily and weekly trend data to determine long-term direction
+2. TREND STRATEGY SELECTION:
+   - WITH_TREND: Short-term signal matches long-term trend → High conviction, bigger position, wider TP
+   - COUNTER_TREND: Short-term signal opposes long-term trend → Low conviction scalping, smaller position, tight TP/SL
+   - NEUTRAL: Unclear trends → Medium conviction, standard approach
+3. MARKET EVENTS: Check if sudden event detected - adjust strategy accordingly
+4. TIMEFRAME PRIORITY: If 1m data available (emergency mode), prioritize 1m signals for ultra-fast response
+5. NEWS SENTIMENT: BULLISH news supports LONG, BEARISH supports SHORT
+6. MOMENTUM: Use RSI, MACD, Stochastic for entry timing
+7. MARKET SENTIMENT: Funding rate, OI, L/S ratio for contrarian signals
+8. ETH VOLATILITY: Can move 5-10% in hours, 1-3% in minutes during events
 
-POSITION SIZING:
-- High conviction (80%+): 0.3-0.6 margin, 15-35x leverage
-- Medium conviction (65-80%): 0.1-0.3 margin, 5-20x leverage  
-- Low conviction (<65%): NO_POSITION
+TREND STRATEGY RULES:
+A) WITH_TREND (追势交易):
+   - When short-term signal aligns with daily/weekly trend
+   - High conviction: 0.4-0.7 margin, 20-40x leverage
+   - Wider TP: 3.5-5.0 * ATR (let profits run with trend)
+   - Standard SL: 1.5-2.0 * ATR
+
+B) COUNTER_TREND (逆势交易/短线回调):
+   - When short-term signal opposes daily/weekly trend
+   - Low conviction scalping: 0.1-0.25 margin, 8-15x leverage  
+   - Tight TP: 1.5-2.5 * ATR (quick profits against the tide)
+   - Tight SL: 1.0-1.5 * ATR (fast exit if wrong)
+
+C) NEUTRAL (中性):
+   - Unclear or sideways trends
+   - Medium conviction: 0.2-0.4 margin, 10-25x leverage
+   - Standard TP: 2.5-3.5 * ATR
+   - Standard SL: 1.2-1.8 * ATR
+
+POSITION SIZING MODIFIERS:
+- Strong trends (STRONG_UPTREND/STRONG_DOWNTREND): +0.1 to position size
 - Event detected: +0.1 to position size if signals align
+- High news sentiment strength (>0.7): +0.05 to position size
 
-SL/TP (ATR-based):
-- Use the provided 'current_atr_15m' as a baseline for market volatility.
-- SL should be placed at a multiple of ATR to avoid market noise.
-- A good starting point is SL at 1.0-2.0 * ATR and TP at 2.0-4.0 * ATR.
-- The AI should decide the optimal multipliers based on other indicators.
-- Ensure at least 1:1.5 Risk/Reward ratio.
+SL/TP (ATR-based + Trend-adjusted):
+- Use the provided 'current_atr_15m' as baseline volatility measure
+- Adjust multipliers based on trend strategy as outlined above
+- Ensure at least 1:1.5 Risk/Reward ratio for counter-trend, 1:2+ for with-trend
 
 RESPOND WITH ONLY THIS JSON FORMAT:
 {
@@ -1437,8 +1700,13 @@ RESPOND WITH ONLY THIS JSON FORMAT:
   "recommended_leverage": 20,
   "sl_atr_multiplier": 1.5,
   "tp_atr_multiplier": 3.0,
-  "reasoning": "Brief analysis in one sentence based on ATR and other factors."
+  "trend_strategy": "WITH_TREND",
+  "conviction_level": "HIGH", 
+  "reasoning": "Brief analysis mentioning trend alignment and ATR-based levels."
 }
+
+Valid trend_strategy values: "WITH_TREND", "COUNTER_TREND", "NEUTRAL"
+Valid conviction_level values: "VERY_HIGH", "HIGH", "MEDIUM", "LOW"
 """
             
             try:
@@ -1446,7 +1714,7 @@ RESPOND WITH ONLY THIS JSON FORMAT:
                 
                 response = model.generate_content([
                     system_prompt,
-                    f"Ethereum Market Analysis Data (including events and news): {market_analysis_json}"
+                    f"Ethereum Market Analysis Data (with Daily/Weekly Trends): {market_analysis_json}"
                 ])
                 
                 response_content = response.text.strip()
@@ -1491,16 +1759,32 @@ RESPOND WITH ONLY THIS JSON FORMAT:
 
                 trading_decision = json.loads(cleaned_response)
 
-                print(f"AI 거래 결정 (Ethereum Gemini + News + Events + ATR):")
+                print(f"\nAI 거래 결정 (Ethereum Gemini + Trend Analysis + News + Events + ATR):")
                 print(f"방향: {trading_decision['direction']}")
+                print(f"추세 전략: {trading_decision.get('trend_strategy', 'NEUTRAL')}")
+                print(f"확신 수준: {trading_decision.get('conviction_level', 'MEDIUM')}")
                 print(f"추천 포지션 크기: {trading_decision['recommended_position_size']*100:.1f}%")
                 print(f"추천 레버리지: {trading_decision['recommended_leverage']}x")
-                print(f"스탑로스 ATR 배수: {trading_decision.get('sl_atr_multiplier', 'N/A')}") # <--- 수정됨
-                print(f"테이크프로핏 ATR 배수: {trading_decision.get('tp_atr_multiplier', 'N/A')}") # <--- 수정됨
+                print(f"스탑로스 ATR 배수: {trading_decision.get('sl_atr_multiplier', 'N/A')}")
+                print(f"테이크프로핏 ATR 배수: {trading_decision.get('tp_atr_multiplier', 'N/A')}")
                 print(f"분석 근거: {trading_decision['reasoning']}")
                 
                 if market_event.get("event_detected"):
-                    print(f"⚠️  Event Influence: {market_event.get('event_type')} considered in decision")
+                    print(f"⚠️ Event Influence: {market_event.get('event_type')} considered in decision")
+                
+                # ===== 10. 추세 전략에 따른 최종 조정 =====
+                # AI 결과를 바탕으로 추세 전략 결정 함수 호출 (필요시 추가 조정용)
+                trend_strategy_data = determine_trend_strategy(
+                    trading_decision['direction'], daily_trend, weekly_trend
+                )
+                
+                print(f"\n=== TREND STRATEGY CONFIRMATION ===")
+                print(f"Strategy Type: {trend_strategy_data['strategy_type']}")
+                print(f"Conviction Level: {trend_strategy_data['conviction_level']}")
+                print(f"Trend Alignment: {trend_strategy_data['trend_alignment']}")
+                print(f"Primary Timeframe: {trend_strategy_data['primary_timeframe']}")
+                print(f"Long-term Trend: {trend_strategy_data['long_term_trend']}")
+                print("===================================")
                 
                 analysis_data = {
                     'current_price': current_price,
@@ -1510,7 +1794,11 @@ RESPOND WITH ONLY THIS JSON FORMAT:
                     'sl_atr_multiplier': trading_decision.get('sl_atr_multiplier'),
                     'tp_atr_multiplier': trading_decision.get('tp_atr_multiplier'),
                     'reasoning': trading_decision['reasoning'],
-                    'news_sentiment': news_sentiment['sentiment']
+                    'news_sentiment': news_sentiment['sentiment'],
+                    'trend_strategy': trading_decision.get('trend_strategy', 'NEUTRAL'),
+                    'conviction_level': trading_decision.get('conviction_level', 'MEDIUM'),
+                    'daily_trend': daily_trend.get('trend_direction', 'UNKNOWN'),
+                    'weekly_trend': weekly_trend.get('trend_direction', 'UNKNOWN')
                 }
                 analysis_id = save_ai_analysis(analysis_data)
                 
@@ -1528,13 +1816,18 @@ RESPOND WITH ONLY THIS JSON FORMAT:
                 position_size_percentage = trading_decision['recommended_position_size']
                 recommended_leverage = trading_decision['recommended_leverage']
                 
-                investment_amount = available_capital * position_size_percentage
+                # 추세 전략에 따른 포지션 사이즈 조정
+                trend_multiplier = trend_strategy_data.get('position_size_multiplier', 1.0)
+                final_position_size = position_size_percentage * trend_multiplier
+                final_position_size = min(final_position_size, 0.8)  # 최대 80% 제한
+                
+                investment_amount = available_capital * final_position_size
                 
                 if investment_amount < 100:
                     investment_amount = 100
                     print(f"최소 투입 마진(100 USDT)으로 조정됨")
 
-                print(f"투입 마진: {investment_amount:.2f} USDT")
+                print(f"투입 마진: {investment_amount:.2f} USDT (Trend Adjusted: {trend_multiplier:.2f}x)")
                 
                 total_position_value = investment_amount * recommended_leverage
                 print(f"총 포지션 가치: {total_position_value:.2f} USDT")
@@ -1549,10 +1842,13 @@ RESPOND WITH ONLY THIS JSON FORMAT:
                 exchange.set_leverage(recommended_leverage, symbol)
                 print(f"레버리지 설정: {recommended_leverage}x")
 
-                # <--- 수정됨 (Step 3)
-                # AI가 반환한 ATR 배수 사용
-                sl_atr_multiplier = trading_decision.get('sl_atr_multiplier', 1.5) # 기본값 1.5
-                tp_atr_multiplier = trading_decision.get('tp_atr_multiplier', 3.0) # 기본값 3.0
+                # AI가 반환한 ATR 배수 사용 (추세 전략에 따라 조정)
+                base_sl_atr_multiplier = trading_decision.get('sl_atr_multiplier', 1.5)
+                base_tp_atr_multiplier = trading_decision.get('tp_atr_multiplier', 3.0)
+                
+                # 추세 전략에 따른 SL/TP 조정
+                final_sl_atr_multiplier = base_sl_atr_multiplier * trend_strategy_data.get('sl_atr_multiplier', 1.0) / 1.5
+                final_tp_atr_multiplier = base_tp_atr_multiplier * trend_strategy_data.get('tp_atr_multiplier', 1.0) / 2.5
                 
                 if main_tf_atr <= 0:
                     print("ATR 값이 유효하지 않아 이번 사이클은 건너뜁니다.")
@@ -1563,9 +1859,9 @@ RESPOND WITH ONLY THIS JSON FORMAT:
                     order = exchange.create_market_buy_order(symbol, amount)
                     entry_price = current_price
                     
-                    # ATR 기반 SL/TP 가격 계산
-                    sl_price = round(entry_price - (sl_atr_multiplier * main_tf_atr), 2)
-                    tp_price = round(entry_price + (tp_atr_multiplier * main_tf_atr), 2)
+                    # ATR 기반 + 추세 조정된 SL/TP 가격 계산
+                    sl_price = round(entry_price - (final_sl_atr_multiplier * main_tf_atr), 2)
+                    tp_price = round(entry_price + (final_tp_atr_multiplier * main_tf_atr), 2)
                     
                     exchange.create_order(symbol, 'STOP_MARKET', 'sell', amount, None, {'stopPrice': sl_price})
                     exchange.create_order(symbol, 'TAKE_PROFIT_MARKET', 'sell', amount, None, {'stopPrice': tp_price})
@@ -1577,8 +1873,10 @@ RESPOND WITH ONLY THIS JSON FORMAT:
                         'leverage': recommended_leverage,
                         'sl_price': sl_price,
                         'tp_price': tp_price,
-                        'position_size_percentage': position_size_percentage,
-                        'investment_amount': investment_amount
+                        'position_size_percentage': final_position_size,
+                        'investment_amount': investment_amount,
+                        'trend_strategy': trading_decision.get('trend_strategy', 'NEUTRAL'),
+                        'conviction_level': trading_decision.get('conviction_level', 'MEDIUM')
                     }
                     trade_id = save_trade(trade_data)
                     
@@ -1588,24 +1886,28 @@ RESPOND WITH ONLY THIS JSON FORMAT:
                     conn.commit()
                     conn.close()
                     
-                    # 결과 출력문 수정
-                    print(f"\n=== ETH LONG Position Opened (ATR Dynamic) ===")
+                    # 결과 출력문
+                    print(f"\n=== ETH LONG Position Opened (Trend-Adjusted ATR Dynamic) ===")
                     print(f"Entry: ${entry_price:,.2f} (15m ATR: ${main_tf_atr:.2f})")
-                    print(f"Stop Loss: ${sl_price:,.2f} (Entry - {sl_atr_multiplier} * ATR)")
-                    print(f"Take Profit: ${tp_price:,.2f} (Entry + {tp_atr_multiplier} * ATR)")
+                    print(f"Stop Loss: ${sl_price:,.2f} (Entry - {final_sl_atr_multiplier:.2f} * ATR)")
+                    print(f"Take Profit: ${tp_price:,.2f} (Entry + {final_tp_atr_multiplier:.2f} * ATR)")
                     print(f"Leverage: {recommended_leverage}x")
+                    print(f"Trend Strategy: {trading_decision.get('trend_strategy', 'NEUTRAL')}")
+                    print(f"Conviction Level: {trading_decision.get('conviction_level', 'MEDIUM')}")
+                    print(f"Daily Trend: {daily_trend.get('trend_direction', 'UNKNOWN')}")
+                    print(f"Weekly Trend: {weekly_trend.get('trend_direction', 'UNKNOWN')}")
                     print(f"News Sentiment: {news_sentiment['sentiment']}")
                     if market_event.get("event_detected"):
                         print(f"Event Context: {market_event.get('event_type')}")
-                    print("=======================================================")
+                    print("=============================================================")
 
                 elif action == "short":
                     order = exchange.create_market_sell_order(symbol, amount)
                     entry_price = current_price
                     
-                    # ATR 기반 SL/TP 가격 계산
-                    sl_price = round(entry_price + (sl_atr_multiplier * main_tf_atr), 2)
-                    tp_price = round(entry_price - (tp_atr_multiplier * main_tf_atr), 2)
+                    # ATR 기반 + 추세 조정된 SL/TP 가격 계산
+                    sl_price = round(entry_price + (final_sl_atr_multiplier * main_tf_atr), 2)
+                    tp_price = round(entry_price - (final_tp_atr_multiplier * main_tf_atr), 2)
                     
                     exchange.create_order(symbol, 'STOP_MARKET', 'buy', amount, None, {'stopPrice': sl_price})
                     exchange.create_order(symbol, 'TAKE_PROFIT_MARKET', 'buy', amount, None, {'stopPrice': tp_price})
@@ -1617,8 +1919,10 @@ RESPOND WITH ONLY THIS JSON FORMAT:
                         'leverage': recommended_leverage,
                         'sl_price': sl_price,
                         'tp_price': tp_price,
-                        'position_size_percentage': position_size_percentage,
-                        'investment_amount': investment_amount
+                        'position_size_percentage': final_position_size,
+                        'investment_amount': investment_amount,
+                        'trend_strategy': trading_decision.get('trend_strategy', 'NEUTRAL'),
+                        'conviction_level': trading_decision.get('conviction_level', 'MEDIUM')
                     }
                     trade_id = save_trade(trade_data)
                     
@@ -1628,16 +1932,20 @@ RESPOND WITH ONLY THIS JSON FORMAT:
                     conn.commit()
                     conn.close()
                     
-                    # 결과 출력문 수정
-                    print(f"\n=== ETH SHORT Position Opened (ATR Dynamic) ===")
+                    # 결과 출력문
+                    print(f"\n=== ETH SHORT Position Opened (Trend-Adjusted ATR Dynamic) ===")
                     print(f"Entry: ${entry_price:,.2f} (15m ATR: ${main_tf_atr:.2f})")
-                    print(f"Stop Loss: ${sl_price:,.2f} (Entry + {sl_atr_multiplier} * ATR)")
-                    print(f"Take Profit: ${tp_price:,.2f} (Entry - {tp_atr_multiplier} * ATR)")
+                    print(f"Stop Loss: ${sl_price:,.2f} (Entry + {final_sl_atr_multiplier:.2f} * ATR)")
+                    print(f"Take Profit: ${tp_price:,.2f} (Entry - {final_tp_atr_multiplier:.2f} * ATR)")
                     print(f"Leverage: {recommended_leverage}x")
+                    print(f"Trend Strategy: {trading_decision.get('trend_strategy', 'NEUTRAL')}")
+                    print(f"Conviction Level: {trading_decision.get('conviction_level', 'MEDIUM')}")
+                    print(f"Daily Trend: {daily_trend.get('trend_direction', 'UNKNOWN')}")
+                    print(f"Weekly Trend: {weekly_trend.get('trend_direction', 'UNKNOWN')}")
                     print(f"News Sentiment: {news_sentiment['sentiment']}")
                     if market_event.get("event_detected"):
                         print(f"Event Context: {market_event.get('event_type')}")
-                    print("========================================================")
+                    print("==============================================================")
                     
             except json.JSONDecodeError as e:
                 print(f"JSON 파싱 오류: {e}")
@@ -1650,7 +1958,7 @@ RESPOND WITH ONLY THIS JSON FORMAT:
                 time.sleep(30)
                 continue
 
-        # ===== 12. 대기 시간 (1분봉 긴급 모드 최적화) =====
+        # ===== 11. 대기 시간 (추세 분석 최적화) =====
         if current_side:
             if market_event.get("event_detected"):
                 if market_event.get('ultra_fast') or market_event.get('primary_timeframe') == '1m':
@@ -1660,7 +1968,25 @@ RESPOND WITH ONLY THIS JSON FORMAT:
                     time.sleep(30)
                     print("🚨 Event monitoring (30s intervals)")
             else:
-                time.sleep(60)
+                # 추세 순응 거래는 더 긴 시간 대기 (추세가 이어질 시간 제공)
+                current_trade = get_latest_open_trade()
+                if current_trade:
+                    conn = sqlite3.connect(DB_FILE)
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT trend_strategy FROM trades WHERE id = ?", (current_trade['id'],))
+                    result = cursor.fetchone()
+                    conn.close()
+                    
+                    if result and result[0] == 'WITH_TREND':
+                        time.sleep(90)  # 추세 순응 거래는 90초 대기
+                        print("📈 Trend-following position monitoring (90s intervals)")
+                    elif result and result[0] == 'COUNTER_TREND':
+                        time.sleep(45)  # 역추세 거래는 45초 대기 (빠른 모니터링)
+                        print("🔄 Counter-trend scalping monitoring (45s intervals)")
+                    else:
+                        time.sleep(60)  # 기본 60초
+                else:
+                    time.sleep(60)
         else:
             if market_event.get("event_detected"):
                 if market_event.get('ultra_fast'):
@@ -1670,8 +1996,8 @@ RESPOND WITH ONLY THIS JSON FORMAT:
                     time.sleep(60)
                     print("🚨 Event opportunity scanning (60s)")
             else:
-                time.sleep(120)
+                time.sleep(120)  # 포지션이 없을 때는 2분 대기
 
     except Exception as e:
-        print(f"\n Main Loop Error: {e}")
+        print(f"\nMain Loop Error: {e}")
         time.sleep(10)
