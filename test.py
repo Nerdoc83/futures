@@ -1,5 +1,5 @@
 """
-AI 이더리움 데이트레이딩 봇 - Gemini + 고급 지표 + 뉴스 분석 (v2.1)
+AI 이더리움 데이트레이딩 봇 - Gemini + 고급 지표 + 뉴스 분석 (v2.2 - ATR Dynamic SL/TP)
 --------------------------------------------------------
 기능:
 - 데이트레이딩 최적화 (5분, 15분, 1시간 차트)
@@ -8,7 +8,7 @@ AI 이더리움 데이트레이딩 봇 - Gemini + 고급 지표 + 뉴스 분석 
 - 실시간 이더리움 뉴스 분석 (SERP API)
 - Gemini API 기반 AI 분석
 - 동적 레버리지 및 포지션 사이징 (5-50배)
-- 개선된 SL/TP 설정 (원금 대비 10-50% 범위)
+- 개선된 SL/TP 설정 (ATR 기반 동적 설정) # <--- 수정됨
 - 24시간 무제한 거래
 - 이더리움 선물 거래 최적화
 - 최소 투자금액: 100 USDT
@@ -525,8 +525,8 @@ def setup_database():
         leverage INTEGER NOT NULL,
         sl_price REAL NOT NULL,
         tp_price REAL NOT NULL,
-        sl_percentage REAL NOT NULL,
-        tp_percentage REAL NOT NULL,
+        sl_percentage REAL,
+        tp_percentage REAL,
         position_size_percentage REAL NOT NULL,
         investment_amount REAL NOT NULL,
         status TEXT DEFAULT 'OPEN',
@@ -546,8 +546,10 @@ def setup_database():
         direction TEXT NOT NULL,
         recommended_position_size REAL NOT NULL,
         recommended_leverage INTEGER NOT NULL,
-        stop_loss_percentage REAL NOT NULL,
-        take_profit_percentage REAL NOT NULL,
+        stop_loss_percentage REAL,
+        take_profit_percentage REAL,
+        sl_atr_multiplier REAL,
+        tp_atr_multiplier REAL,
         reasoning TEXT NOT NULL,
         news_sentiment TEXT,
         trade_id INTEGER,
@@ -571,13 +573,15 @@ def setup_database():
     
     # 기존 테이블에 새로운 컬럼 추가 (마이그레이션)
     try:
-        # news_sentiment 컬럼이 이미 존재하는지 확인
         cursor.execute("PRAGMA table_info(ai_analysis)")
         columns = [column[1] for column in cursor.fetchall()]
         
         if 'news_sentiment' not in columns:
             cursor.execute('ALTER TABLE ai_analysis ADD COLUMN news_sentiment TEXT DEFAULT "NEUTRAL"')
-            print("Added news_sentiment column to ai_analysis table")
+        if 'sl_atr_multiplier' not in columns:
+            cursor.execute('ALTER TABLE ai_analysis ADD COLUMN sl_atr_multiplier REAL')
+        if 'tp_atr_multiplier' not in columns:
+            cursor.execute('ALTER TABLE ai_analysis ADD COLUMN tp_atr_multiplier REAL')
             
     except sqlite3.Error as e:
         print(f"Database migration note: {e}")
@@ -591,49 +595,25 @@ def save_ai_analysis(analysis_data, trade_id=None):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     
-    try:
-        cursor.execute('''
-        INSERT INTO ai_analysis (
-            timestamp, current_price, direction, recommended_position_size, 
-            recommended_leverage, stop_loss_percentage, take_profit_percentage, 
-            reasoning, news_sentiment, trade_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            datetime.now().isoformat(),
-            analysis_data.get('current_price', 0),
-            analysis_data.get('direction', 'NO_POSITION'),
-            analysis_data.get('recommended_position_size', 0),
-            analysis_data.get('recommended_leverage', 0),
-            analysis_data.get('stop_loss_percentage', 0),
-            analysis_data.get('take_profit_percentage', 0),
-            analysis_data.get('reasoning', ''),
-            analysis_data.get('news_sentiment', 'NEUTRAL'),
-            trade_id
-        ))
-    except sqlite3.OperationalError as e:
-        if "no column named news_sentiment" in str(e):
-            # news_sentiment 컬럼이 없는 경우 기본 쿼리 사용
-            print("Using fallback query without news_sentiment column")
-            cursor.execute('''
-            INSERT INTO ai_analysis (
-                timestamp, current_price, direction, recommended_position_size, 
-                recommended_leverage, stop_loss_percentage, take_profit_percentage, 
-                reasoning, trade_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                datetime.now().isoformat(),
-                analysis_data.get('current_price', 0),
-                analysis_data.get('direction', 'NO_POSITION'),
-                analysis_data.get('recommended_position_size', 0),
-                analysis_data.get('recommended_leverage', 0),
-                analysis_data.get('stop_loss_percentage', 0),
-                analysis_data.get('take_profit_percentage', 0),
-                analysis_data.get('reasoning', ''),
-                trade_id
-            ))
-        else:
-            raise e
-    
+    cursor.execute('''
+    INSERT INTO ai_analysis (
+        timestamp, current_price, direction, recommended_position_size, 
+        recommended_leverage, sl_atr_multiplier, tp_atr_multiplier,
+        reasoning, news_sentiment, trade_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        datetime.now().isoformat(),
+        analysis_data.get('current_price', 0),
+        analysis_data.get('direction', 'NO_POSITION'),
+        analysis_data.get('recommended_position_size', 0),
+        analysis_data.get('recommended_leverage', 0),
+        analysis_data.get('sl_atr_multiplier', 0),
+        analysis_data.get('tp_atr_multiplier', 0),
+        analysis_data.get('reasoning', ''),
+        analysis_data.get('news_sentiment', 'NEUTRAL'),
+        trade_id
+    ))
+
     analysis_id = cursor.lastrowid
     conn.commit()
     conn.close()
@@ -670,8 +650,8 @@ def save_trade(trade_data):
     cursor.execute('''
     INSERT INTO trades (
         timestamp, action, entry_price, amount, leverage, sl_price, tp_price,
-        sl_percentage, tp_percentage, position_size_percentage, investment_amount
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        position_size_percentage, investment_amount
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (
         datetime.now().isoformat(),
         trade_data.get('action', ''),
@@ -680,8 +660,6 @@ def save_trade(trade_data):
         trade_data.get('leverage', 0),
         trade_data.get('sl_price', 0),
         trade_data.get('tp_price', 0),
-        trade_data.get('sl_percentage', 0),
-        trade_data.get('tp_percentage', 0),
         trade_data.get('position_size_percentage', 0),
         trade_data.get('investment_amount', 0)
     ))
@@ -1152,14 +1130,14 @@ def handle_position_closure(current_price, side, amount, current_trade_id=None):
                 print("=============================")
 
 # ===== 메인 프로그램 시작 =====
-print("\n=== Ethereum Day Trading Bot Started (v2.1 - Emergency Event Response) ===")
+print("\n=== Ethereum Day Trading Bot Started (v2.2 - ATR Dynamic SL/TP) ===") # <--- 수정됨
 print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 print("Trading Pair:", symbol)
 print("Strategy: Day Trading (5m/15m/1h analysis)")
 print("AI Engine: Google Gemini 2.5 Flash")
 print("Asset: Ethereum Futures")
 print("Leverage Range: 5-35x (Dynamic)")
-print("SL/TP Range: 10-60% on margin (Dynamic)")
+print("SL/TP Range: Dynamic based on ATR (Volatility)") # <--- 수정됨
 print("Market Sentiment: Funding Rate, OI, L/S Ratio, Liquidations")
 print("News Analysis: Real-time Ethereum news sentiment")
 print("Emergency System: Sudden event detection & response")
@@ -1242,8 +1220,6 @@ while True:
                     'leverage': 1,
                     'sl_price': 0,
                     'tp_price': 0,
-                    'sl_percentage': 0,
-                    'tp_percentage': 0,
                     'position_size_percentage': 0,
                     'investment_amount': 0
                 }
@@ -1308,14 +1284,14 @@ while True:
                         if investment_amount >= 100:  # 최소 투자금액 확인
                             if is_ultra_fast:
                                 print(f"⚡ ULTRA-FAST 1MIN SCALP: {flash_opportunity['direction']} with {investment_amount:.0f} USDT")
-                                # 초고속 거래용 매우 타이트한 SL/TP
-                                sl_percentage = 0.10  # 10% 손절 (매우 빠른 컷)
-                                tp_percentage = 0.15  # 15% 익절 (빠른 수익확정)
+                                # 초고속 거래용 매우 타이트한 SL/TP (원금대비 %로 유지)
+                                sl_percentage = 0.10
+                                tp_percentage = 0.15
                             else:
                                 print(f"🚀 Executing flash trade: {flash_opportunity['direction']} with {investment_amount:.0f} USDT")
-                                # 일반 플래시 거래용 SL/TP
-                                sl_percentage = 0.12  # 12% 손절
-                                tp_percentage = 0.20  # 20% 익절
+                                # 일반 플래시 거래용 SL/TP (원금대비 %로 유지)
+                                sl_percentage = 0.12
+                                tp_percentage = 0.20
                             
                             total_position_value = investment_amount * leverage
                             amount = math.ceil((total_position_value / current_price) * 10000) / 10000
@@ -1349,8 +1325,6 @@ while True:
                                 'leverage': leverage,
                                 'sl_price': sl_price,
                                 'tp_price': tp_price,
-                                'sl_percentage': sl_percentage,
-                                'tp_percentage': tp_percentage,
                                 'position_size_percentage': position_size,
                                 'investment_amount': investment_amount
                             }
@@ -1360,21 +1334,21 @@ while True:
                                 print(f"⚡ ULTRA-FAST 1MIN {flash_opportunity['direction']} EXECUTED!")
                                 print(f"Entry: ${current_price:,.2f}")
                                 print(f"SL: ${sl_price:,.2f} | TP: ${tp_price:,.2f}")
-                                print(f"Ultra-tight scalp (10%/15%) - 1min monitoring")
-                                time.sleep(15)  # 15초 후 재분석 (초고속)
+                                print(f"Ultra-tight scalp - 1min monitoring")
+                                time.sleep(15)
                             else:
                                 print(f"⚡ FLASH {flash_opportunity['direction']} EXECUTED!")
                                 print(f"Entry: ${current_price:,.2f}")
                                 print(f"SL: ${sl_price:,.2f} | TP: ${tp_price:,.2f}")
                                 print(f"Quick scalp target - monitoring closely...")
-                                time.sleep(30)  # 30초 후 재분석
+                                time.sleep(30)
                             
                             continue
                             
                     except Exception as e:
                         print(f"Flash trade execution error: {e}")
                 
-                time.sleep(60)  # 이벤트 감지 후 1분 대기
+                time.sleep(60)
                 continue
                 
             time.sleep(5)
@@ -1395,7 +1369,6 @@ while True:
                       f"Bearish: {news_sentiment['bearish_count']}, "
                       f"Strength: {news_sentiment['sentiment_strength']:.2f})")
                 
-                # 뉴스 분석 결과 저장
                 news_sentiment_with_titles = news_sentiment.copy()
                 news_sentiment_with_titles['news_titles'] = [news['title'] for news in ethereum_news]
                 save_news_analysis(news_sentiment_with_titles)
@@ -1406,8 +1379,12 @@ while True:
             performance_metrics = get_performance_metrics()
             
             # ===== 6. Gemini 분석을 위한 데이터 준비 =====
+            # 15분봉 ATR 값을 AI 분석에 포함 # <--- 추가됨 (Step 1)
+            main_tf_atr = multi_tf_data.get('15m', {}).get('current_indicators', {}).get('atr', 0)
+
             market_analysis = {
                 "current_price": current_price,
+                "current_atr_15m": main_tf_atr, # <--- 추가됨
                 "timeframes": multi_tf_data,
                 "market_sentiment": market_sentiment,
                 "news_analysis": {
@@ -1415,7 +1392,7 @@ while True:
                     "bullish_count": news_sentiment['bullish_count'],
                     "bearish_count": news_sentiment['bearish_count'],
                     "sentiment_strength": news_sentiment['sentiment_strength'],
-                    "recent_headlines": [news['title'] for news in ethereum_news[:5]]  # 최신 5개 헤드라인만
+                    "recent_headlines": [news['title'] for news in ethereum_news[:5]]
                 },
                 "recent_trades": historical_trading_data,
                 "performance_summary": {
@@ -1426,6 +1403,7 @@ while True:
             }
             
             # ===== 7. Gemini AI 트레이딩 결정 요청 (이더리움 + 뉴스 특화) =====
+            # <--- 수정됨 (Step 2)
             system_prompt = """
 You are an expert Ethereum day trader. You MUST respond with ONLY a valid JSON object, no other text.
 
@@ -1439,41 +1417,31 @@ ANALYSIS PROCESS:
 5. MARKET SENTIMENT: Funding rate, OI, L/S ratio for contrarian signals
 6. ETH VOLATILITY: Can move 5-10% in hours, 1-3% in minutes during events
 
-EMERGENCY EVENT RESPONSE:
-- If market_event.event_detected = true, consider higher conviction trades
-- 1m timeframe = ultra-fast scalping opportunities (hold 5-30 minutes)
-- 5m+ timeframe = regular day trading opportunities (hold 1-8 hours)
-- Ultra_fast events (1m) = quick scalp with tight stops
-- Sudden surges may create short opportunities (overextension)
-- Sudden drops may create long opportunities (oversold bounce)
-- Increase position size slightly if event aligns with other signals
-
 POSITION SIZING:
-- Ultra-fast (1m events): 0.1-0.3 margin, 5-15x leverage (quick scalp)
 - High conviction (80%+): 0.3-0.6 margin, 15-35x leverage
 - Medium conviction (65-80%): 0.1-0.3 margin, 5-20x leverage  
 - Low conviction (<65%): NO_POSITION
 - Event detected: +0.1 to position size if signals align
 
-SL/TP (margin-based):
-- Ultra-fast (1m): SL 0.08-0.15, TP 0.12-0.25 (tight stops)
-- Normal: SL 0.10-0.30, TP 0.20-0.60
-- Event times: SL 0.15-0.35, TP 0.25-0.70 (wider for volatility)
-- Min 1:1.5 Risk/Reward ratio
+SL/TP (ATR-based):
+- Use the provided 'current_atr_15m' as a baseline for market volatility.
+- SL should be placed at a multiple of ATR to avoid market noise.
+- A good starting point is SL at 1.0-2.0 * ATR and TP at 2.0-4.0 * ATR.
+- The AI should decide the optimal multipliers based on other indicators.
+- Ensure at least 1:1.5 Risk/Reward ratio.
 
 RESPOND WITH ONLY THIS JSON FORMAT:
 {
   "direction": "LONG",
   "recommended_position_size": 0.3,
   "recommended_leverage": 20,
-  "stop_loss_percentage": 0.15,
-  "take_profit_percentage": 0.30,
-  "reasoning": "Brief analysis in one sentence"
+  "sl_atr_multiplier": 1.5,
+  "tp_atr_multiplier": 3.0,
+  "reasoning": "Brief analysis in one sentence based on ATR and other factors."
 }
 """
             
             try:
-                # Gemini API 호출 (JSON 직렬화 안전하게)
                 market_analysis_json = json.dumps(market_analysis, ensure_ascii=False, indent=2)
                 
                 response = model.generate_content([
@@ -1484,33 +1452,24 @@ RESPOND WITH ONLY THIS JSON FORMAT:
                 response_content = response.text.strip()
                 print(f"Raw Gemini response (first 500 chars): {response_content[:500]}...")
                 
-                # 더 강력한 JSON 추출 및 정리
                 def extract_json_from_response(text):
-                    """응답에서 JSON을 안전하게 추출"""
                     import re
-                    
-                    # 1. 코드 블록 제거
                     if "```" in text:
-                        # 첫 번째 ```json 또는 ``` 이후부터 마지막 ``` 이전까지
                         start_markers = ["```json", "```"]
                         start_pos = -1
-                        
                         for marker in start_markers:
                             pos = text.find(marker)
                             if pos != -1:
                                 start_pos = pos + len(marker)
                                 break
-                        
                         if start_pos != -1:
                             end_pos = text.rfind("```")
                             if end_pos > start_pos:
                                 text = text[start_pos:end_pos]
                     
-                    # 2. JSON 객체 찾기 (가장 큰 { } 블록)
                     brace_count = 0
                     start_idx = -1
                     end_idx = -1
-                    
                     for i, char in enumerate(text):
                         if char == '{':
                             if brace_count == 0:
@@ -1521,74 +1480,35 @@ RESPOND WITH ONLY THIS JSON FORMAT:
                             if brace_count == 0 and start_idx != -1:
                                 end_idx = i + 1
                                 break
-                    
                     if start_idx != -1 and end_idx != -1:
                         json_text = text[start_idx:end_idx]
-                        
-                        # 3. 일반적인 JSON 오류 수정
-                        # 후행 쉼표 제거
                         json_text = re.sub(r',(\s*[}\]])', r'\1', json_text)
-                        
-                        # 잘못된 따옴표 수정
-                        json_text = json_text.replace(''', "'").replace(''', "'")
-                        json_text = json_text.replace('"', '"').replace('"', '"')
-                        
                         return json_text.strip()
-                    
                     return text.strip()
-                
-                # JSON 추출
+
                 cleaned_response = extract_json_from_response(response_content)
                 print(f"Cleaned JSON: {cleaned_response[:300]}...")
-                
-                # JSON 파싱 시도
-                try:
-                    trading_decision = json.loads(cleaned_response)
-                except json.JSONDecodeError as parse_error:
-                    print(f"First JSON parse failed: {parse_error}")
-                    print(f"Problematic JSON: {cleaned_response}")
-                    
-                    # 재시도: 더 간단한 추출
-                    import re
-                    json_match = re.search(r'\{[^{}]*"direction"[^{}]*\}', response_content, re.DOTALL)
-                    if json_match:
-                        simple_json = json_match.group(0)
-                        # 기본값으로 완성
-                        if '"direction"' in simple_json and '"reasoning"' not in simple_json:
-                            print("Using fallback decision: NO_POSITION")
-                            trading_decision = {
-                                "direction": "NO_POSITION",
-                                "recommended_position_size": 0.1,
-                                "recommended_leverage": 5,
-                                "stop_loss_percentage": 0.15,
-                                "take_profit_percentage": 0.25,
-                                "reasoning": "JSON parsing failed, skipping trade for safety"
-                            }
-                        else:
-                            raise parse_error
-                    else:
-                        raise parse_error
-                
-                print(f"AI 거래 결정 (Ethereum Gemini + News + Events):")
+
+                trading_decision = json.loads(cleaned_response)
+
+                print(f"AI 거래 결정 (Ethereum Gemini + News + Events + ATR):")
                 print(f"방향: {trading_decision['direction']}")
                 print(f"추천 포지션 크기: {trading_decision['recommended_position_size']*100:.1f}%")
                 print(f"추천 레버리지: {trading_decision['recommended_leverage']}x")
-                print(f"스탑로스 레벨 (원금 대비): {trading_decision['stop_loss_percentage']*100:.2f}%")
-                print(f"테이크프로핏 레벨 (원금 대비): {trading_decision['take_profit_percentage']*100:.2f}%")
+                print(f"스탑로스 ATR 배수: {trading_decision.get('sl_atr_multiplier', 'N/A')}") # <--- 수정됨
+                print(f"테이크프로핏 ATR 배수: {trading_decision.get('tp_atr_multiplier', 'N/A')}") # <--- 수정됨
                 print(f"분석 근거: {trading_decision['reasoning']}")
                 
-                # 이벤트 감지 시 추가 정보 표시
                 if market_event.get("event_detected"):
                     print(f"⚠️  Event Influence: {market_event.get('event_type')} considered in decision")
                 
-                # AI 분석 결과를 데이터베이스에 저장 (뉴스 감정 포함)
                 analysis_data = {
                     'current_price': current_price,
                     'direction': trading_decision['direction'],
                     'recommended_position_size': trading_decision['recommended_position_size'],
                     'recommended_leverage': trading_decision['recommended_leverage'],
-                    'stop_loss_percentage': trading_decision['stop_loss_percentage'],
-                    'take_profit_percentage': trading_decision['take_profit_percentage'],
+                    'sl_atr_multiplier': trading_decision.get('sl_atr_multiplier'),
+                    'tp_atr_multiplier': trading_decision.get('tp_atr_multiplier'),
                     'reasoning': trading_decision['reasoning'],
                     'news_sentiment': news_sentiment['sentiment']
                 }
@@ -1596,37 +1516,29 @@ RESPOND WITH ONLY THIS JSON FORMAT:
                 
                 action = trading_decision['direction'].lower()
                 
-                # ===== 9. 트레이딩 결정에 따른 액션 실행 =====
                 if action == "no_position":
                     print("현재 ETH 시장 상황에서는 포지션을 열지 않는 것이 좋습니다.")
                     print(f"이유: {trading_decision['reasoning']}")
-                    time.sleep(120)  # 2분 대기
+                    time.sleep(120)
                     continue
                     
-                # ===== 10. 투자 금액 및 레버리지 계산 (이더리움 최적화) =====
                 balance = exchange.fetch_balance()
                 available_capital = balance['USDT']['free']
                 
                 position_size_percentage = trading_decision['recommended_position_size']
                 recommended_leverage = trading_decision['recommended_leverage']
-                sl_percentage = trading_decision['stop_loss_percentage']
-                tp_percentage = trading_decision['take_profit_percentage']
                 
-                # 실제 투입할 마진 계산
                 investment_amount = available_capital * position_size_percentage
                 
-                # 최소 주문 금액(마진 기준) - 100 USDT
                 if investment_amount < 100:
                     investment_amount = 100
                     print(f"최소 투입 마진(100 USDT)으로 조정됨")
 
                 print(f"투입 마진: {investment_amount:.2f} USDT")
                 
-                # 총 포지션 가치(Notional Value) 계산
                 total_position_value = investment_amount * recommended_leverage
                 print(f"총 포지션 가치: {total_position_value:.2f} USDT")
 
-                # 총 포지션 가치 기준으로 ETH 수량 계산 (소수점 4자리)
                 amount = math.ceil((total_position_value / current_price) * 10000) / 10000
                 if amount <= 0:
                     print("계산된 주문 수량이 0보다 작거나 같아 주문을 진행하지 않습니다.")
@@ -1634,24 +1546,27 @@ RESPOND WITH ONLY THIS JSON FORMAT:
                     continue
                 print(f"주문 수량: {amount} ETH")
 
-                # 레버리지 설정
                 exchange.set_leverage(recommended_leverage, symbol)
                 print(f"레버리지 설정: {recommended_leverage}x")
 
-                # 레버리지를 고려한 SL/TP 가격 계산을 위한 가격 변동률 계산
-                sl_price_change_ratio = sl_percentage / recommended_leverage
-                tp_price_change_ratio = tp_percentage / recommended_leverage
+                # <--- 수정됨 (Step 3)
+                # AI가 반환한 ATR 배수 사용
+                sl_atr_multiplier = trading_decision.get('sl_atr_multiplier', 1.5) # 기본값 1.5
+                tp_atr_multiplier = trading_decision.get('tp_atr_multiplier', 3.0) # 기본값 3.0
+                
+                if main_tf_atr <= 0:
+                    print("ATR 값이 유효하지 않아 이번 사이클은 건너뜁니다.")
+                    time.sleep(60)
+                    continue
 
-                # ===== 11. 이더리움 포지션 진입 및 SL/TP 주문 실행 =====
                 if action == "long":
-                    # 롱 포지션 진입
                     order = exchange.create_market_buy_order(symbol, amount)
                     entry_price = current_price
                     
-                    sl_price = round(entry_price * (1 - sl_price_change_ratio), 2)
-                    tp_price = round(entry_price * (1 + tp_price_change_ratio), 2)
+                    # ATR 기반 SL/TP 가격 계산
+                    sl_price = round(entry_price - (sl_atr_multiplier * main_tf_atr), 2)
+                    tp_price = round(entry_price + (tp_atr_multiplier * main_tf_atr), 2)
                     
-                    # SL/TP 주문 생성
                     exchange.create_order(symbol, 'STOP_MARKET', 'sell', amount, None, {'stopPrice': sl_price})
                     exchange.create_order(symbol, 'TAKE_PROFIT_MARKET', 'sell', amount, None, {'stopPrice': tp_price})
                     
@@ -1662,40 +1577,36 @@ RESPOND WITH ONLY THIS JSON FORMAT:
                         'leverage': recommended_leverage,
                         'sl_price': sl_price,
                         'tp_price': tp_price,
-                        'sl_percentage': sl_percentage,
-                        'tp_percentage': tp_percentage,
                         'position_size_percentage': position_size_percentage,
                         'investment_amount': investment_amount
                     }
                     trade_id = save_trade(trade_data)
                     
-                    # AI 분석과 거래 연결
                     conn = sqlite3.connect(DB_FILE)
                     cursor = conn.cursor()
                     cursor.execute("UPDATE ai_analysis SET trade_id = ? WHERE id = ?", (trade_id, analysis_id))
                     conn.commit()
                     conn.close()
                     
-                    print(f"\n=== ETH LONG Position Opened (Events + News + Technical) ===")
-                    print(f"Entry: ${entry_price:,.2f}")
-                    print(f"Stop Loss: ${sl_price:,.2f} (Price change: -{sl_price_change_ratio*100:.2f}%)")
-                    print(f"Take Profit: ${tp_price:,.2f} (Price change: +{tp_price_change_ratio*100:.2f}%)")
+                    # 결과 출력문 수정
+                    print(f"\n=== ETH LONG Position Opened (ATR Dynamic) ===")
+                    print(f"Entry: ${entry_price:,.2f} (15m ATR: ${main_tf_atr:.2f})")
+                    print(f"Stop Loss: ${sl_price:,.2f} (Entry - {sl_atr_multiplier} * ATR)")
+                    print(f"Take Profit: ${tp_price:,.2f} (Entry + {tp_atr_multiplier} * ATR)")
                     print(f"Leverage: {recommended_leverage}x")
-                    print(f"Expected Margin P/L: -{sl_percentage*100:.1f}% / +{tp_percentage*100:.1f}%")
                     print(f"News Sentiment: {news_sentiment['sentiment']}")
                     if market_event.get("event_detected"):
                         print(f"Event Context: {market_event.get('event_type')}")
                     print("=======================================================")
 
                 elif action == "short":
-                    # 숏 포지션 진입
                     order = exchange.create_market_sell_order(symbol, amount)
                     entry_price = current_price
                     
-                    sl_price = round(entry_price * (1 + sl_price_change_ratio), 2)
-                    tp_price = round(entry_price * (1 - tp_price_change_ratio), 2)
+                    # ATR 기반 SL/TP 가격 계산
+                    sl_price = round(entry_price + (sl_atr_multiplier * main_tf_atr), 2)
+                    tp_price = round(entry_price - (tp_atr_multiplier * main_tf_atr), 2)
                     
-                    # SL/TP 주문 생성
                     exchange.create_order(symbol, 'STOP_MARKET', 'buy', amount, None, {'stopPrice': sl_price})
                     exchange.create_order(symbol, 'TAKE_PROFIT_MARKET', 'buy', amount, None, {'stopPrice': tp_price})
                     
@@ -1706,26 +1617,23 @@ RESPOND WITH ONLY THIS JSON FORMAT:
                         'leverage': recommended_leverage,
                         'sl_price': sl_price,
                         'tp_price': tp_price,
-                        'sl_percentage': sl_percentage,
-                        'tp_percentage': tp_percentage,
                         'position_size_percentage': position_size_percentage,
                         'investment_amount': investment_amount
                     }
                     trade_id = save_trade(trade_data)
                     
-                    # AI 분석과 거래 연결
                     conn = sqlite3.connect(DB_FILE)
                     cursor = conn.cursor()
                     cursor.execute("UPDATE ai_analysis SET trade_id = ? WHERE id = ?", (trade_id, analysis_id))
                     conn.commit()
                     conn.close()
                     
-                    print(f"\n=== ETH SHORT Position Opened (Events + News + Technical) ===")
-                    print(f"Entry: ${entry_price:,.2f}")
-                    print(f"Stop Loss: ${sl_price:,.2f} (Price change: +{sl_price_change_ratio*100:.2f}%)")
-                    print(f"Take Profit: ${tp_price:,.2f} (Price change: -{tp_price_change_ratio*100:.2f}%)")
+                    # 결과 출력문 수정
+                    print(f"\n=== ETH SHORT Position Opened (ATR Dynamic) ===")
+                    print(f"Entry: ${entry_price:,.2f} (15m ATR: ${main_tf_atr:.2f})")
+                    print(f"Stop Loss: ${sl_price:,.2f} (Entry + {sl_atr_multiplier} * ATR)")
+                    print(f"Take Profit: ${tp_price:,.2f} (Entry - {tp_atr_multiplier} * ATR)")
                     print(f"Leverage: {recommended_leverage}x")
-                    print(f"Expected Margin P/L: -{sl_percentage*100:.1f}% / +{tp_percentage*100:.1f}%")
                     print(f"News Sentiment: {news_sentiment['sentiment']}")
                     if market_event.get("event_detected"):
                         print(f"Event Context: {market_event.get('event_type')}")
@@ -1744,27 +1652,25 @@ RESPOND WITH ONLY THIS JSON FORMAT:
 
         # ===== 12. 대기 시간 (1분봉 긴급 모드 최적화) =====
         if current_side:
-            # 포지션이 있을 때는 더 자주 모니터링 (이벤트 대응)
             if market_event.get("event_detected"):
                 if market_event.get('ultra_fast') or market_event.get('primary_timeframe') == '1m':
-                    time.sleep(15)  # 1분봉 초고속 이벤트 시 15초마다
+                    time.sleep(15)
                     print("⚡ Ultra-fast monitoring (15s intervals)")
                 else:
-                    time.sleep(30)  # 일반 이벤트 감지 시 30초마다
+                    time.sleep(30)
                     print("🚨 Event monitoring (30s intervals)")
             else:
-                time.sleep(60)  # 일반적으로 1분마다
+                time.sleep(60)
         else:
-            # 포지션이 없을 때
             if market_event.get("event_detected"):
                 if market_event.get('ultra_fast'):
-                    time.sleep(30)  # 초고속 이벤트 시 30초마다 기회 포착
+                    time.sleep(30)
                     print("⚡ Ultra-fast opportunity scanning (30s)")
                 else:
-                    time.sleep(60)  # 일반 이벤트 감지 시 1분마다 기회 포착
+                    time.sleep(60)
                     print("🚨 Event opportunity scanning (60s)")
             else:
-                time.sleep(120)  # 일반적으로 2분마다 분석
+                time.sleep(120)
 
     except Exception as e:
         print(f"\n Main Loop Error: {e}")
