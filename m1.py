@@ -35,7 +35,7 @@ TRADING_PAIRS = {
     "BTC": {
         "symbol": "BTC/USDT",
         "binance_symbol": "BTCUSDT",
-        "min_investment": 40,
+        "min_investment": 100,
         "leverage_range": (5, 50),
         "volatility_factor": 1.0,
         "sl_range": (0.08, 0.25),
@@ -45,7 +45,7 @@ TRADING_PAIRS = {
     "ETH": {
         "symbol": "ETH/USDT", 
         "binance_symbol": "ETHUSDT",
-        "min_investment": 20,
+        "min_investment": 100,
         "leverage_range": (5, 35),
         "volatility_factor": 1.3,
         "sl_range": (0.10, 0.30),
@@ -55,7 +55,7 @@ TRADING_PAIRS = {
     "SOL": {
         "symbol": "SOL/USDT",
         "binance_symbol": "SOLUSDT", 
-        "min_investment": 10,
+        "min_investment": 50,
         "leverage_range": (3, 25),
         "volatility_factor": 1.8,
         "sl_range": (0.12, 0.35),
@@ -1137,6 +1137,16 @@ def execute_single_trade(coin_name, coin_config, opportunity, current_price, ava
     try:
         symbol = coin_config["symbol"]
         action = opportunity["direction"].lower()
+        
+        # 새 포지션 열기 전에 해당 코인의 모든 미체결 주문 취소
+        try:
+            open_orders = exchange.fetch_open_orders(symbol)
+            if open_orders:
+                for order in open_orders:
+                    exchange.cancel_order(order['id'], symbol)
+                print(f"{coin_name} 기존 미체결 주문 {len(open_orders)}개 취소됨")
+        except Exception as e:
+            print(f"{coin_name} 미체결 주문 취소 중 오류: {e}")
         
         position_size_percentage = opportunity['recommended_position_size']
         recommended_leverage = opportunity['recommended_leverage']
