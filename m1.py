@@ -1335,11 +1335,11 @@ def main():
     print("SL/TP Range: 8-70% on margin (AI 결정)")
     print("Multi-Position: AI가 모든 기회 평가 및 선택")
     print("Timeout: 4시간 후 수익 포지션 자동 정리")
-    print("Partial Scan: 30분마다 빈 코인슬롯 스캔")
+    print("Partial Scan: 10분마다 빈 코인슬롯 스캔")
     print("Capital Allocation: AI 자율 분배")
     print("Market Sentiment: Funding Rate, OI, L/S Ratio, Liquidations")
     print("Momentum Indicators: RSI, MACD, Stochastic, Williams %R")
-    print("Execution Frequency: Every 1 minute (포지션 모니터링) + 30분 (부분 스캔)")
+    print("Execution Frequency: Every 1 minute (포지션 모니터링) + 10분 (부분 스캔)")
     print("Trading Hours: 24/7 Unlimited")
     print("Min Margin: 50-100 USDT (Coin-specific)")
     print("AI Decision: 100% AI-driven scoring and filtering")
@@ -1377,11 +1377,11 @@ def main():
                     except Exception as e:
                         print(f"  {pos['coin']} 모니터링 오류: {e}")
                 
-                # 30분마다 포지션 없는 코인들 스캔
+                # 10분마다 포지션 없는 코인들 스캔
                 time_since_last_scan = (datetime.now() - last_partial_scan_time).total_seconds() / 60
                 
-                if time_since_last_scan >= 30:  # 30분 경과
-                    print(f"\n=== 30분 경과: 부분적 포지션 스캔 시작 (AI 자율 판단) ===")
+                if time_since_last_scan >= 10:  # 10분 경과
+                    print(f"\n=== 10분 경과: 부분적 포지션 스캔 시작 (AI 자율 판단) ===")
                     
                     # 포지션이 없는 코인들만 스캔
                     available_coins = get_coins_without_positions(current_positions)
@@ -1449,9 +1449,9 @@ def main():
                         print("모든 코인에 포지션이 있어 추가 스캔할 코인이 없음")
                     
                     last_partial_scan_time = datetime.now()
-                    print(f"=== 부분적 스캔 완료, 다음 스캔: 30분 후 ===\n")
+                    print(f"=== 부분적 스캔 완료, 다음 스캔: 10분 후 ===\n")
                 else:
-                    remaining_minutes = 30 - int(time_since_last_scan)
+                    remaining_minutes = 10 - int(time_since_last_scan)
                     print(f"다음 부분 스캔까지 {remaining_minutes}분 남음")
                 
                 # 포지션 모니터링 대기
