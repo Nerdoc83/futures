@@ -284,19 +284,22 @@ def main():
 
     # 실시간 로그
     st.subheader("📜 실시간 로그")
+    
+    # 로그 자동 새로고침 토글 스위치
+    auto_refresh_log = st.toggle("📡 로그 실시간 새로고침 (10초)", value=True, help="10초마다 봇의 최신 로그를 자동으로 불러옵니다.")
+
     log_lines = load_log_file(LOG_FILE)
     if log_lines:
         log_text = "".join(reversed(log_lines))
         st.text_area("최근 200줄 로그", value=log_text, height=300, key="log_display")
     else:
         st.info(f"'{LOG_FILE}' 파일을 찾을 수 없습니다.")
-        st.code(f"# Linux/macOS\npython m1.py > {LOG_FILE} 2>&1\n\n# Windows\npython m1.py > {LOG_FILE} 2>&1", language='bash')
+        st.code(f"# Linux/macOS\npython m1.py > {LOG_FILE} 2>&1\n\n# Windows (PowerShell)\npython m1.py | Tee-Object -FilePath {LOG_FILE}", language='bash')
         st.caption(f"위와 같이 봇을 실행하면 로그가 여기에 표시됩니다.")
 
-    # 자동 새로고침
-    st.sidebar.markdown("---")
-    if st.sidebar.checkbox("🔄 대시보드 자동 새로고침 (15초)"):
-        time.sleep(15)
+    # 자동 새로고침 로직
+    if auto_refresh_log:
+        time.sleep(10)
         st.rerun()
 
 if __name__ == "__main__":
