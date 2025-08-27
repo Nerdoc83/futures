@@ -1,5 +1,5 @@
 """
-AI 멀티코인 데이트레이딩 봇 - Gemini + AI 전담 판단 (v5.1 - AI Only Decision)
+AI 멀티코인 데이트레이딩 봇 - Gemini + AI 전담 판단 (v5.2 - AI Only Decision + Position Sync)
 --------------------------------------------------------
 기능:
 - 멀티코인 스캔 (BTC, ETH, SOL) - AI가 모든 판단 담당
@@ -10,8 +10,9 @@ AI 멀티코인 데이트레이딩 봇 - Gemini + AI 전담 판단 (v5.1 - AI On
 - 동적 레버리지 및 포지션 사이징 (3-50배)
 - 개선된 SL/TP 설정 (원금 대비 8-70% 범위)
 - 4시간 타임아웃 (수익 포지션 자동 정리)
+- DB-포지션 동기화 기능 추가 (v5.2)
 - 24시간 무제한 거래
-- 최소 투자금액: 50-100 USDT
+- 최소 투자금액: 40-10 USDT
 --------------------------------------------------------
 """
 
@@ -35,7 +36,7 @@ TRADING_PAIRS = {
     "BTC": {
         "symbol": "BTC/USDT",
         "binance_symbol": "BTCUSDT",
-        "min_investment": 100,
+        "min_investment": 40,
         "leverage_range": (5, 50),
         "volatility_factor": 1.0,
         "sl_range": (0.08, 0.25),
@@ -45,7 +46,7 @@ TRADING_PAIRS = {
     "ETH": {
         "symbol": "ETH/USDT", 
         "binance_symbol": "ETHUSDT",
-        "min_investment": 100,
+        "min_investment": 20,
         "leverage_range": (5, 35),
         "volatility_factor": 1.3,
         "sl_range": (0.10, 0.30),
@@ -55,7 +56,7 @@ TRADING_PAIRS = {
     "SOL": {
         "symbol": "SOL/USDT",
         "binance_symbol": "SOLUSDT", 
-        "min_investment": 50,
+        "min_investment": 10,
         "leverage_range": (3, 25),
         "volatility_factor": 1.8,
         "sl_range": (0.12, 0.35),
@@ -392,6 +393,87 @@ def get_performance_metrics():
     
     return metrics
 
+# ===== 새로운 동기화 함수 =====
+def sync_database_with_positions():
+    """데이터베이스의 OPEN 거래와 실제 포지션 상태를 동기화"""
+    try:
+        # 데이터베이스에서 OPEN 상태인 모든 거래 가져오기
+        open_trades = get_all_open_trades()
+        
+        if not open_trades:
+            return
+        
+        print("\n=== 데이터베이스-포지션 동기화 시작 ===")
+        
+        # 실제 포지션 조회
+        all_positions = {}
+        for coin_name, coin_config in TRADING_PAIRS.items():
+            try:
+                positions = exchange.fetch_positions([coin_config["symbol"]])
+                for position in positions:
+                    if position['symbol'] == f"{coin_config['symbol']}:USDT":
+                        position_amt = float(position['info']['positionAmt'])
+                        if position_amt != 0:
+                            all_positions[coin_name] = {
+                                'amount': abs(position_amt),
+                                'side': 'long' if position_amt > 0 else 'short',
+                                'unrealized_pnl': float(position['info']['unRealizedProfit']),
+                                'entry_price': float(position['info']['entryPrice'])
+                            }
+            except Exception as e:
+                print(f"{coin_name} 포지션 조회 오류: {e}")
+        
+        print(f"실제 활성 포지션: {list(all_positions.keys())}")
+        print(f"DB OPEN 거래: {[trade['coin_symbol'] for trade in open_trades]}")
+        
+        # 데이터베이스에는 있지만 실제 포지션에는 없는 거래들 정리
+        for trade in open_trades:
+            coin_symbol = trade['coin_symbol']
+            trade_id = trade['id']
+            
+            if coin_symbol not in all_positions:
+                # 포지션이 실제로는 없는 경우 - 자동 정리되었을 가능성
+                print(f"⚠️ {coin_symbol} DB에는 OPEN, 실제로는 포지션 없음 - 동기화 중...")
+                
+                try:
+                    # 현재 가격으로 종료 처리
+                    coin_config = TRADING_PAIRS.get(coin_symbol)
+                    if coin_config:
+                        current_price = exchange.fetch_ticker(coin_config['symbol'])['last']
+                        
+                        # 손익 계산
+                        entry_price = trade['entry_price']
+                        action = trade['action']
+                        leverage = trade['leverage']
+                        amount = trade['amount']
+                        
+                        if action == 'long':
+                            profit_loss = (current_price - entry_price) * amount
+                            profit_loss_percentage = ((current_price / entry_price) - 1) * leverage * 100
+                        else:
+                            profit_loss = (entry_price - current_price) * amount
+                            profit_loss_percentage = ((entry_price / current_price) - 1) * leverage * 100
+                        
+                        # DB 업데이트
+                        update_trade_status(
+                            trade_id,
+                            'CLOSED',  # 자동 정리로 추정
+                            exit_price=current_price,
+                            exit_timestamp=datetime.now().isoformat(),
+                            profit_loss=profit_loss,
+                            profit_loss_percentage=profit_loss_percentage
+                        )
+                        
+                        print(f"✅ {coin_symbol} DB 동기화 완료: P/L ${profit_loss:,.2f} ({profit_loss_percentage:.2f}%)")
+                        
+                except Exception as e:
+                    print(f"❌ {coin_symbol} 동기화 오류: {e}")
+        
+        print("=== 동기화 완료 ===\n")
+        
+    except Exception as e:
+        print(f"동기화 프로세스 오류: {e}")
+
 def check_trade_timeout():
     """4시간이 지난 수익 거래를 확인하고 타임아웃 처리"""
     conn = sqlite3.connect(DB_FILE)
@@ -430,6 +512,7 @@ def check_trade_timeout():
                 print(f"Entry: ${entry_price:,.2f}, Current: ${current_price:,.2f}")
                 
                 try:
+                    # 기존 SL/TP 주문 취소
                     open_orders = exchange.fetch_open_orders(coin_config['symbol'])
                     for order in open_orders:
                         exchange.cancel_order(order['id'], coin_config['symbol'])
@@ -438,16 +521,36 @@ def check_trade_timeout():
                     print(f"주문 취소 오류: {e}")
                 
                 try:
-                    if action == 'long':
-                        exchange.create_market_sell_order(coin_config['symbol'], amount)
-                    else:
-                        exchange.create_market_buy_order(coin_config['symbol'], amount)
+                    # 실제 포지션 크기를 거래소에서 가져오기
+                    positions = exchange.fetch_positions([coin_config["symbol"]])
+                    actual_amount = 0
                     
+                    for position in positions:
+                        if position['symbol'] == f"{coin_config['symbol']}:USDT":
+                            position_amt = float(position['info']['positionAmt'])
+                            if position_amt != 0:
+                                actual_amount = abs(position_amt)
+                                print(f"실제 포지션 크기: {actual_amount}")
+                                break
+                    
+                    if actual_amount == 0:
+                        print(f"포지션이 이미 정리되었거나 찾을 수 없음")
+                        update_trade_status(trade_id, 'CLOSED_TIMEOUT', exit_price=current_price, 
+                                          exit_timestamp=datetime.now().isoformat())
+                        continue
+                    
+                    # 실제 포지션 크기로 정리
                     if action == 'long':
-                        profit_loss = (current_price - entry_price) * amount
+                        order = exchange.create_market_sell_order(coin_config['symbol'], actual_amount)
+                    else:
+                        order = exchange.create_market_buy_order(coin_config['symbol'], actual_amount)
+                    
+                    # 손익 계산 (실제 포지션 크기 사용)
+                    if action == 'long':
+                        profit_loss = (current_price - entry_price) * actual_amount
                         profit_loss_percentage = ((current_price / entry_price) - 1) * leverage * 100
                     else:
-                        profit_loss = (entry_price - current_price) * amount
+                        profit_loss = (entry_price - current_price) * actual_amount
                         profit_loss_percentage = ((entry_price / current_price) - 1) * leverage * 100
                     
                     update_trade_status(
@@ -1158,9 +1261,9 @@ def execute_single_trade(coin_name, coin_config, opportunity, current_price, ava
         min_investment = coin_config.get('min_investment', 100)
         if investment_amount < min_investment:
             investment_amount = min_investment
-            print(f"최소 투입 마진({min_investment} USDT)으로 조정됨")
+            print(f"최소 투자 마진({min_investment} USDT)으로 조정됨")
 
-        print(f"투입 마진: {investment_amount:.2f} USDT")
+        print(f"투자 마진: {investment_amount:.2f} USDT")
         
         total_position_value = investment_amount * recommended_leverage
         print(f"총 포지션 가치: {total_position_value:.2f} USDT")
@@ -1244,7 +1347,7 @@ last_partial_scan_time = datetime.now()
 def main():
     global last_partial_scan_time
     
-    print("\n=== Multi-Coin Day Trading Bot Started (v5.1 - AI Only Decision) ===")
+    print("\n=== Multi-Coin Day Trading Bot Started (v5.2 - AI Only Decision + Position Sync) ===")
     print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("Trading Pairs: BTC/USDT, ETH/USDT, SOL/USDT")
     print("Strategy: AI 완전 자율 판단 (코드 스코어링 제거)")
@@ -1262,6 +1365,7 @@ def main():
     print("Trading Hours: 24/7 Unlimited")
     print("Min Margin: 50-100 USDT (Coin-specific)")
     print("AI Decision: 100% AI-driven scoring and filtering")
+    print("NEW: Database-Position Synchronization (v5.2)")
     print("===============================================\n")
 
     setup_database()
@@ -1271,17 +1375,20 @@ def main():
             current_time = datetime.now().strftime('%H:%M:%S')
             print(f"\n[{current_time}] === Multi-Coin Market Check ===")
 
-            # 1. 현재 포지션 확인
+            # 1. 데이터베이스-포지션 동기화 (새로 추가)
+            sync_database_with_positions()
+            
+            # 2. 현재 포지션 확인
             current_positions = check_current_positions()
             
-            # 2. 타임아웃 체크 (수익 포지션 정리)
+            # 3. 타임아웃 체크 (수익 포지션 정리)
             timeout_trades = check_trade_timeout()
             if timeout_trades > 0:
                 print(f"타임아웃으로 {timeout_trades}개 거래 정리됨")
                 time.sleep(10)
                 continue
             
-            # 3. 포지션별 처리 로직
+            # 4. 포지션별 처리 로직
             if current_positions:
                 # 포지션이 있는 경우 - 기존 포지션 모니터링 + 부분 스캔
                 print(f"현재 {len(current_positions)}개 활성 포지션:")
