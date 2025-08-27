@@ -31,13 +31,13 @@ def load_data_from_db():
     try:
         conn = sqlite3.connect('multi_coin_daytrading.db')
         
-        # 거래 데이터 - 모든 컬럼 선택 (coin_symbol 포함)
+        # 거래 데이터
         trades_query = """
         SELECT * FROM trades ORDER BY timestamp DESC
         """
         trades_df = pd.read_sql_query(trades_query, conn)
         
-        # AI 분석 데이터 (멀티코인 스코어 포함)
+        # AI 분석 데이터
         ai_analysis_query = """
         SELECT * FROM ai_analysis ORDER BY timestamp DESC
         """
@@ -77,7 +77,7 @@ def load_log_file(log_path="output.log"):
 
 # ===== 메트릭 계산 함수 =====
 def calculate_performance_metrics(trades_df):
-    """성과 메트릭 계산 - 멀티코인 버전 (개선됨)"""
+    """성과 메트릭 계산 - 실제 DB 스키마 기반"""
     # 기본 메트릭 초기화
     metrics = {
         'total_trades': 0,
@@ -102,9 +102,8 @@ def calculate_performance_metrics(trades_df):
     total_trades = len(trades_df)
     open_trades = len(trades_df[trades_df['status'] == 'OPEN'])
     
-    # 종료된 거래만 필터링 (더 포괄적으로)
-    closed_statuses = ['CLOSED', 'CLOSED_TIMEOUT', 'STOP_LOSS', 'TAKE_PROFIT']
-    closed_trades_df = trades_df[trades_df['status'].isin(closed_statuses)]
+    # 종료된 거래 (실제 DB에서 사용하는 상태값들)
+    closed_trades_df = trades_df[trades_df['status'].isin(['CLOSED', 'CLOSED_TIMEOUT'])].copy()
     closed_count = len(closed_trades_df)
     
     metrics.update({
@@ -118,26 +117,22 @@ def calculate_performance_metrics(trades_df):
         coin_stats = {}
         for coin in trades_df['coin_symbol'].unique():
             coin_trades = trades_df[trades_df['coin_symbol'] == coin]
-            coin_closed = coin_trades[coin_trades['status'].isin(closed_statuses)]
+            coin_closed = coin_trades[coin_trades['status'].isin(['CLOSED', 'CLOSED_TIMEOUT'])]
             
-            # 코인별 손익 계산 (여러 컬럼 시도)
-            pnl_value = 0
-            win_rate_value = 0
-            
-            for pnl_col in ['profit_loss', 'pnl', 'profit_loss_usd']:
-                if pnl_col in coin_closed.columns:
-                    coin_pnl = coin_closed[pnl_col].dropna()
-                    if not coin_pnl.empty:
-                        pnl_value = coin_pnl.sum()
-                        win_rate_value = (len(coin_pnl[coin_pnl > 0]) / len(coin_pnl)) * 100
-                        break
-            
-            coin_stats[coin] = {
-                'total': len(coin_trades),
-                'closed': len(coin_closed),
-                'pnl': pnl_value,
-                'win_rate': win_rate_value
-            }
+            # profit_loss 컬럼 사용 (실제 DB 스키마)
+            if not coin_closed.empty and 'profit_loss' in coin_closed.columns:
+                coin_pnl = coin_closed['profit_loss'].dropna()
+                if not coin_pnl.empty:
+                    coin_stats[coin] = {
+                        'total': len(coin_trades),
+                        'closed': len(coin_closed),
+                        'pnl': coin_pnl.sum(),
+                        'win_rate': (len(coin_pnl[coin_pnl > 0]) / len(coin_pnl)) * 100
+                    }
+                else:
+                    coin_stats[coin] = {'total': len(coin_trades), 'closed': 0, 'pnl': 0, 'win_rate': 0}
+            else:
+                coin_stats[coin] = {'total': len(coin_trades), 'closed': 0, 'pnl': 0, 'win_rate': 0}
         
         metrics['coin_breakdown'] = coin_stats
     
@@ -145,70 +140,43 @@ def calculate_performance_metrics(trades_df):
     if closed_trades_df.empty:
         return metrics
     
-    # 손익 계산 (여러 컬럼명 시도)
-    profit_data = None
-    profit_pct_data = None
+    # 손익 계산 (실제 컬럼명 사용)
+    if 'profit_loss' in closed_trades_df.columns:
+        profit_data = closed_trades_df['profit_loss'].dropna()
+        
+        if not profit_data.empty:
+            winning_trades = profit_data[profit_data > 0]
+            losing_trades = profit_data[profit_data < 0]
+            
+            win_count = len(winning_trades)
+            loss_count = len(losing_trades)
+            win_rate = (win_count / len(profit_data)) * 100 if len(profit_data) > 0 else 0
+            
+            total_pnl = profit_data.sum()
+            
+            # Profit Factor 계산
+            total_profit = winning_trades.sum() if win_count > 0 else 0
+            total_loss = abs(losing_trades.sum()) if loss_count > 0 else 1
+            profit_factor = total_profit / total_loss if total_loss > 0 else total_profit
+            
+            metrics.update({
+                'winning_trades': win_count,
+                'losing_trades': loss_count,
+                'win_rate': win_rate,
+                'total_pnl': total_pnl,
+                'profit_factor': profit_factor
+            })
     
-    # 가능한 손익 컬럼명들
-    pnl_columns = ['profit_loss', 'pnl', 'profit_loss_usd', 'realized_pnl']
-    pnl_pct_columns = ['profit_loss_percentage', 'pnl_percentage', 'return_pct']
-    
-    for col in pnl_columns:
-        if col in closed_trades_df.columns:
-            profit_data = closed_trades_df[col].dropna()
-            if not profit_data.empty:
-                break
-    
-    for col in pnl_pct_columns:
-        if col in closed_trades_df.columns:
-            profit_pct_data = closed_trades_df[col].dropna()
-            if not profit_pct_data.empty:
-                break
-    
-    # 손익 데이터가 있으면 계산
-    if profit_data is not None and not profit_data.empty:
-        winning_trades = profit_data[profit_data > 0]
-        losing_trades = profit_data[profit_data < 0]
+    # 퍼센트 데이터 계산 (실제 컬럼명 사용)
+    if 'profit_loss_percentage' in closed_trades_df.columns:
+        profit_pct_data = closed_trades_df['profit_loss_percentage'].dropna()
         
-        win_count = len(winning_trades)
-        loss_count = len(losing_trades)
-        win_rate = (win_count / len(profit_data)) * 100 if len(profit_data) > 0 else 0
-        
-        total_pnl = profit_data.sum()
-        
-        # Profit Factor 계산
-        total_profit = winning_trades.sum() if win_count > 0 else 0
-        total_loss = abs(losing_trades.sum()) if loss_count > 0 else 1  # 0 나누기 방지
-        profit_factor = total_profit / total_loss if total_loss > 0 else (total_profit if total_profit > 0 else 0)
-        
-        metrics.update({
-            'winning_trades': win_count,
-            'losing_trades': loss_count,
-            'win_rate': win_rate,
-            'total_pnl': total_pnl,
-            'profit_factor': profit_factor
-        })
-        
-        # 퍼센트 데이터 계산
-        if profit_pct_data is not None and not profit_pct_data.empty:
+        if not profit_pct_data.empty:
             metrics.update({
                 'avg_pnl_percent': profit_pct_data.mean(),
                 'max_profit': profit_pct_data.max(),
                 'max_loss': profit_pct_data.min()
             })
-        else:
-            # 퍼센트 데이터가 없으면 절대값으로 근사 계산
-            if 'investment_amount' in closed_trades_df.columns:
-                investment_amounts = closed_trades_df['investment_amount'].dropna()
-                if not investment_amounts.empty:
-                    avg_investment = investment_amounts.mean()
-                    if avg_investment > 0:
-                        profit_pct_approx = (profit_data / avg_investment) * 100
-                        metrics.update({
-                            'avg_pnl_percent': profit_pct_approx.mean(),
-                            'max_profit': profit_pct_approx.max(),
-                            'max_loss': profit_pct_approx.min()
-                        })
     
     # 보유 시간 계산
     if 'exit_timestamp' in closed_trades_df.columns:
@@ -253,8 +221,20 @@ def main():
     if not trades_df.empty:
         st.sidebar.write("**거래 데이터 컬럼:**")
         st.sidebar.write(list(trades_df.columns))
+        
         st.sidebar.write("**거래 상태 분포:**")
-        st.sidebar.write(trades_df['status'].value_counts())
+        status_dist = trades_df['status'].value_counts()
+        st.sidebar.write(status_dist)
+        
+        st.sidebar.write("**코인 분포:**")
+        if 'coin_symbol' in trades_df.columns:
+            coin_dist = trades_df['coin_symbol'].value_counts()
+            st.sidebar.write(coin_dist)
+        
+        # 손익 데이터 확인
+        if 'profit_loss' in trades_df.columns:
+            non_null_pnl = trades_df['profit_loss'].notna().sum()
+            st.sidebar.write(f"**손익 데이터**: {non_null_pnl}개 기록")
     
     if trades_df.empty and ai_analysis_df.empty:
         st.warning("⚠️ 데이터베이스에서 데이터를 찾을 수 없습니다.")
@@ -300,12 +280,15 @@ def main():
             )
             
             # 방향 필터
-            action_options = filtered_trades['action'].unique().tolist()
-            action_filter = st.sidebar.multiselect(
-                "🎯 거래 방향",
-                options=action_options,
-                default=action_options
-            )
+            if 'action' in filtered_trades.columns:
+                action_options = filtered_trades['action'].unique().tolist()
+                action_filter = st.sidebar.multiselect(
+                    "🎯 거래 방향",
+                    options=action_options,
+                    default=action_options
+                )
+            else:
+                action_filter = []
             
             # 필터 적용
             if len(date_range) == 2:
@@ -313,9 +296,11 @@ def main():
                 filtered_trades = filtered_trades[
                     (filtered_trades['timestamp'].dt.date >= start_date) &
                     (filtered_trades['timestamp'].dt.date <= end_date) &
-                    (filtered_trades['status'].isin(status_filter)) &
-                    (filtered_trades['action'].isin(action_filter))
+                    (filtered_trades['status'].isin(status_filter))
                 ]
+                
+                if action_filter and 'action' in filtered_trades.columns:
+                    filtered_trades = filtered_trades[filtered_trades['action'].isin(action_filter)]
     
     # ===== 성과 메트릭 =====
     metrics = calculate_performance_metrics(filtered_trades)
@@ -392,66 +377,57 @@ def main():
         tab1, tab2, tab3 = st.tabs(["📈 수익률 추이", "🪙 코인별 분석", "🎯 거래 분포"])
         
         with tab1:
-            closed_trades = filtered_trades[filtered_trades['status'].isin(['CLOSED', 'CLOSED_TIMEOUT', 'STOP_LOSS', 'TAKE_PROFIT'])].copy()
+            # 종료된 거래만 표시
+            closed_trades = filtered_trades[filtered_trades['status'].isin(['CLOSED', 'CLOSED_TIMEOUT'])].copy()
             
-            if not closed_trades.empty:
-                # 손익 컬럼 찾기
-                pnl_col = None
-                for col in ['profit_loss', 'pnl', 'profit_loss_usd']:
-                    if col in closed_trades.columns:
-                        pnl_col = col
-                        break
+            if not closed_trades.empty and 'profit_loss' in closed_trades.columns:
+                valid_pnl = closed_trades.dropna(subset=['profit_loss']).sort_values('timestamp')
                 
-                if pnl_col:
-                    valid_pnl = closed_trades.dropna(subset=[pnl_col]).sort_values('timestamp')
+                if not valid_pnl.empty:
+                    valid_pnl['cumulative_pnl'] = valid_pnl['profit_loss'].cumsum()
                     
-                    if not valid_pnl.empty:
-                        valid_pnl['cumulative_pnl'] = valid_pnl[pnl_col].cumsum()
-                        
-                        fig = go.Figure()
-                        
-                        # 누적 PnL 라인
-                        fig.add_trace(go.Scatter(
-                            x=valid_pnl['timestamp'],
-                            y=valid_pnl['cumulative_pnl'],
-                            mode='lines+markers',
-                            name='누적 손익',
-                            line=dict(color='#00CC96', width=3),
-                            marker=dict(size=6)
-                        ))
-                        
-                        # 코인별 색상으로 개별 거래 포인트
-                        if 'coin_symbol' in valid_pnl.columns:
-                            coin_colors = {'BTC': '#FF9500', 'ETH': '#627EEA', 'SOL': '#9945FF'}
-                            for coin in valid_pnl['coin_symbol'].unique():
-                                coin_data = valid_pnl[valid_pnl['coin_symbol'] == coin]
-                                fig.add_trace(go.Scatter(
-                                    x=coin_data['timestamp'],
-                                    y=coin_data[pnl_col],
-                                    mode='markers',
-                                    name=f'{coin} 거래',
-                                    marker=dict(
-                                        color=coin_colors.get(coin, '#636EFA'),
-                                        size=8,
-                                        opacity=0.7
-                                    ),
-                                    yaxis='y2'
-                                ))
-                        
-                        fig.update_layout(
-                            title="거래 성과 추이",
-                            xaxis_title="시간",
-                            yaxis=dict(title="누적 손익 (USDT)", side='left'),
-                            yaxis2=dict(title="거래별 손익 (USDT)", side='right', overlaying='y'),
-                            height=400,
-                            hovermode='x unified'
-                        )
-                        
-                        st.plotly_chart(fig, use_container_width=True)
-                    else:
-                        st.info("📊 표시할 손익 데이터가 없습니다.")
+                    fig = go.Figure()
+                    
+                    # 누적 PnL 라인
+                    fig.add_trace(go.Scatter(
+                        x=valid_pnl['timestamp'],
+                        y=valid_pnl['cumulative_pnl'],
+                        mode='lines+markers',
+                        name='누적 손익',
+                        line=dict(color='#00CC96', width=3),
+                        marker=dict(size=6)
+                    ))
+                    
+                    # 코인별 색상으로 개별 거래 포인트
+                    if 'coin_symbol' in valid_pnl.columns:
+                        coin_colors = {'BTC': '#FF9500', 'ETH': '#627EEA', 'SOL': '#9945FF'}
+                        for coin in valid_pnl['coin_symbol'].unique():
+                            coin_data = valid_pnl[valid_pnl['coin_symbol'] == coin]
+                            fig.add_trace(go.Scatter(
+                                x=coin_data['timestamp'],
+                                y=coin_data['profit_loss'],
+                                mode='markers',
+                                name=f'{coin} 거래',
+                                marker=dict(
+                                    color=coin_colors.get(coin, '#636EFA'),
+                                    size=8,
+                                    opacity=0.7
+                                ),
+                                yaxis='y2'
+                            ))
+                    
+                    fig.update_layout(
+                        title="거래 성과 추이",
+                        xaxis_title="시간",
+                        yaxis=dict(title="누적 손익 (USDT)", side='left'),
+                        yaxis2=dict(title="거래별 손익 (USDT)", side='right', overlaying='y'),
+                        height=400,
+                        hovermode='x unified'
+                    )
+                    
+                    st.plotly_chart(fig, use_container_width=True)
                 else:
-                    st.info("📊 손익 컬럼을 찾을 수 없습니다.")
+                    st.info("📊 표시할 손익 데이터가 없습니다.")
             else:
                 st.info("📊 표시할 완료된 거래가 없습니다.")
         
@@ -473,31 +449,22 @@ def main():
                 
                 with col_b:
                     # 코인별 손익 비교
-                    closed_trades = filtered_trades[filtered_trades['status'].isin(['CLOSED', 'CLOSED_TIMEOUT', 'STOP_LOSS', 'TAKE_PROFIT'])]
-                    if not closed_trades.empty:
-                        pnl_col = None
-                        for col in ['profit_loss', 'pnl', 'profit_loss_usd']:
-                            if col in closed_trades.columns:
-                                pnl_col = col
-                                break
+                    closed_trades = filtered_trades[filtered_trades['status'].isin(['CLOSED', 'CLOSED_TIMEOUT'])]
+                    if not closed_trades.empty and 'profit_loss' in closed_trades.columns:
+                        coin_pnl = closed_trades.groupby('coin_symbol')['profit_loss'].sum().dropna()
                         
-                        if pnl_col:
-                            coin_pnl = closed_trades.groupby('coin_symbol')[pnl_col].sum().dropna()
-                            
-                            if not coin_pnl.empty:
-                                fig_pnl = px.bar(
-                                    x=coin_pnl.index,
-                                    y=coin_pnl.values,
-                                    title="코인별 총 손익",
-                                    labels={'x': '코인', 'y': '손익 (USDT)'},
-                                    color=coin_pnl.values,
-                                    color_continuous_scale='RdYlGn'
-                                )
-                                st.plotly_chart(fig_pnl, use_container_width=True)
-                            else:
-                                st.info("코인별 손익 데이터가 없습니다.")
+                        if not coin_pnl.empty:
+                            fig_pnl = px.bar(
+                                x=coin_pnl.index,
+                                y=coin_pnl.values,
+                                title="코인별 총 손익",
+                                labels={'x': '코인', 'y': '손익 (USDT)'},
+                                color=coin_pnl.values,
+                                color_continuous_scale='RdYlGn'
+                            )
+                            st.plotly_chart(fig_pnl, use_container_width=True)
                         else:
-                            st.info("손익 컬럼을 찾을 수 없습니다.")
+                            st.info("코인별 손익 데이터가 없습니다.")
                     else:
                         st.info("완료된 거래가 없습니다.")
         
@@ -507,15 +474,18 @@ def main():
                 
                 with col_a:
                     # 거래 방향 분포
-                    action_counts = filtered_trades['action'].value_counts()
-                    fig_pie = px.pie(
-                        values=action_counts.values,
-                        names=action_counts.index,
-                        title="거래 방향 분포",
-                        color_discrete_map={'long': '#00CC96', 'short': '#EF553B'}
-                    )
-                    fig_pie.update_traces(textposition='inside', textinfo='percent+label')
-                    st.plotly_chart(fig_pie, use_container_width=True)
+                    if 'action' in filtered_trades.columns:
+                        action_counts = filtered_trades['action'].value_counts()
+                        fig_pie = px.pie(
+                            values=action_counts.values,
+                            names=action_counts.index,
+                            title="거래 방향 분포",
+                            color_discrete_map={'long': '#00CC96', 'short': '#EF553B'}
+                        )
+                        fig_pie.update_traces(textposition='inside', textinfo='percent+label')
+                        st.plotly_chart(fig_pie, use_container_width=True)
+                    else:
+                        st.info("거래 방향 데이터가 없습니다.")
                 
                 with col_b:
                     # 거래 상태 분포
@@ -549,9 +519,9 @@ def main():
                     }
                     
                     coin_emoji = coin_info.get(coin, {}).get('emoji', '⚪')
-                    action_emoji = "🟢" if pos['action'] == 'long' else "🔴"
+                    action_emoji = "🟢" if pos.get('action') == 'long' else "🔴"
                     
-                    st.markdown(f"### {coin_emoji} {coin} {action_emoji} {pos['action'].upper()}")
+                    st.markdown(f"### {coin_emoji} {coin} {action_emoji} {pos.get('action', '').upper()}")
                     
                     st.write(f"레버리지: {pos.get('leverage', 'N/A')}x")
                     st.write(f"진입가: ${pos.get('entry_price', 0):,.2f}")
@@ -658,14 +628,6 @@ def main():
                     st.error(f"❌ 파일 읽기 오류: {e}")
             else:
                 st.error(f"❌ 파일을 찾을 수 없습니다: {log_path}")
-        
-        # 로그 필터링 옵션
-        st.write("**로그 필터링**")
-        log_level_filter = st.multiselect(
-            "로그 레벨 필터",
-            options=['INFO', 'WARNING', 'ERROR', 'DEBUG'],
-            default=['INFO', 'WARNING', 'ERROR']
-        )
     
     # ===== 거래 내역 테이블 =====
     st.subheader("📋 거래 내역")
@@ -716,15 +678,20 @@ def main():
                 
                 # 손익 색상
                 if '손익(USDT)' in row.index and pd.notna(row['손익(USDT)']):
-                    if row['손익(USDT)'] > 0:
-                        styles = ['background-color: rgba(212, 237, 218, 0.7)'] * len(row)
-                    elif row['손익(USDT)'] < 0:
-                        styles = ['background-color: rgba(248, 215, 218, 0.7)'] * len(row)
+                    try:
+                        pnl_value = float(row['손익(USDT)'])
+                        if pnl_value > 0:
+                            styles = ['background-color: rgba(212, 237, 218, 0.7)'] * len(row)
+                        elif pnl_value < 0:
+                            styles = ['background-color: rgba(248, 215, 218, 0.7)'] * len(row)
+                    except:
+                        pass
                         
                 return styles
             
             return df.style.apply(highlight_rows, axis=1)
         
+        # 손익 컬럼이나 코인 컬럼이 있으면 스타일 적용
         if '손익(USDT)' in display_df.columns or '코인' in display_df.columns:
             styled_df = style_dataframe(display_df)
             st.dataframe(styled_df, use_container_width=True)
@@ -761,14 +728,9 @@ def main():
             - 승률: {stats['win_rate']:.1f}%
             """)
     
-    # 자동 새로고침 (대시보드)
+    # 자동 새로고침
     if auto_refresh:
         time.sleep(30)
-        st.rerun()
-    
-    # 로그 자동 새로고침
-    if 'auto_refresh_log' in locals() and auto_refresh_log:
-        time.sleep(10)
         st.rerun()
 
 if __name__ == "__main__":
