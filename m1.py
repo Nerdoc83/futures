@@ -969,7 +969,34 @@ KEY DECISION FACTORS (YOUR JUDGEMENT):
 TIMEOUT CONSIDERATION:
 - A 4-hour timeout is active for profitable trades. Prioritize setups with strong 3-minute momentum that are likely to reach their targets within this timeframe.
 
-YOUR RESPONSE must be ONLY a valid JSON object, with no markdown. The JSON should detail the opportunities YOU have identified based on your data-driven analysis.
+**RESPONSE JSON FORMAT:**
+- YOUR RESPONSE must be ONLY a valid JSON object, with no markdown.
+- The root of the JSON must be an object.
+- The JSON object must contain a key named "trading_opportunities" which is a list of opportunity objects.
+- Each opportunity object in the list MUST contain the following keys: "coin", "score", "direction", "recommended_position_size", "recommended_leverage", "stop_loss_percentage", "take_profit_percentage", "priority", "reasoning".
+- The value for "coin" MUST be one of ["BTC", "ETH", "SOL"].
+- If no opportunities are found, return an empty "trading_opportunities" list.
+
+Example of a valid response:
+{
+  "trading_opportunities": [
+    {
+      "coin": "BTC",
+      "score": 85,
+      "direction": "LONG",
+      "recommended_position_size": 0.3,
+      "recommended_leverage": 30,
+      "stop_loss_percentage": 0.15,
+      "take_profit_percentage": 0.4,
+      "priority": "HIGH",
+      "reasoning": "Strong bullish momentum on 3M chart with RSI crossing 60 and positive MACD histogram. Confluence with 1M and 5M timeframes. Contrarian signal from short liquidations supports upside."
+    }
+  ],
+  "total_opportunities": 1,
+  "overall_strategy": "SINGLE_ENTRY",
+  "capital_allocation_notes": "Allocating capital to the highest conviction setup in BTC.",
+  "market_correlation_warning": null
+}
 """
 
     try:
