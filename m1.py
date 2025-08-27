@@ -79,7 +79,7 @@ exchange = ccxt.binance({
 })
 
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-model = genai.GenerativeModel('gemini-2.5-pro')
+model = genai.GenerativeModel('gemini-2.5-flash')
 
 DB_FILE = "multi_coin_daytrading.db"
 
@@ -971,7 +971,7 @@ TIMEOUT CONSIDERATION:
 
 YOUR RESPONSE must be ONLY a valid JSON object, with no markdown. The JSON should detail the opportunities YOU have identified based on your data-driven analysis.
 """
-    
+
     try:
         market_analysis = {
             "coins_data": all_coins_data,
@@ -981,10 +981,17 @@ YOUR RESPONSE must be ONLY a valid JSON object, with no markdown. The JSON shoul
         
         market_analysis_json = json.dumps(market_analysis, ensure_ascii=False, indent=2)
         
+        safety_settings = [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+        ]
+        
         response = model.generate_content([
             system_prompt,
             f"Multi-Coin Market Analysis: {market_analysis_json}"
-        ])
+        ], safety_settings=safety_settings) # 이 부분을 추가합니다.
         
         response_content = response.text.strip()
         if response_content.startswith("```"):
@@ -1071,7 +1078,7 @@ Return ONLY valid JSON (no markdown):
   "capital_allocation_notes": "Your conservative sizing approach for additional positions"
 }
 """
-    
+
     try:
         market_analysis = {
             "available_coins_data": available_coins_data,
@@ -1082,10 +1089,17 @@ Return ONLY valid JSON (no markdown):
         
         market_analysis_json = json.dumps(market_analysis, ensure_ascii=False, indent=2)
         
+        safety_settings = [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+        ]
+        
         response = model.generate_content([
             system_prompt,
             f"Available Coins Analysis: {market_analysis_json}"
-        ])
+        ], safety_settings=safety_settings) # 이 부분을 추가합니다.
         
         response_content = response.text.strip()
         if response_content.startswith("```"):
@@ -1288,7 +1302,7 @@ def main():
     print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("Trading Pairs: BTC/USDT, ETH/USDT, SOL/USDT")
     print("Strategy: AI 완전 자율 판단 (코드 스코어링 제거)")
-    print("AI Engine: Google Gemini 2.5 pro (100% 의존)")
+    print("AI Engine: Google Gemini 2.5 flash (100% 의존)")
     print("Timeframes: **3m(메인)**, 1m, 5m, 15m, 1h")
     print("Leverage Range: 3-50x (AI 결정)")
     print("SL/TP Range: 8-70% on margin (AI 결정)")
