@@ -1,5 +1,5 @@
 """
-AI 멀티코인 데이트레이딩 봇 - Gemini + AI 전담 판단 (v5.8 - 상관관계 리스크 관리)
+AI 멀티코인 데이트레이딩 봇 - Gemini + AI 전담 판단 (v5.9 - 즉시 부분 스캔)
 --------------------------------------------------------
 기능:
 - 멀티코인 스캔 (BTC, ETH, SOL) - AI가 모든 판단 담당
@@ -10,7 +10,7 @@ AI 멀티코인 데이트레이딩 봇 - Gemini + AI 전담 판단 (v5.8 - 상�
 - 동적 레버리지 및 포지션 사이징 (AI 자율 결정)
 - AI 기반 동적 SL/TP 설정
 - 90분 타임컷: 90분 경과 시 수익/손실 무관 포지션 자동 정리 (시간 기반 손절)
-- 10분 부분 스캔: 포지션 보유 시 10분마다 비어있는 코인 재스캔
+- 10분 부분 스캔: 포지션 보유 시 10분마다 비어있는 코인 재스캔 (시작 시 즉시 실행)
 - 상관관계 리스크 관리: 모든 코인 동시 진입 신호 시 최고점수 포지션만 진입
 - DB-포지션 동기화 기능
 - 24시간 무제한 거래
@@ -31,7 +31,7 @@ import sqlite3
 from dotenv import load_dotenv
 load_dotenv()
 import google.generativeai as genai
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # ===== 멀티코인 설정 =====
 TRADING_PAIRS = {
@@ -561,7 +561,7 @@ def check_trade_timeout():
     
     return timeout_count
 
-# ===== 데이터 수집 함수 =====
+# ===== 데이터 수집 함수 (JSON 직렬화 오류 수정) =====
 def fetch_multi_timeframe_data_for_coin(symbol):
     """단일 코인의 멀티 타임프레임 데이터 수집 (3분봉 메인)"""
     timeframes = {
@@ -594,7 +594,10 @@ def fetch_multi_timeframe_data_for_coin(symbol):
             latest = df.iloc[-1].to_dict()
             current_indicators = {k: float(v) for k, v in latest.items() if isinstance(v, (int, float, np.number))}
             
-            recent_candles = df.tail(5).to_dict('records')
+            recent_candles_df = df.tail(5).copy()
+            recent_candles_df['timestamp'] = recent_candles_df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+            recent_candles = recent_candles_df.to_dict('records')
+
             multi_tf_data[tf_name] = {"current_indicators": current_indicators, "recent_candles": recent_candles}
         except Exception:
             continue
@@ -795,15 +798,16 @@ def execute_single_trade(coin_name, opportunity, available_capital):
 
 # ===== 메인 프로그램 시작 =====
 def main():
-    print("\n=== Multi-Coin Day Trading Bot Started (v5.8 - 상관관계 리스크 관리) ===")
+    print("\n=== Multi-Coin Day Trading Bot Started (v5.9 - 즉시 부분 스캔) ===")
     print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("Strategy: AI 완전 자율 판단, 3분봉 메인")
     print("Risk Management: 90분 타임컷 & 상관관계 필터")
-    print("Partial Scan: 10분마다 빈 코인슬롯 스캔")
+    print("Partial Scan: 10분마다 빈 코인슬롯 스캔 (시작 시 즉시 실행)")
     print("===============================================\n")
 
     setup_database()
-    last_partial_scan_time = datetime.now()
+    # <<<< FIX: 봇 시작 시 즉시 스캔하도록 타이머를 과거로 설정 >>>>
+    last_partial_scan_time = datetime.now() - timedelta(minutes=10)
 
     while True:
         try:
@@ -830,7 +834,6 @@ def main():
                 decision = analyze_multi_coin_with_ai(all_data, hist_data, perf_metrics)
                 opportunities = decision.get('trading_opportunities', [])
                 
-                # <<<< NEW: 상관관계 리스크 필터 (전체 스캔) >>>>
                 if len(opportunities) == 3:
                     directions = {opp.get('direction') for opp in opportunities}
                     if len(directions) == 1:
@@ -838,7 +841,6 @@ def main():
                         highest_score_opp = max(opportunities, key=lambda x: x.get('score', 0))
                         print(f"   Filtering to the highest score: {highest_score_opp.get('coin')} (Score: {highest_score_opp.get('score', 0)})")
                         opportunities = [highest_score_opp]
-                # <<<< END OF NEW LOGIC >>>>
                 
                 if opportunities:
                     balance = exchange.fetch_balance()['USDT']['free']
@@ -867,7 +869,6 @@ def main():
                             decision = analyze_multi_coin_with_ai(available_data, hist_data, perf_metrics)
                             opportunities = decision.get('trading_opportunities', [])
                             
-                            # <<<< NEW: 상관관계 리스크 필터 (부분 스캔) >>>>
                             num_scanned = len(available_data)
                             if num_scanned > 1 and len(opportunities) == num_scanned:
                                 directions = {opp.get('direction') for opp in opportunities}
@@ -876,7 +877,6 @@ def main():
                                     highest_score_opp = max(opportunities, key=lambda x: x.get('score', 0))
                                     print(f"   Filtering to the highest score: {highest_score_opp.get('coin')} (Score: {highest_score_opp.get('score', 0)})")
                                     opportunities = [highest_score_opp]
-                            # <<<< END OF NEW LOGIC >>>>
 
                             if opportunities:
                                 balance = exchange.fetch_balance()['USDT']['free']
