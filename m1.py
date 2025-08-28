@@ -79,7 +79,6 @@ exchange = ccxt.binance({
     'options': {
         'defaultType': 'future',
         'adjustForTimeDifference': True,
-        # <<<< FIX: API 버전을 명시적으로 지정하여 통신 오류 방지 >>>>
         'versions': {
             'fapiPrivate': 'v2',
             'fapiPublic': 'v1',
@@ -88,7 +87,7 @@ exchange = ccxt.binance({
 })
 
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-model = genai.GenerativeModel('gemini-1.5-flash')
+model = genai.GenerativeModel('gemini-2.5-flash')
 
 DB_FILE = "multi_coin_daytrading.db"
 
@@ -395,7 +394,6 @@ def sync_database_with_positions():
                                 'entry_price': float(position['info']['entryPrice'])
                             }
             except Exception as e:
-                # <<<< FIX: 오류 로깅 강화 >>>>
                 print(f"동기화 중 {coin_name} 포지션 조회 오류: {e}")
         
         for trade in open_trades:
@@ -716,7 +714,7 @@ ANALYSIS PROCESS:
         print(f"AI Analysis Error: {e}")
         return {"trading_opportunities": []}
 
-# ===== 거래 실행 함수 (레버리지 필터 및 마진 계산 수정) =====
+# ===== 거래 실행 함수 (안정성 강화) =====
 def execute_single_trade(coin_name, opportunity, available_capital):
     """단일 코인 거래 실행"""
     try:
@@ -725,23 +723,14 @@ def execute_single_trade(coin_name, opportunity, available_capital):
         action = opportunity.get("direction", "").lower()
         
         def parse_percentage(value):
-            """AI가 반환하는 퍼센트 값을 소수점으로 변환"""
-            if isinstance(value, list):
-                value = value[0] if value else "0"
-            if isinstance(value, str):
-                value = value.strip().replace('%', '')
-            
+            if isinstance(value, list): value = value[0] if value else "0"
+            if isinstance(value, str): value = value.strip().replace('%', '')
             num_value = float(value)
-            if num_value > 1:
-                return num_value / 100.0
-            return num_value
+            return num_value / 100.0 if num_value > 1 else num_value
 
         def parse_leverage(value):
-            """AI가 반환하는 레버리지 값을 정수로 변환"""
-            if isinstance(value, list):
-                value = value[0] if value else "1"
-            if isinstance(value, str):
-                value = value.strip().lower().replace('x', '')
+            if isinstance(value, list): value = value[0] if value else "1"
+            if isinstance(value, str): value = value.strip().lower().replace('x', '')
             return int(float(value))
 
         pos_size_pct = parse_percentage(opportunity.get('recommended_position_size', 0))
@@ -753,7 +742,7 @@ def execute_single_trade(coin_name, opportunity, available_capital):
         original_leverage = leverage
         leverage = max(min_lev, min(leverage, max_lev)) 
         if original_leverage != leverage:
-            print(f"   Leverage Adjusted: AI recommended {original_leverage}x, but it was adjusted to {leverage}x to fit the range ({min_lev}x-{max_lev}x).")
+            print(f"   Leverage Adjusted: AI recommended {original_leverage}x, adjusted to {leverage}x (Range: {min_lev}x-{max_lev}x).")
 
         current_price = exchange.fetch_ticker(symbol)['last']
         
@@ -768,7 +757,6 @@ def execute_single_trade(coin_name, opportunity, available_capital):
         if tp_change_pct > REALISTIC_CHANGE_LIMIT or sl_change_pct > REALISTIC_CHANGE_LIMIT:
             print(f"\n❌ Trade Rejected (Unrealistic Target): {coin_name} {action.upper()}")
             print(f"   AI proposed TP change: {tp_change_pct:.2f}%, SL change: {sl_change_pct:.2f}%")
-            print(f"   This exceeds the safety limit of {REALISTIC_CHANGE_LIMIT}%.")
             return None
 
         try:
@@ -783,7 +771,7 @@ def execute_single_trade(coin_name, opportunity, available_capital):
             print(f"최소 투자 마진({min_margin} USDT)으로 조정됨")
 
         if margin > available_capital:
-            print(f"❌ Trade Rejected (Insufficient Margin): Required margin ${margin:,.2f} > Available capital ${available_capital:,.2f}")
+            print(f"❌ Trade Rejected (Insufficient Margin): Required ${margin:,.2f} > Available ${available_capital:,.2f}")
             return None
 
         amount = (margin * leverage) / current_price
@@ -800,13 +788,40 @@ def execute_single_trade(coin_name, opportunity, available_capital):
         
         entry_price = order.get('price', current_price)
         
+        # <<<< FIX: TP/SL 주문 재시도 로직 추가 >>>>
+        time.sleep(2) # 포지션 체결을 위한 2초 대기
+        
         sl_price = entry_price * (1 - (sl_pct / leverage)) if action == "long" else entry_price * (1 + (sl_pct / leverage))
         tp_price = entry_price * (1 + (tp_pct / leverage)) if action == "long" else entry_price * (1 - (tp_pct / leverage))
         
-        exchange.create_order(symbol, 'STOP_MARKET', 'sell' if action == "long" else 'buy', amount, None, {'stopPrice': sl_price})
-        exchange.create_order(symbol, 'TAKE_PROFIT_MARKET', 'sell' if action == "long" else 'buy', amount, None, {'stopPrice': tp_price})
+        sl_placed = False
+        tp_placed = False
         
-        print(f"{coin_name} {action.upper()} Entry: ${entry_price:,.2f} | SL: ${sl_price:,.2f}, TP: ${tp_price:,.2f}")
+        for i in range(3): # 최대 3번 재시도
+            try:
+                if not sl_placed:
+                    exchange.create_order(symbol, 'STOP_MARKET', 'sell' if action == "long" else 'buy', amount, None, {'stopPrice': sl_price, 'reduceOnly': True})
+                    sl_placed = True
+                if not tp_placed:
+                    exchange.create_order(symbol, 'TAKE_PROFIT_MARKET', 'sell' if action == "long" else 'buy', amount, None, {'stopPrice': tp_price, 'reduceOnly': True})
+                    tp_placed = True
+                
+                if sl_placed and tp_placed:
+                    print(f"{coin_name} {action.upper()} Entry: ${entry_price:,.2f} | SL: ${sl_price:,.2f}, TP: ${tp_price:,.2f}")
+                    break
+            except Exception as e:
+                print(f"   Attempt {i+1} to set TP/SL failed: {e}. Retrying in 2 seconds...")
+                time.sleep(2)
+
+        if not (sl_placed and tp_placed):
+            print(f"   ❌ CRITICAL: Failed to set TP/SL for {coin_name} after 3 attempts. Closing position for safety.")
+            # 안전을 위해 포지션 즉시 정리
+            if action == "long":
+                exchange.create_market_sell_order(symbol, amount, {'reduceOnly': True})
+            else:
+                exchange.create_market_buy_order(symbol, amount, {'reduceOnly': True})
+            return None
+        # <<<< END OF FIX >>>>
         
         trade_data = {
             'action': action, 'entry_price': entry_price, 'amount': amount, 'leverage': leverage,
@@ -814,7 +829,7 @@ def execute_single_trade(coin_name, opportunity, available_capital):
             'position_size_percentage': pos_size_pct, 'investment_amount': margin
         }
         save_trade(trade_data, coin_name)
-        return margin # Return the used margin
+        return margin
         
     except Exception as e:
         print(f"Single trade execution error for {coin_name}: {e}")
@@ -822,7 +837,7 @@ def execute_single_trade(coin_name, opportunity, available_capital):
 
 # ===== 메인 프로그램 시작 =====
 def main():
-    print("\n=== Multi-Coin Day Trading Bot Started (v6.2 - 최종 안정화) ===")
+    print("\n=== Multi-Coin Day Trading Bot Started (v6.3 - 최종 안정화) ===")
     print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("Strategy: AI 완전 자율 판단, 3분봉 메인")
     print("Risk Management: 90분 타임컷, 상관관계 필터, 합리성 필터, 레버리지 필터")
@@ -857,10 +872,10 @@ def main():
                 decision = analyze_multi_coin_with_ai(all_data, hist_data, perf_metrics)
                 opportunities = decision.get('trading_opportunities', [])
                 
-                if len(opportunities) == 3:
+                if len(opportunities) >= 2: # 2개 이상일 때만 상관관계 체크
                     directions = {opp.get('direction') for opp in opportunities}
                     if len(directions) == 1:
-                        print("\n⚠️ Correlation Risk Detected: All 3 coins have the same direction.")
+                        print(f"\n⚠️ Correlation Risk Detected: All {len(opportunities)} opportunities have the same direction.")
                         highest_score_opp = max(opportunities, key=lambda x: x.get('score', 0))
                         print(f"   Filtering to the highest score: {highest_score_opp.get('coin')} (Score: {highest_score_opp.get('score', 0)})")
                         opportunities = [highest_score_opp]
