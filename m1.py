@@ -1,5 +1,5 @@
 """
-AI 멀티코인 데이트레이딩 봇 - Gemini + AI 전담 판단 (v5.9 - 즉시 부분 스캔)
+AI 멀티코인 데이트레이딩 봇 - Gemini + AI 전담 판단 (v6.3 - 최종 안정화)
 --------------------------------------------------------
 기능:
 - 멀티코인 스캔 (BTC, ETH, SOL) - AI가 모든 판단 담당
@@ -12,6 +12,8 @@ AI 멀티코인 데이트레이딩 봇 - Gemini + AI 전담 판단 (v5.9 - 즉�
 - 90분 타임컷: 90분 경과 시 수익/손실 무관 포지션 자동 정리 (시간 기반 손절)
 - 10분 부분 스캔: 포지션 보유 시 10분마다 비어있는 코인 재스캔 (시작 시 즉시 실행)
 - 상관관계 리스크 관리: 모든 코인 동시 진입 신호 시 최고점수 포지션만 진입
+- 합리성 필터: AI의 비현실적인 TP/SL 제안 자동 거부 (안전장치)
+- 레버리지 필터: AI의 레버리지 제안이 설정 범위를 벗어날 경우 자동 조정
 - DB-포지션 동기화 기능
 - 24시간 무제한 거래
 - 최소 투자금액: 40-10 USDT
@@ -76,7 +78,12 @@ exchange = ccxt.binance({
     'enableRateLimit': True,
     'options': {
         'defaultType': 'future',
-        'adjustForTimeDifference': True
+        'adjustForTimeDifference': True,
+        # <<<< FIX: API 버전을 명시적으로 지정하여 통신 오류 방지 >>>>
+        'versions': {
+            'fapiPrivate': 'v2',
+            'fapiPublic': 'v1',
+        },
     }
 })
 
@@ -306,36 +313,6 @@ def get_all_open_trades():
     
     return open_trades
 
-def get_trade_summary(days=7):
-    """지정된 일수 동안의 거래 요약 정보를 가져옵니다"""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-    SELECT 
-        COUNT(*) as total_trades,
-        SUM(CASE WHEN profit_loss > 0 THEN 1 ELSE 0 END) as winning_trades,
-        SUM(CASE WHEN profit_loss < 0 THEN 1 ELSE 0 END) as losing_trades,
-        SUM(profit_loss) as total_profit_loss,
-        AVG(profit_loss_percentage) as avg_profit_loss_percentage
-    FROM trades
-    WHERE exit_timestamp IS NOT NULL
-    AND timestamp >= datetime('now', ?)
-    ''', (f'-{days} days',))
-    
-    result = cursor.fetchone()
-    conn.close()
-    
-    if result:
-        return {
-            'total_trades': result[0] or 0,
-            'winning_trades': result[1] or 0,
-            'losing_trades': result[2] or 0,
-            'total_profit_loss': result[3] or 0,
-            'avg_profit_loss_percentage': result[4] or 0
-        }
-    return None
-
 def get_historical_trading_data(limit=5):
     """과거 거래 내역 가져오기"""
     conn = sqlite3.connect(DB_FILE)
@@ -348,7 +325,7 @@ def get_historical_trading_data(limit=5):
         t.profit_loss_percentage, a.reasoning
     FROM trades t
     LEFT JOIN ai_analysis a ON t.id = a.trade_id
-    WHERE t.status = 'CLOSED'
+    WHERE t.status IN ('CLOSED', 'CLOSED_TIMEOUT')
     ORDER BY t.timestamp DESC
     LIMIT ?
     ''', (limit,))
@@ -374,7 +351,7 @@ def get_performance_metrics():
         MAX(profit_loss_percentage) as max_profit_percentage,
         MIN(profit_loss_percentage) as max_loss_percentage
     FROM trades
-    WHERE status = 'CLOSED'
+    WHERE status IN ('CLOSED', 'CLOSED_TIMEOUT')
     ''')
     
     overall_metrics = cursor.fetchone()
@@ -417,8 +394,9 @@ def sync_database_with_positions():
                                 'unrealized_pnl': float(position['info']['unRealizedProfit']),
                                 'entry_price': float(position['info']['entryPrice'])
                             }
-            except Exception:
-                pass
+            except Exception as e:
+                # <<<< FIX: 오류 로깅 강화 >>>>
+                print(f"동기화 중 {coin_name} 포지션 조회 오류: {e}")
         
         for trade in open_trades:
             coin_symbol = trade['coin_symbol']
@@ -738,7 +716,7 @@ ANALYSIS PROCESS:
         print(f"AI Analysis Error: {e}")
         return {"trading_opportunities": []}
 
-# ===== 거래 실행 함수 =====
+# ===== 거래 실행 함수 (레버리지 필터 및 마진 계산 수정) =====
 def execute_single_trade(coin_name, opportunity, available_capital):
     """단일 코인 거래 실행"""
     try:
@@ -746,15 +724,57 @@ def execute_single_trade(coin_name, opportunity, available_capital):
         symbol = coin_config["symbol"]
         action = opportunity.get("direction", "").lower()
         
+        def parse_percentage(value):
+            """AI가 반환하는 퍼센트 값을 소수점으로 변환"""
+            if isinstance(value, list):
+                value = value[0] if value else "0"
+            if isinstance(value, str):
+                value = value.strip().replace('%', '')
+            
+            num_value = float(value)
+            if num_value > 1:
+                return num_value / 100.0
+            return num_value
+
+        def parse_leverage(value):
+            """AI가 반환하는 레버리지 값을 정수로 변환"""
+            if isinstance(value, list):
+                value = value[0] if value else "1"
+            if isinstance(value, str):
+                value = value.strip().lower().replace('x', '')
+            return int(float(value))
+
+        pos_size_pct = parse_percentage(opportunity.get('recommended_position_size', 0))
+        leverage = parse_leverage(opportunity.get('recommended_leverage', 1))
+        sl_pct = parse_percentage(opportunity.get('stop_loss_percentage', 0))
+        tp_pct = parse_percentage(opportunity.get('take_profit_percentage', 0))
+        
+        min_lev, max_lev = coin_config['leverage_range']
+        original_leverage = leverage
+        leverage = max(min_lev, min(leverage, max_lev)) 
+        if original_leverage != leverage:
+            print(f"   Leverage Adjusted: AI recommended {original_leverage}x, but it was adjusted to {leverage}x to fit the range ({min_lev}x-{max_lev}x).")
+
+        current_price = exchange.fetch_ticker(symbol)['last']
+        
+        sl_price_check = current_price * (1 - (sl_pct / leverage)) if action == "long" else current_price * (1 + (sl_pct / leverage))
+        tp_price_check = current_price * (1 + (tp_pct / leverage)) if action == "long" else current_price * (1 - (tp_pct / leverage))
+
+        tp_change_pct = abs((tp_price_check / current_price) - 1) * 100
+        sl_change_pct = abs((sl_price_check / current_price) - 1) * 100
+
+        REALISTIC_CHANGE_LIMIT = 20.0 
+        
+        if tp_change_pct > REALISTIC_CHANGE_LIMIT or sl_change_pct > REALISTIC_CHANGE_LIMIT:
+            print(f"\n❌ Trade Rejected (Unrealistic Target): {coin_name} {action.upper()}")
+            print(f"   AI proposed TP change: {tp_change_pct:.2f}%, SL change: {sl_change_pct:.2f}%")
+            print(f"   This exceeds the safety limit of {REALISTIC_CHANGE_LIMIT}%.")
+            return None
+
         try:
             exchange.cancel_all_orders(symbol)
             print(f"{coin_name} 기존 미체결 주문 취소됨")
         except Exception: pass
-        
-        pos_size_pct = opportunity.get('recommended_position_size', 0)
-        leverage = opportunity.get('recommended_leverage', 1)
-        sl_pct = opportunity.get('stop_loss_percentage', 0)
-        tp_pct = opportunity.get('take_profit_percentage', 0)
         
         margin = available_capital * pos_size_pct
         min_margin = coin_config.get('min_investment', 10)
@@ -762,7 +782,10 @@ def execute_single_trade(coin_name, opportunity, available_capital):
             margin = min_margin
             print(f"최소 투자 마진({min_margin} USDT)으로 조정됨")
 
-        current_price = exchange.fetch_ticker(symbol)['last']
+        if margin > available_capital:
+            print(f"❌ Trade Rejected (Insufficient Margin): Required margin ${margin:,.2f} > Available capital ${available_capital:,.2f}")
+            return None
+
         amount = (margin * leverage) / current_price
         
         exchange.set_leverage(leverage, symbol)
@@ -790,7 +813,8 @@ def execute_single_trade(coin_name, opportunity, available_capital):
             'sl_price': sl_price, 'tp_price': tp_price, 'sl_percentage': sl_pct, 'tp_percentage': tp_pct,
             'position_size_percentage': pos_size_pct, 'investment_amount': margin
         }
-        return save_trade(trade_data, coin_name)
+        save_trade(trade_data, coin_name)
+        return margin # Return the used margin
         
     except Exception as e:
         print(f"Single trade execution error for {coin_name}: {e}")
@@ -798,15 +822,14 @@ def execute_single_trade(coin_name, opportunity, available_capital):
 
 # ===== 메인 프로그램 시작 =====
 def main():
-    print("\n=== Multi-Coin Day Trading Bot Started (v5.9 - 즉시 부분 스캔) ===")
+    print("\n=== Multi-Coin Day Trading Bot Started (v6.2 - 최종 안정화) ===")
     print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("Strategy: AI 완전 자율 판단, 3분봉 메인")
-    print("Risk Management: 90분 타임컷 & 상관관계 필터")
+    print("Risk Management: 90분 타임컷, 상관관계 필터, 합리성 필터, 레버리지 필터")
     print("Partial Scan: 10분마다 빈 코인슬롯 스캔 (시작 시 즉시 실행)")
     print("===============================================\n")
 
     setup_database()
-    # <<<< FIX: 봇 시작 시 즉시 스캔하도록 타이머를 과거로 설정 >>>>
     last_partial_scan_time = datetime.now() - timedelta(minutes=10)
 
     while True:
@@ -844,8 +867,12 @@ def main():
                 
                 if opportunities:
                     balance = exchange.fetch_balance()['USDT']['free']
+                    available_capital_for_loop = balance * 0.98
+                    
                     for opp in opportunities:
-                        execute_single_trade(opp['coin'], opp, balance)
+                        used_margin = execute_single_trade(opp['coin'], opp, available_capital_for_loop)
+                        if used_margin and used_margin > 0:
+                            available_capital_for_loop -= used_margin
                         time.sleep(5)
                     last_partial_scan_time = datetime.now()
                 else:
@@ -880,8 +907,12 @@ def main():
 
                             if opportunities:
                                 balance = exchange.fetch_balance()['USDT']['free']
+                                available_capital_for_loop = balance * 0.98
+                                
                                 for opp in opportunities:
-                                    execute_single_trade(opp['coin'], opp, balance)
+                                    used_margin = execute_single_trade(opp['coin'], opp, available_capital_for_loop)
+                                    if used_margin and used_margin > 0:
+                                        available_capital_for_loop -= used_margin
                                     time.sleep(5)
                             else:
                                 print("AI found no additional setups.")
