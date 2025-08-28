@@ -1,5 +1,5 @@
 """
-AI 멀티코인 데이트레이딩 봇 - Gemini + AI 전담 판단 (v6.3 - 최종 안정화)
+AI 멀티코인 데이트레이딩 봇 - Gemini + AI 전담 판단 (v6.4 - 최종 전략 강화)
 --------------------------------------------------------
 기능:
 - 멀티코인 스캔 (BTC, ETH, SOL) - AI가 모든 판단 담당
@@ -14,6 +14,8 @@ AI 멀티코인 데이트레이딩 봇 - Gemini + AI 전담 판단 (v6.3 - 최�
 - 상관관계 리스크 관리: 모든 코인 동시 진입 신호 시 최고점수 포지션만 진입
 - 합리성 필터: AI의 비현실적인 TP/SL 제안 자동 거부 (안전장치)
 - 레버리지 필터: AI의 레버리지 제안이 설정 범위를 벗어날 경우 자동 조정
+- 추세 필터: 1시간봉 EMA를 기준으로 추세를 거스르는 거래 방지
+- AI 자가 학습: 연속 손실 발생 시 자동으로 보수적 모드로 전환
 - DB-포지션 동기화 기능
 - 24시간 무제한 거래
 - 최소 투자금액: 40-10 USDT
@@ -87,11 +89,15 @@ exchange = ccxt.binance({
 })
 
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-model = genai.GenerativeModel('gemini-2.5-flash')
+model = genai.GenerativeModel('gemini-1.5-flash')
 
 DB_FILE = "multi_coin_daytrading.db"
 
 # ===== 모멘텀 지표 계산 함수들 =====
+def calculate_ema(prices, window=50):
+    """Exponential Moving Average 계산"""
+    return prices.ewm(span=window, adjust=False).mean()
+
 def calculate_rsi(prices, window=14):
     """RSI 계산 함수"""
     delta = prices.diff()
@@ -320,10 +326,8 @@ def get_historical_trading_data(limit=5):
     
     cursor.execute('''
     SELECT 
-        t.coin_symbol, t.action, t.entry_price, t.exit_price, t.leverage,
-        t.profit_loss_percentage, a.reasoning
+        t.coin_symbol, t.action, t.profit_loss
     FROM trades t
-    LEFT JOIN ai_analysis a ON t.id = a.trade_id
     WHERE t.status IN ('CLOSED', 'CLOSED_TIMEOUT')
     ORDER BY t.timestamp DESC
     LIMIT ?
@@ -332,7 +336,12 @@ def get_historical_trading_data(limit=5):
     results = cursor.fetchall()
     historical_data = []
     for row in results:
-        historical_data.append({k: row[k] for k in row.keys()})
+        trade_result = {
+            "coin": row["coin_symbol"],
+            "direction": row["action"].upper(),
+            "result": "WIN" if row["profit_loss"] > 0 else "LOSS"
+        }
+        historical_data.append(trade_result)
     
     conn.close()
     return historical_data
@@ -545,13 +554,13 @@ def fetch_multi_timeframe_data_for_coin(symbol):
         "1m": {"timeframe": "1m", "limit": 120},
         "5m": {"timeframe": "5m", "limit": 100},
         "15m": {"timeframe": "15m", "limit": 96},
-        "1h": {"timeframe": "1h", "limit": 48}
+        "1h": {"timeframe": "1h", "limit": 100} # EMA50 계산을 위해 100개로 늘림
     }
     multi_tf_data = {}
     for tf_name, tf_params in timeframes.items():
         try:
             ohlcv = exchange.fetch_ohlcv(symbol, timeframe=tf_params["timeframe"], limit=tf_params["limit"])
-            if not ohlcv or len(ohlcv) < 20: continue
+            if not ohlcv or len(ohlcv) < 50: continue # EMA50 계산을 위해 최소 50개 캔들 필요
             
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -564,6 +573,10 @@ def fetch_multi_timeframe_data_for_coin(symbol):
             df['Stoch_K'], df['Stoch_D'] = stoch_k, stoch_d
             df['Williams_R'] = calculate_williams_r(df['high'], df['low'], df['close'])
             df['ATR'] = calculate_atr(df)
+            
+            if tf_name == '1h':
+                df['EMA_50'] = calculate_ema(df['close'], 50)
+
             df.dropna(inplace=True)
             if len(df) < 5: continue
             
@@ -668,7 +681,9 @@ ANALYSIS PROCESS:
 3.  **Objective Scoring**: Score each coin from 0-100 based purely on the quality of the immediate trading setup.
 
 **RISK MANAGEMENT OVERLAY (VERY IMPORTANT):**
-- **Correlation Risk**: Be aware that the system applies a correlation risk filter. If you provide strong opportunities for all available coins in the same direction (all LONG or all SHORT), the system will automatically select ONLY the one with the highest score to execute. Therefore, your scoring must be precise to reflect the true conviction level for each setup.
+- **Trend Filter**: A strict trend filter is active. You are ONLY allowed to propose LONG positions if the current price is ABOVE the 1-hour 50 EMA, and ONLY SHORT positions if the price is BELOW the 1-hour 50 EMA. Any proposal against the major trend will be rejected.
+- **Self-Correction Rule**: Review the `recent_trades` data. If you see 2 or more consecutive losses, switch to a **conservative mode**. In this mode, only enter trades with an extremely high conviction score (e.g., score > 90) and reduce the recommended position size by half.
+- **Correlation Risk**: Be aware that the system applies a correlation risk filter. If you provide strong opportunities for all available coins in the same direction (all LONG or all SHORT), the system will automatically select ONLY the one with the highest score to execute.
 - **Time-Cut Risk**: This strategy uses a strict **90-minute time-cut**. Any open position will be automatically closed after 90 minutes. Therefore, you MUST set **tighter, more realistic TP and SL targets** that are likely to be hit within this 90-minute window.
 
 **RESPONSE JSON FORMAT:**
@@ -715,13 +730,28 @@ ANALYSIS PROCESS:
         return {"trading_opportunities": []}
 
 # ===== 거래 실행 함수 (안정성 강화) =====
-def execute_single_trade(coin_name, opportunity, available_capital):
+def execute_single_trade(coin_name, opportunity, available_capital, all_coins_data):
     """단일 코인 거래 실행"""
     try:
         coin_config = TRADING_PAIRS[coin_name]
         symbol = coin_config["symbol"]
         action = opportunity.get("direction", "").lower()
         
+        # <<<< NEW: 추세 필터 안전장치 >>>>
+        ema_1h = all_coins_data[coin_name].get("technical_data", {}).get("1h", {}).get("current_indicators", {}).get("EMA_50")
+        current_price = all_coins_data[coin_name].get("current_price")
+
+        if ema_1h and current_price:
+            if action == 'long' and current_price < ema_1h:
+                print(f"❌ Trade Rejected (Trend Filter): {coin_name} LONG attempt below 1H EMA 50 (${ema_1h:,.2f}).")
+                return None
+            if action == 'short' and current_price > ema_1h:
+                print(f"❌ Trade Rejected (Trend Filter): {coin_name} SHORT attempt above 1H EMA 50 (${ema_1h:,.2f}).")
+                return None
+        else:
+            print(f"   Warning: 1H EMA data not available for {coin_name}, trend filter skipped.")
+        # <<<< END OF NEW LOGIC >>>>
+
         def parse_percentage(value):
             if isinstance(value, list): value = value[0] if value else "0"
             if isinstance(value, str): value = value.strip().replace('%', '')
@@ -743,8 +773,6 @@ def execute_single_trade(coin_name, opportunity, available_capital):
         leverage = max(min_lev, min(leverage, max_lev)) 
         if original_leverage != leverage:
             print(f"   Leverage Adjusted: AI recommended {original_leverage}x, adjusted to {leverage}x (Range: {min_lev}x-{max_lev}x).")
-
-        current_price = exchange.fetch_ticker(symbol)['last']
         
         sl_price_check = current_price * (1 - (sl_pct / leverage)) if action == "long" else current_price * (1 + (sl_pct / leverage))
         tp_price_check = current_price * (1 + (tp_pct / leverage)) if action == "long" else current_price * (1 - (tp_pct / leverage))
@@ -788,8 +816,7 @@ def execute_single_trade(coin_name, opportunity, available_capital):
         
         entry_price = order.get('price', current_price)
         
-        # <<<< FIX: TP/SL 주문 재시도 로직 추가 >>>>
-        time.sleep(2) # 포지션 체결을 위한 2초 대기
+        time.sleep(2) 
         
         sl_price = entry_price * (1 - (sl_pct / leverage)) if action == "long" else entry_price * (1 + (sl_pct / leverage))
         tp_price = entry_price * (1 + (tp_pct / leverage)) if action == "long" else entry_price * (1 - (tp_pct / leverage))
@@ -797,7 +824,7 @@ def execute_single_trade(coin_name, opportunity, available_capital):
         sl_placed = False
         tp_placed = False
         
-        for i in range(3): # 최대 3번 재시도
+        for i in range(3): 
             try:
                 if not sl_placed:
                     exchange.create_order(symbol, 'STOP_MARKET', 'sell' if action == "long" else 'buy', amount, None, {'stopPrice': sl_price, 'reduceOnly': True})
@@ -815,13 +842,11 @@ def execute_single_trade(coin_name, opportunity, available_capital):
 
         if not (sl_placed and tp_placed):
             print(f"   ❌ CRITICAL: Failed to set TP/SL for {coin_name} after 3 attempts. Closing position for safety.")
-            # 안전을 위해 포지션 즉시 정리
             if action == "long":
                 exchange.create_market_sell_order(symbol, amount, {'reduceOnly': True})
             else:
                 exchange.create_market_buy_order(symbol, amount, {'reduceOnly': True})
             return None
-        # <<<< END OF FIX >>>>
         
         trade_data = {
             'action': action, 'entry_price': entry_price, 'amount': amount, 'leverage': leverage,
@@ -837,10 +862,10 @@ def execute_single_trade(coin_name, opportunity, available_capital):
 
 # ===== 메인 프로그램 시작 =====
 def main():
-    print("\n=== Multi-Coin Day Trading Bot Started (v6.3 - 최종 안정화) ===")
+    print("\n=== Multi-Coin Day Trading Bot Started (v6.4 - 최종 전략 강화) ===")
     print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("Strategy: AI 완전 자율 판단, 3분봉 메인")
-    print("Risk Management: 90분 타임컷, 상관관계 필터, 합리성 필터, 레버리지 필터")
+    print("Risk Management: 90분 타임컷, 상관관계 필터, 합리성 필터, 레버리지 필터, 추세 필터, AI 자가 학습")
     print("Partial Scan: 10분마다 빈 코인슬롯 스캔 (시작 시 즉시 실행)")
     print("===============================================\n")
 
@@ -872,7 +897,7 @@ def main():
                 decision = analyze_multi_coin_with_ai(all_data, hist_data, perf_metrics)
                 opportunities = decision.get('trading_opportunities', [])
                 
-                if len(opportunities) >= 2: # 2개 이상일 때만 상관관계 체크
+                if len(opportunities) >= 2:
                     directions = {opp.get('direction') for opp in opportunities}
                     if len(directions) == 1:
                         print(f"\n⚠️ Correlation Risk Detected: All {len(opportunities)} opportunities have the same direction.")
@@ -885,7 +910,7 @@ def main():
                     available_capital_for_loop = balance * 0.98
                     
                     for opp in opportunities:
-                        used_margin = execute_single_trade(opp['coin'], opp, available_capital_for_loop)
+                        used_margin = execute_single_trade(opp['coin'], opp, available_capital_for_loop, all_data)
                         if used_margin and used_margin > 0:
                             available_capital_for_loop -= used_margin
                         time.sleep(5)
@@ -925,7 +950,7 @@ def main():
                                 available_capital_for_loop = balance * 0.98
                                 
                                 for opp in opportunities:
-                                    used_margin = execute_single_trade(opp['coin'], opp, available_capital_for_loop)
+                                    used_margin = execute_single_trade(opp['coin'], opp, available_capital_for_loop, available_data)
                                     if used_margin and used_margin > 0:
                                         available_capital_for_loop -= used_margin
                                     time.sleep(5)
