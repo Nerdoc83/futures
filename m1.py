@@ -1,5 +1,5 @@
 """
-AI 멀티코인 데이트레이딩 봇 - Gemini + AI 전담 판단 (v5.6 - 정확한 수익률 계산)
+AI 멀티코인 데이트레이딩 봇 - Gemini + AI 전담 판단 (v5.8 - 상관관계 리스크 관리)
 --------------------------------------------------------
 기능:
 - 멀티코인 스캔 (BTC, ETH, SOL) - AI가 모든 판단 담당
@@ -10,6 +10,8 @@ AI 멀티코인 데이트레이딩 봇 - Gemini + AI 전담 판단 (v5.6 - 정�
 - 동적 레버리지 및 포지션 사이징 (AI 자율 결정)
 - AI 기반 동적 SL/TP 설정
 - 90분 타임컷: 90분 경과 시 수익/손실 무관 포지션 자동 정리 (시간 기반 손절)
+- 10분 부분 스캔: 포지션 보유 시 10분마다 비어있는 코인 재스캔
+- 상관관계 리스크 관리: 모든 코인 동시 진입 신호 시 최고점수 포지션만 진입
 - DB-포지션 동기화 기능
 - 24시간 무제한 거래
 - 최소 투자금액: 40-10 USDT
@@ -477,10 +479,9 @@ def check_trade_timeout():
             if not coin_config:
                 continue
             
-            # <<<< FIX: 거래소에서 직접 실제 수익률 조회 >>>>
             positions = exchange.fetch_positions([coin_config["symbol"]])
             current_pnl_percentage = 0
-            actual_entry_price = entry_price # DB 가격을 대체값으로 사용
+            actual_entry_price = entry_price 
             position_found = False
 
             for position in positions:
@@ -489,7 +490,7 @@ def check_trade_timeout():
                     if (action == 'long' and pos_amt > 0) or (action == 'short' and pos_amt < 0):
                         unrealized_pnl = float(position['info']['unRealizedProfit'])
                         initial_margin = float(position['info']['initialMargin'])
-                        actual_entry_price = float(position['info']['entryPrice']) # 실제 진입가
+                        actual_entry_price = float(position['info']['entryPrice']) 
                         if initial_margin > 0:
                             current_pnl_percentage = (unrealized_pnl / initial_margin) * 100
                         position_found = True
@@ -498,7 +499,6 @@ def check_trade_timeout():
             if not position_found:
                 print(f"타임아웃 후보 {coin_symbol} 포지션을 거래소에서 찾을 수 없어 건너뜁니다.")
                 continue
-            # <<<< END OF FIX >>>>
 
             current_price = exchange.fetch_ticker(coin_config['symbol'])['last']
 
@@ -674,7 +674,7 @@ def check_current_positions():
         print(f"Error checking positions: {e}")
     return current_positions
 
-# ===== Gemini AI 멀티코인 분석 함수 (90분 타임컷 인지) =====
+# ===== Gemini AI 멀티코인 분석 함수 (상관관계 리스크 인지) =====
 def analyze_multi_coin_with_ai(all_coins_data, historical_data, performance_metrics):
     """3개 코인을 AI로 분석하고 최고 확률의 거래 기회를 선택 (AI가 100% 판단)"""
     
@@ -683,25 +683,14 @@ You are an expert multi-cryptocurrency day trader AI. Your SOLE mission is to an
 
 **CRITICAL INSTRUCTION: Your trading decisions (LONG/SHORT) MUST be based ONLY on the provided real-time technical and sentiment data for each coin. Do NOT let the general coin characteristics below create a preconceived bias. A high-volatility coin can have a strong uptrend, and a low-volatility coin can have a strong downtrend.**
 
-COIN CHARACTERISTICS (For Context ONLY):
-- **BTC**: Typically exhibits lower volatility and tends to form clearer trends.
-- **ETH**: Exhibits medium volatility.
-- **SOL**: Typically exhibits high volatility.
-
 ANALYSIS PROCESS:
-1.  **Data-First Analysis**: Objectively analyze each coin's technical indicators (RSI, MACD, Stoch, etc.) and market sentiment data across all timeframes (1m, 3m, 5m, 15m, 1h).
-2.  **Primary Timeframe**: The **3M (3-minute) chart is your PRIMARY** tool for determining the current momentum and precise entry timing. Use other timeframes for context and confirmation.
-3.  **Objective Scoring**: Score each coin from 0-100 based purely on the quality of the immediate trading setup identified in the data. A high score can be for either a LONG or a SHORT position.
-4.  **Multi-Position Strategy**: If multiple coins show high-conviction setups (e.g., score > 75), recommend trading them simultaneously. Allocate capital based on the strength (score) of each setup.
+1.  **Data-First Analysis**: Objectively analyze each coin's technical indicators (RSI, MACD, Stoch, etc.) and market sentiment data across all timeframes.
+2.  **Primary Timeframe**: The **3M (3-minute) chart is your PRIMARY** tool for determining the current momentum and precise entry timing.
+3.  **Objective Scoring**: Score each coin from 0-100 based purely on the quality of the immediate trading setup.
 
-KEY DECISION FACTORS (YOUR JUDGEMENT):
-- **Technical Confluence**: Is there a strong alignment of indicators on the 3m, 1m, and 5m charts pointing to a clear upward or downward move?
-- **Sentiment Extremes**: Does the sentiment data (funding, OI, L/S ratio) suggest a potential contrarian opportunity?
-- **Risk/Reward**: Is there a clear, data-supported Stop Loss and Take Profit level that offers at least a 1:1.5 Risk/Reward ratio?
-
-**TIMEOUT CONSIDERATION (VERY IMPORTANT):**
-- This strategy uses a strict **90-minute time-cut**. Any open position will be automatically closed after 90 minutes, regardless of profit or loss.
-- Therefore, you MUST set **tighter, more realistic TP and SL targets** that are likely to be hit within this 90-minute window. Avoid setting wide targets that the price is unlikely to reach in time. Your goal is to capitalize on the short-term momentum identified on the 3-minute chart.
+**RISK MANAGEMENT OVERLAY (VERY IMPORTANT):**
+- **Correlation Risk**: Be aware that the system applies a correlation risk filter. If you provide strong opportunities for all available coins in the same direction (all LONG or all SHORT), the system will automatically select ONLY the one with the highest score to execute. Therefore, your scoring must be precise to reflect the true conviction level for each setup.
+- **Time-Cut Risk**: This strategy uses a strict **90-minute time-cut**. Any open position will be automatically closed after 90 minutes. Therefore, you MUST set **tighter, more realistic TP and SL targets** that are likely to be hit within this 90-minute window.
 
 **RESPONSE JSON FORMAT:**
 - YOUR RESPONSE must be ONLY a valid JSON object, with no markdown.
@@ -754,7 +743,6 @@ def execute_single_trade(coin_name, opportunity, available_capital):
         symbol = coin_config["symbol"]
         action = opportunity.get("direction", "").lower()
         
-        # 미체결 주문 취소
         try:
             exchange.cancel_all_orders(symbol)
             print(f"{coin_name} 기존 미체결 주문 취소됨")
@@ -776,7 +764,6 @@ def execute_single_trade(coin_name, opportunity, available_capital):
         
         exchange.set_leverage(leverage, symbol)
         
-        # 시장가 주문
         order = None
         if action == "long":
             order = exchange.create_market_buy_order(symbol, amount)
@@ -787,7 +774,6 @@ def execute_single_trade(coin_name, opportunity, available_capital):
         
         entry_price = order.get('price', current_price)
         
-        # SL/TP 설정
         sl_price = entry_price * (1 - (sl_pct / leverage)) if action == "long" else entry_price * (1 + (sl_pct / leverage))
         tp_price = entry_price * (1 + (tp_pct / leverage)) if action == "long" else entry_price * (1 - (tp_pct / leverage))
         
@@ -809,10 +795,11 @@ def execute_single_trade(coin_name, opportunity, available_capital):
 
 # ===== 메인 프로그램 시작 =====
 def main():
-    print("\n=== Multi-Coin Day Trading Bot Started (v5.5 - 안정된 타임컷) ===")
+    print("\n=== Multi-Coin Day Trading Bot Started (v5.8 - 상관관계 리스크 관리) ===")
     print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("Strategy: AI 완전 자율 판단, 3분봉 메인")
-    print("Risk Management: 90분 경과 시 모든 포지션 자동 정리 (Time-Cut)")
+    print("Risk Management: 90분 타임컷 & 상관관계 필터")
+    print("Partial Scan: 10분마다 빈 코인슬롯 스캔")
     print("===============================================\n")
 
     setup_database()
@@ -843,11 +830,21 @@ def main():
                 decision = analyze_multi_coin_with_ai(all_data, hist_data, perf_metrics)
                 opportunities = decision.get('trading_opportunities', [])
                 
+                # <<<< NEW: 상관관계 리스크 필터 (전체 스캔) >>>>
+                if len(opportunities) == 3:
+                    directions = {opp.get('direction') for opp in opportunities}
+                    if len(directions) == 1:
+                        print("\n⚠️ Correlation Risk Detected: All 3 coins have the same direction.")
+                        highest_score_opp = max(opportunities, key=lambda x: x.get('score', 0))
+                        print(f"   Filtering to the highest score: {highest_score_opp.get('coin')} (Score: {highest_score_opp.get('score', 0)})")
+                        opportunities = [highest_score_opp]
+                # <<<< END OF NEW LOGIC >>>>
+                
                 if opportunities:
                     balance = exchange.fetch_balance()['USDT']['free']
                     for opp in opportunities:
                         execute_single_trade(opp['coin'], opp, balance)
-                        time.sleep(5) # API 호출 간격
+                        time.sleep(5)
                     last_partial_scan_time = datetime.now()
                 else:
                     print("AI found no high-probability setups.")
@@ -858,8 +855,8 @@ def main():
                 print(f"{len(current_positions)} active position(s). Monitoring...")
                 
                 time_since_scan = (datetime.now() - last_partial_scan_time).total_seconds() / 60
-                if time_since_scan >= 30:
-                    print("\n--- 30 min passed, scanning for additional opportunities ---")
+                if time_since_scan >= 10:
+                    print("\n--- 10 min passed, scanning for additional opportunities ---")
                     available_coins = set(TRADING_PAIRS.keys()) - {p['coin'] for p in current_positions}
                     
                     if available_coins:
@@ -870,6 +867,17 @@ def main():
                             decision = analyze_multi_coin_with_ai(available_data, hist_data, perf_metrics)
                             opportunities = decision.get('trading_opportunities', [])
                             
+                            # <<<< NEW: 상관관계 리스크 필터 (부분 스캔) >>>>
+                            num_scanned = len(available_data)
+                            if num_scanned > 1 and len(opportunities) == num_scanned:
+                                directions = {opp.get('direction') for opp in opportunities}
+                                if len(directions) == 1:
+                                    print(f"\n⚠️ Correlation Risk Detected: All {num_scanned} scanned coins have the same direction.")
+                                    highest_score_opp = max(opportunities, key=lambda x: x.get('score', 0))
+                                    print(f"   Filtering to the highest score: {highest_score_opp.get('coin')} (Score: {highest_score_opp.get('score', 0)})")
+                                    opportunities = [highest_score_opp]
+                            # <<<< END OF NEW LOGIC >>>>
+
                             if opportunities:
                                 balance = exchange.fetch_balance()['USDT']['free']
                                 for opp in opportunities:
@@ -880,6 +888,9 @@ def main():
                     else:
                         print("All coins have open positions.")
                     last_partial_scan_time = datetime.now()
+                else:
+                    remaining_minutes = 10 - int(time_since_scan)
+                    print(f"다음 부분 스캔까지 {remaining_minutes}분 남음")
 
                 time.sleep(60)
 
