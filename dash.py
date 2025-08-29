@@ -93,7 +93,8 @@ def calculate_performance_metrics(trades_df):
     metrics['total_trades'] = len(trades_df)
     metrics['open_trades'] = len(trades_df[trades_df['status'] == 'OPEN'])
     
-    closed_df = trades_df[trades_df['status'].isin(['CLOSED', 'CLOSED_TIMEOUT'])].copy()
+    # [수정] 'OPEN'이 아닌 모든 상태를 종료된 거래로 간주 (수동 종료 등 포함)
+    closed_df = trades_df[trades_df['status'] != 'OPEN'].copy()
     metrics['closed_trades'] = len(closed_df)
     
     # 코인별 통계
@@ -101,7 +102,8 @@ def calculate_performance_metrics(trades_df):
         coin_stats = {}
         for coin in trades_df['coin_symbol'].unique():
             coin_trades = trades_df[trades_df['coin_symbol'] == coin]
-            coin_closed = coin_trades[coin_trades['status'].isin(['CLOSED', 'CLOSED_TIMEOUT'])]
+            # [수정] 'OPEN'이 아닌 모든 상태를 종료된 거래로 간주
+            coin_closed = coin_trades[coin_trades['status'] != 'OPEN']
             
             pnl_sum = 0
             win_rate = 0
@@ -215,7 +217,8 @@ def main():
         st.subheader("📊 거래 분석 차트")
         tab1, tab2 = st.tabs(["📈 수익률 추이", "🪙 코인/방향 분석"])
         
-        closed_trades = filtered_trades[filtered_trades['status'].isin(['CLOSED', 'CLOSED_TIMEOUT'])].copy()
+        # [수정] 'OPEN'이 아닌 모든 상태를 종료된 거래로 간주하여 차트 생성
+        closed_trades = filtered_trades[filtered_trades['status'] != 'OPEN'].copy()
         
         with tab1:
             if not closed_trades.empty and 'profit_loss' in closed_trades.columns:
