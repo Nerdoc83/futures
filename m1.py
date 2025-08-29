@@ -1,5 +1,5 @@
 """
-AI 멀티코인 데이트레이딩 봇 - Gemini + AI 전담 판단 (v6.4 - 안정성 패치 적용)
+AI 멀티코인 데이트레이딩 봇 - Gemini + AI 전담 판단 (v6.5 - 최종 안정성 패치)
 --------------------------------------------------------
 기능:
 - 멀티코인 스캔 (BTC, ETH, SOL) - AI가 모든 판단 담당
@@ -48,7 +48,7 @@ TRADING_PAIRS = {
         "precision": 5
     },
     "ETH": {
-        "symbol": "ETH/USDT", 
+        "symbol": "ETH/USDT",
         "binance_symbol": "ETHUSDT",
         "min_investment": 20,
         "leverage_range": (5, 35),
@@ -59,7 +59,7 @@ TRADING_PAIRS = {
     },
     "SOL": {
         "symbol": "SOL/USDT",
-        "binance_symbol": "SOLUSDT", 
+        "binance_symbol": "SOLUSDT",
         "min_investment": 10,
         "leverage_range": (3, 25),
         "volatility_factor": 1.8,
@@ -282,7 +282,7 @@ def update_trade_status(trade_id, status, exit_price=None, exit_timestamp=None, 
     update_sql = f"UPDATE trades SET {', '.join(update_fields)} WHERE id = ?"
     update_values.append(trade_id)
     
-    cursor.execute(update_sql, update_values)
+    cursor.execute(update_sql, tuple(update_values))
     conn.commit()
     conn.close()
 
@@ -316,8 +316,11 @@ def get_all_open_trades():
     
     return open_trades
 
+# ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
+#                  <-- 최종 수정된 함수 1 -->
+# ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
 def get_historical_trading_data(limit=5):
-    """과거 거래 내역 가져오기"""
+    """과거 거래 내역 가져오기 (None 값 처리 강화)"""
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
@@ -334,19 +337,18 @@ def get_historical_trading_data(limit=5):
     results = cursor.fetchall()
     historical_data = []
     for row in results:
+        # profit_loss가 None이 아닌 경우에만 > 0 비교를 수행하여 TypeError 방지
+        is_win = row["profit_loss"] is not None and row["profit_loss"] > 0
         trade_result = {
             "coin": row["coin_symbol"],
             "direction": row["action"].upper(),
-            "result": "WIN" if row["profit_loss"] > 0 else "LOSS"
+            "result": "WIN" if is_win else "LOSS"
         }
         historical_data.append(trade_result)
     
     conn.close()
     return historical_data
 
-# ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
-#                  <--수정된 함수 1-->
-# ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
 def get_performance_metrics():
     """거래 성과 메트릭스를 계산합니다 (안정성 강화)"""
     conn = sqlite3.connect(DB_FILE)
@@ -389,11 +391,9 @@ def get_performance_metrics():
     
     return metrics
 # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
-#                  <--수정된 함수 1-->
+#                  <-- 최종 수정된 함수 1 -->
 # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
 
-
-# ===== 새로운 동기화 함수 =====
 def sync_database_with_positions():
     """데이터베이스의 OPEN 거래와 실제 포지션 상태를 동기화"""
     try:
@@ -449,7 +449,7 @@ def sync_database_with_positions():
         print(f"동기화 프로세스 오류: {e}")
 
 # ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
-#                  <--수정된 함수 2-->
+#                  <-- 최종 수정된 함수 2 -->
 # ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
 def check_trade_timeout():
     """90분 이상 경과된 모든 포지션을 수익/손실 관계없이 정리 (시간 기반 손절)"""
@@ -563,8 +563,9 @@ def check_trade_timeout():
     # for 루프가 끝난 후, 처리된 타임아웃 건수(정수)를 반환
     return timeout_count
 # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
-#                  <--수정된 함수 2-->
+#                  <-- 최종 수정된 함수 2 -->
 # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+
 
 # ===== 데이터 수집 함수 (JSON 직렬화 오류 수정) =====
 def fetch_multi_timeframe_data_for_coin(symbol):
@@ -886,7 +887,7 @@ def execute_single_trade(coin_name, opportunity, available_capital, all_coins_da
 
 # ===== 메인 프로그램 시작 =====
 def main():
-    print("\n=== Multi-Coin Day Trading Bot Started (v6.4 - 최종 전략 강화) ===")
+    print("\n=== Multi-Coin Day Trading Bot Started (v6.5 - 최종 안정성 패치) ===")
     print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("Strategy: AI 완전 자율 판단, 3분봉 메인")
     print("Risk Management: 90분 타임컷, 상관관계 필터, 합리성 필터, 레버리지 필터, 추세 필터, AI 자가 학습")
@@ -935,7 +936,7 @@ def main():
                     
                     for opp in opportunities:
                         used_margin = execute_single_trade(opp['coin'], opp, available_capital_for_loop, all_data)
-                        if used_margin and used_margin > 0:
+                        if used_margin is not None and used_margin > 0:
                             available_capital_for_loop -= used_margin
                         time.sleep(5)
                     last_partial_scan_time = datetime.now()
@@ -975,7 +976,7 @@ def main():
                                 
                                 for opp in opportunities:
                                     used_margin = execute_single_trade(opp['coin'], opp, available_capital_for_loop, available_data)
-                                    if used_margin and used_margin > 0:
+                                    if used_margin is not None and used_margin > 0:
                                         available_capital_for_loop -= used_margin
                                     time.sleep(5)
                             else:
@@ -990,7 +991,9 @@ def main():
                 time.sleep(60)
 
         except Exception as e:
-            print(f"\nMain loop error: {e}")
+            print(f"\nMain loop error: {e.__class__.__name__}: {e}")
+            import traceback
+            traceback.print_exc()
             time.sleep(30)
 
 if __name__ == "__main__":
