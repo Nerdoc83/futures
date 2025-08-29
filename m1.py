@@ -1,5 +1,5 @@
 """
-AI 멀티코인 데이트레이딩 봇 - Gemini + AI 전담 판단 (v6.4 - 최종 전략 강화)
+AI 멀티코인 데이트레이딩 봇 - Gemini + AI 전담 판단 (v6.3 - 최종 안정화)
 --------------------------------------------------------
 기능:
 - 멀티코인 스캔 (BTC, ETH, SOL) - AI가 모든 판단 담당
@@ -14,8 +14,6 @@ AI 멀티코인 데이트레이딩 봇 - Gemini + AI 전담 판단 (v6.4 - 최�
 - 상관관계 리스크 관리: 모든 코인 동시 진입 신호 시 최고점수 포지션만 진입
 - 합리성 필터: AI의 비현실적인 TP/SL 제안 자동 거부 (안전장치)
 - 레버리지 필터: AI의 레버리지 제안이 설정 범위를 벗어날 경우 자동 조정
-- 추세 필터: 1시간봉 EMA를 기준으로 추세를 거스르는 거래 방지
-- AI 자가 학습: 연속 손실 발생 시 자동으로 보수적 모드로 전환
 - DB-포지션 동기화 기능
 - 24시간 무제한 거래
 - 최소 투자금액: 40-10 USDT
@@ -737,7 +735,6 @@ def execute_single_trade(coin_name, opportunity, available_capital, all_coins_da
         symbol = coin_config["symbol"]
         action = opportunity.get("direction", "").lower()
         
-        # <<<< NEW: 추세 필터 안전장치 >>>>
         ema_1h = all_coins_data[coin_name].get("technical_data", {}).get("1h", {}).get("current_indicators", {}).get("EMA_50")
         current_price = all_coins_data[coin_name].get("current_price")
 
@@ -750,18 +747,23 @@ def execute_single_trade(coin_name, opportunity, available_capital, all_coins_da
                 return None
         else:
             print(f"   Warning: 1H EMA data not available for {coin_name}, trend filter skipped.")
-        # <<<< END OF NEW LOGIC >>>>
 
         def parse_percentage(value):
             if isinstance(value, list): value = value[0] if value else "0"
             if isinstance(value, str): value = value.strip().replace('%', '')
-            num_value = float(value)
-            return num_value / 100.0 if num_value > 1 else num_value
+            try:
+                num_value = float(value)
+                return num_value / 100.0 if num_value > 1 else num_value
+            except (ValueError, TypeError):
+                return 0.0
 
         def parse_leverage(value):
             if isinstance(value, list): value = value[0] if value else "1"
             if isinstance(value, str): value = value.strip().lower().replace('x', '')
-            return int(float(value))
+            try:
+                return int(float(value))
+            except (ValueError, TypeError):
+                return 1
 
         pos_size_pct = parse_percentage(opportunity.get('recommended_position_size', 0))
         leverage = parse_leverage(opportunity.get('recommended_leverage', 1))
