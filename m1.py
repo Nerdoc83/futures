@@ -1,5 +1,5 @@
 """
-AI 멀티코인 데이트레이딩 봇 - Gemini + AI 전담 판단 (v6.3 - 최종 안정화)
+AI 멀티코인 데이트레이딩 봇 - Gemini + AI 전담 판단 (v6.4 - 안정성 패치 적용)
 --------------------------------------------------------
 기능:
 - 멀티코인 스캔 (BTC, ETH, SOL) - AI가 모든 판단 담당
@@ -344,8 +344,11 @@ def get_historical_trading_data(limit=5):
     conn.close()
     return historical_data
 
+# ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
+#                  <--수정된 함수 1-->
+# ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
 def get_performance_metrics():
-    """거래 성과 메트릭스를 계산합니다"""
+    """거래 성과 메트릭스를 계산합니다 (안정성 강화)"""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     
@@ -363,6 +366,14 @@ def get_performance_metrics():
     overall_metrics = cursor.fetchone()
     conn.close()
     
+    # 거래 내역이 전혀 없을 경우를 처리하여 초기 실행 오류 방지
+    if overall_metrics is None or overall_metrics[0] == 0:
+        return {
+            "total_trades": 0, "winning_trades": 0, "win_rate": 0,
+            "avg_profit_loss_percentage": 0, "max_profit_percentage": 0,
+            "max_loss_percentage": 0
+        }
+    
     metrics = {
         "total_trades": overall_metrics[0] or 0,
         "winning_trades": overall_metrics[1] or 0,
@@ -377,6 +388,10 @@ def get_performance_metrics():
         metrics["win_rate"] = 0
     
     return metrics
+# ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+#                  <--수정된 함수 1-->
+# ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+
 
 # ===== 새로운 동기화 함수 =====
 def sync_database_with_positions():
@@ -433,7 +448,9 @@ def sync_database_with_positions():
     except Exception as e:
         print(f"동기화 프로세스 오류: {e}")
 
-# ===== 타임아웃 함수 (정확한 수익률 계산으로 수정) =====
+# ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
+#                  <--수정된 함수 2-->
+# ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
 def check_trade_timeout():
     """90분 이상 경과된 모든 포지션을 수익/손실 관계없이 정리 (시간 기반 손절)"""
     conn = sqlite3.connect(DB_FILE)
@@ -449,6 +466,7 @@ def check_trade_timeout():
     timeout_candidates = cursor.fetchall()
     conn.close()
     
+    # 타임아웃 대상 포지션이 없으면 0을 반환하고 즉시 함수 종료
     if not timeout_candidates:
         return 0
 
@@ -542,7 +560,11 @@ def check_trade_timeout():
     if timeout_count > 0:
         print("=== 타임컷 정리 완료, 새로운 스캔을 시작합니다 ===")
     
+    # for 루프가 끝난 후, 처리된 타임아웃 건수(정수)를 반환
     return timeout_count
+# ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+#                  <--수정된 함수 2-->
+# ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
 
 # ===== 데이터 수집 함수 (JSON 직렬화 오류 수정) =====
 def fetch_multi_timeframe_data_for_coin(symbol):
