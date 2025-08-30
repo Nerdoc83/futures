@@ -1,5 +1,5 @@
 """
-AI 멀티코인 데이트레이딩 봇 - Gemini + AI 전담 판단 (v6.5 - 최종 안정성 패치)
+AI 멀티코인 데이트레이딩 봇 - Gemini + AI 전담 판단 (v6.6 - SQL 오류 및 시간 추적 수정)
 --------------------------------------------------------
 기능:
 - 멀티코인 스캔 (BTC, ETH, SOL) - AI가 모든 판단 담당
@@ -18,6 +18,7 @@ AI 멀티코인 데이트레이딩 봇 - Gemini + AI 전담 판단 (v6.5 - 최�
 - 실제 포지션 기반 추적: 수동 거래 포함 모든 포지션 추적
 - 24시간 무제한 거래
 - 최소 투자금액: 40-10 USDT
+- 수정사항: SQL 구문 오류 해결, 봇 시작 시 포지션 추적 초기화 강화
 --------------------------------------------------------
 """
 
@@ -89,7 +90,7 @@ exchange = ccxt.binance({
 })
 
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-model = genai.GenerativeModel('gemini-2.5-flash')
+model = genai.GenerativeModel('gemini-2.5-pro')
 
 DB_FILE = "multi_coin_daytrading.db"
 
@@ -476,10 +477,46 @@ def get_position_entry_time(symbol, position_side, position_amount):
         print(f"포지션 진입 시간 조회 오류: {e}")
         return None
 
-# ===== 실제 포지션 기반 90분 타임아웃 체크 =====
+# ===== 봇 시작 시 포지션 추적 초기화 함수 =====
+def initialize_position_tracker_on_startup():
+    """봇 시작 시 기존 포지션들을 POSITION_TRACKER에 등록"""
+    global POSITION_TRACKER
+    current_time = datetime.now(timezone.utc)
+    
+    print("기존 포지션 추적 초기화 중...")
+    for coin_name, coin_config in TRADING_PAIRS.items():
+        try:
+            positions = exchange.fetch_positions([coin_config["symbol"]])
+            for position in positions:
+                if position['symbol'] == f"{coin_config['symbol']}:USDT":
+                    pos_amt = float(position['info']['positionAmt'])
+                    if pos_amt != 0:
+                        position_key = f"{coin_name}_{position['side']}"
+                        # 실제 진입 시간을 조회해서 등록
+                        entry_time = get_position_entry_time(
+                            coin_config["symbol"], 
+                            position['side'], 
+                            abs(pos_amt)
+                        )
+                        if entry_time:
+                            POSITION_TRACKER[position_key] = entry_time
+                            elapsed = (current_time - entry_time).total_seconds() / 60
+                            print(f"기존 포지션 등록: {coin_name} {position['side'].upper()} ({elapsed:.1f}분 경과)")
+                        else:
+                            # 진입 시간을 찾지 못한 경우 현재 시간으로 대체
+                            POSITION_TRACKER[position_key] = current_time
+                            print(f"기존 포지션 등록: {coin_name} {position['side'].upper()} (진입 시간 불명, 현재부터 추적)")
+        except Exception as e:
+            print(f"초기화 중 {coin_name} 오류: {e}")
+    
+    if POSITION_TRACKER:
+        print(f"총 {len(POSITION_TRACKER)}개의 기존 포지션이 추적에 등록되었습니다.")
+    else:
+        print("기존 포지션이 없습니다.")
 
+# ===== 실제 포지션 기반 90분 타임아웃 체크 (수정됨) =====
 def check_trade_timeout():
-    """실제 거래소 포지션을 기준으로 90분 타임아웃 체크 (생성 시간 기반)"""
+    """실제 거래소 포지션을 기준으로 90분 타임아웃 체크 (생성 시간 기반) - SQL 오류 수정"""
     global POSITION_TRACKER
     timeout_count = 0
     current_time = datetime.now(timezone.utc)
@@ -523,8 +560,8 @@ def check_trade_timeout():
                             time_elapsed = (current_time - entry_time).total_seconds() / 60
                             
                             if time_elapsed >= 90:
-                                unrealized_pnl = float(position['info'].get('unRealizedProfit', 0))
-                                entry_price = float(position['info'].get('entryPrice', 0)) if position['info'].get('entryPrice') not in (None, '', '0') else 0
+                                unrealized_pnl = float(position['info']['unRealizedProfit'])
+                                entry_price = float(position['info']['entryPrice'])
                                 current_price = exchange.fetch_ticker(coin_config['symbol'])['last']
                                 
                                 print(f"\n{'='*60}")
@@ -544,53 +581,60 @@ def check_trade_timeout():
                                 
                                 # 포지션 청산
                                 try:
-                                    # 안전하게 시장가 리듀스온리 주문 사용
+                                    params = {'reduceOnly': True}
                                     if pos_amt > 0:  # Long position
-                                        exchange.create_market_sell_order(coin_config['symbol'], actual_amount, {'reduceOnly': True})
+                                        exchange.create_order(coin_config['symbol'], 'market', 'sell', 
+                                                            actual_amount, params=params)
                                     else:  # Short position
-                                        exchange.create_market_buy_order(coin_config['symbol'], actual_amount, {'reduceOnly': True})
+                                        exchange.create_order(coin_config['symbol'], 'market', 'buy', 
+                                                            actual_amount, params=params)
                                     
-                                    print(f"   ✅ 타임컷 청산 주문 전송 완료! (reduceOnly 시장가)")
+                                    print(f"   ✅ 타임컷 청산 완료!")
                                     
                                     # 추적 딕셔너리에서 제거
-                                    if position_key in POSITION_TRACKER:
-                                        del POSITION_TRACKER[position_key]
+                                    del POSITION_TRACKER[position_key]
                                     timeout_count += 1
                                     
-                                    # DB에 기록이 있다면 업데이트 (봇이 연 포지션인 경우)
+                                    # DB에 기록이 있다면 업데이트 (봇이 연 포지션인 경우) - SQL 수정
                                     try:
-                                        # 레버리지 추정 시도 (안되면 1로 처리)
-                                        notional = actual_amount * (entry_price if entry_price>0 else current_price)
-                                        initial_margin = float(position['info'].get('initialMargin', 0) or 0)
-                                        est_leverage = int(notional / initial_margin) if initial_margin > 0 else 1
-                                        
-                                        # profit loss percent 계산 (안전한 방식)
-                                        if entry_price > 0 and actual_amount > 0:
-                                            profit_loss_percentage = (unrealized_pnl / (entry_price * actual_amount)) * 100 * est_leverage
-                                        else:
-                                            profit_loss_percentage = 0
-                                        
                                         conn = sqlite3.connect(DB_FILE)
                                         cursor = conn.cursor()
-                                        cursor.execute("""
-                                            UPDATE trades 
-                                            SET status = 'CLOSED_TIMEOUT', 
-                                                exit_price = ?, 
-                                                exit_timestamp = ?,
-                                                profit_loss = ?,
-                                                profit_loss_percentage = ?
+                                        
+                                        # 먼저 해당 거래의 ID를 찾기
+                                        cursor.execute('''
+                                            SELECT id FROM trades 
                                             WHERE coin_symbol = ? 
                                             AND status = 'OPEN'
                                             ORDER BY timestamp DESC
                                             LIMIT 1
-                                        """, (current_price, current_time.isoformat(), 
-                                              unrealized_pnl, profit_loss_percentage,
-                                              coin_name))
-                                        conn.commit()
+                                        ''', (coin_name,))
+                                        
+                                        result = cursor.fetchone()
+                                        if result:
+                                            trade_id = result[0]
+                                            profit_loss_percentage = (unrealized_pnl/entry_price)*100 if entry_price > 0 else 0
+                                            
+                                            # ID를 이용해 업데이트
+                                            cursor.execute('''
+                                                UPDATE trades 
+                                                SET status = 'CLOSED_TIMEOUT', 
+                                                    exit_price = ?, 
+                                                    exit_timestamp = ?,
+                                                    profit_loss = ?,
+                                                    profit_loss_percentage = ?
+                                                WHERE id = ?
+                                            ''', (current_price, current_time.isoformat(), 
+                                                  unrealized_pnl, profit_loss_percentage, trade_id))
+                                            
+                                            conn.commit()
+                                            print(f"   DB 업데이트 완료 (Trade ID: {trade_id})")
+                                        else:
+                                            print(f"   DB에 해당 거래 기록 없음 (수동 거래일 가능성)")
+                                        
                                         conn.close()
-                                        print(f"   DB 업데이트 완료: P/L ${unrealized_pnl:,.2f} ({profit_loss_percentage:.2f}%)")
-                                    except Exception as e:
-                                        print(f"   DB 업데이트 오류: {e}")
+                                        
+                                    except Exception as db_error:
+                                        print(f"   DB 업데이트 오류: {db_error}")
                                     
                                 except Exception as e:
                                     print(f"   ❌ 포지션 청산 오류: {e}")
@@ -621,14 +665,14 @@ def check_trade_timeout():
         print(f"현재 추적 중인 포지션: {len(POSITION_TRACKER)}개")
         for key, time_val in POSITION_TRACKER.items():
             elapsed = (current_time - time_val).total_seconds() / 60
-            print(f"  - {key}: {elapsed:.1f}분 경과 (진입: {time_val.strftime('%H:%M:%S')})")
+            time_val_local = time_val.astimezone()  # UTC를 로컬로 변환
+        print(f"  - {key}: {elapsed:.1f}분 경과 (진입: {time_val_local.strftime('%H:%M:%S')} 로컬)")
     
     return timeout_count
 
-
-
+# ===== 실제 포지션 기반 3분봉 급변동 손절 (SQL 수정) =====
 def check_rapid_movement_stop_loss():
-    """실제 포지션 기준 3분봉 급격한 변동 감지 시 즉시 손절 (수동 거래 포함)"""
+    """실제 포지션 기준 3분봉 급격한 변동 감지 시 즉시 손절 (수동 거래 포함) - SQL 오류 수정"""
     closed_count = 0
     
     try:
@@ -645,12 +689,12 @@ def check_rapid_movement_stop_loss():
                             # 포지션 정보
                             actual_amount = abs(pos_amt)
                             side = 'long' if pos_amt > 0 else 'short'
-                            entry_price = float(position['info'].get('entryPrice', 0)) if position['info'].get('entryPrice') not in (None, '', '0') else 0
+                            entry_price = float(position['info']['entryPrice'])
                             
                             # 레버리지 추정 (포지션의 명목가치 / 증거금)
-                            notional = actual_amount * (entry_price if entry_price>0 else 0)
-                            initial_margin = float(position['info'].get('initialMargin', 0) or 0)
-                            leverage = int(notional / initial_margin) if initial_margin > 0 and notional>0 else 1
+                            notional = actual_amount * entry_price
+                            initial_margin = float(position['info']['initialMargin'])
+                            leverage = int(notional / initial_margin) if initial_margin > 0 else 10
                             
                             # 코인별 최대 레버리지로 제한
                             max_leverage = coin_config['leverage_range'][1]
@@ -668,7 +712,7 @@ def check_rapid_movement_stop_loss():
                             current_price = current_candle[4]
                             
                             # 봉의 변화율 계산
-                            candle_change_pct = ((current_price - prev_close) / prev_close) * 100 if prev_close != 0 else 0
+                            candle_change_pct = ((current_price - prev_close) / prev_close) * 100
                             
                             # 레버리지를 고려한 포지션 손익률
                             position_change_pct = candle_change_pct * leverage
@@ -700,22 +744,21 @@ def check_rapid_movement_stop_loss():
                                 
                                 # 긴급 시장가 청산
                                 try:
+                                    params = {'reduceOnly': True}
                                     if side == 'long':
-                                        exchange.create_market_sell_order(coin_config['symbol'], actual_amount, {'reduceOnly': True})
+                                        exchange.create_order(coin_config['symbol'], 'market', 'sell', 
+                                                            actual_amount, params=params)
                                     else:
-                                        exchange.create_market_buy_order(coin_config['symbol'], actual_amount, {'reduceOnly': True})
+                                        exchange.create_order(coin_config['symbol'], 'market', 'buy', 
+                                                            actual_amount, params=params)
                                     
                                     # 손익 계산
-                                    if entry_price > 0:
-                                        if side == 'long':
-                                            profit_loss = (current_price - entry_price) * actual_amount
-                                            profit_loss_percentage = ((current_price / entry_price) - 1) * leverage * 100
-                                        else:
-                                            profit_loss = (entry_price - current_price) * actual_amount
-                                            profit_loss_percentage = ((entry_price / current_price) - 1) * leverage * 100
+                                    if side == 'long':
+                                        profit_loss = (current_price - entry_price) * actual_amount
+                                        profit_loss_percentage = ((current_price / entry_price) - 1) * leverage * 100
                                     else:
-                                        profit_loss = 0
-                                        profit_loss_percentage = 0
+                                        profit_loss = (entry_price - current_price) * actual_amount
+                                        profit_loss_percentage = ((entry_price / current_price) - 1) * leverage * 100
                                     
                                     print(f"   ✅ 긴급 손절 완료: P/L ${profit_loss:,.2f} ({profit_loss_percentage:.2f}%)")
                                     
@@ -724,30 +767,46 @@ def check_rapid_movement_stop_loss():
                                     if position_key in POSITION_TRACKER:
                                         del POSITION_TRACKER[position_key]
                                     
-                                    # DB에 기록이 있다면 업데이트 (봇이 연 포지션인 경우)
+                                    # DB에 기록이 있다면 업데이트 (봇이 연 포지션인 경우) - SQL 수정
                                     try:
                                         conn = sqlite3.connect(DB_FILE)
                                         cursor = conn.cursor()
-                                        cursor.execute("""
-                                            UPDATE trades 
-                                            SET status = 'CLOSED_RAPID_STOP', 
-                                                exit_price = ?, 
-                                                exit_timestamp = ?,
-                                                profit_loss = ?,
-                                                profit_loss_percentage = ?
+                                        
+                                        # 먼저 해당 거래의 ID를 찾기
+                                        cursor.execute('''
+                                            SELECT id FROM trades 
                                             WHERE coin_symbol = ? 
                                             AND action = ?
                                             AND status = 'OPEN'
                                             ORDER BY timestamp DESC
                                             LIMIT 1
-                                        """, (current_price, datetime.now().isoformat(), 
-                                              profit_loss, profit_loss_percentage, 
-                                              coin_name, side))
-                                        conn.commit()
+                                        ''', (coin_name, side))
+                                        
+                                        result = cursor.fetchone()
+                                        if result:
+                                            trade_id = result[0]
+                                            
+                                            # ID를 이용해 업데이트
+                                            cursor.execute('''
+                                                UPDATE trades 
+                                                SET status = 'CLOSED_RAPID_STOP', 
+                                                    exit_price = ?, 
+                                                    exit_timestamp = ?,
+                                                    profit_loss = ?,
+                                                    profit_loss_percentage = ?
+                                                WHERE id = ?
+                                            ''', (current_price, datetime.now().isoformat(), 
+                                                  profit_loss, profit_loss_percentage, trade_id))
+                                            
+                                            conn.commit()
+                                            print(f"   DB 업데이트 완료 (Trade ID: {trade_id})")
+                                        else:
+                                            print(f"   DB에 해당 거래 기록 없음 (수동 거래일 가능성)")
+                                        
                                         conn.close()
-                                        print(f"   DB 업데이트 완료: P/L ${profit_loss:,.2f} ({profit_loss_percentage:.2f}%)")
-                                    except Exception as e:
-                                        print(f"   DB 업데이트 오류: {e}")
+                                        
+                                    except Exception as db_error:
+                                        print(f"   DB 업데이트 오류: {db_error}")
                                     
                                     closed_count += 1
                                     
@@ -766,8 +825,7 @@ def check_rapid_movement_stop_loss():
         print(f"급변동 손절 체크 전체 오류: {e}")
         return 0
 
-
-
+# ===== 데이터 수집 함수 (JSON 직렬화 오류 수정) =====
 def fetch_multi_timeframe_data_for_coin(symbol):
     """단일 코인의 멀티 타임프레임 데이터 수집 (3분봉 메인)"""
     timeframes = {
@@ -1086,22 +1144,28 @@ def execute_single_trade(coin_name, opportunity, available_capital, all_coins_da
 
 # ===== 메인 프로그램 시작 =====
 def main():
-    print("\n=== Multi-Coin Day Trading Bot Started (v6.5 - 최종 안정성 패치) ===")
+    print("\n=== Multi-Coin Day Trading Bot Started (v6.6 - SQL 오류 및 시간 추적 수정) ===")
     print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("Strategy: AI 완전 자율 판단, 3분봉 메인")
     print("Risk Management: 90분 타임컷, 3분봉 5% 급변동 손절, 상관관계 필터")
     print("Partial Scan: 10분마다 빈 코인슬롯 스캔")
     print("Position Tracking: 실제 포지션 기반 (수동 거래 포함)")
+    print("Fixes: SQL 구문 오류 해결, 봇 시작 시 포지션 추적 초기화")
     print("===============================================\n")
 
     setup_database()
+    
+    # 봇 시작 시 기존 포지션 추적 초기화
+    initialize_position_tracker_on_startup()
+    
     last_partial_scan_time = datetime.now(timezone.utc) - timedelta(minutes=10)
-    last_rapid_check_time = datetime.now()
+    last_rapid_check_time = datetime.now(timezone.utc)
 
     while True:
         try:
-            current_time = datetime.now().strftime('%H:%M:%S')
-            print(f"\n[{current_time}] === Market Check ===")
+            current_utc = datetime.now(timezone.utc)
+            current_local = current_utc.astimezone()
+            print(f"\n[{current_local.strftime('%H:%M:%S')}] === Market Check === (경과시간도 로컬시간 기준)")
 
             sync_database_with_positions()
             
@@ -1111,12 +1175,12 @@ def main():
                 continue
             
             # 2. 급변동 손절 체크 (30초마다)
-            if (datetime.now() - last_rapid_check_time).seconds >= 30:
+            if (datetime.now(timezone.utc) - last_rapid_check_time).seconds >= 30:
                 if check_rapid_movement_stop_loss() > 0:
-                    last_rapid_check_time = datetime.now()
+                    last_rapid_check_time = datetime.now(timezone.utc)
                     time.sleep(10)
                     continue
-                last_rapid_check_time = datetime.now()
+                last_rapid_check_time = datetime.now(timezone.utc)
             
             current_positions = check_current_positions()
             
@@ -1149,7 +1213,7 @@ def main():
                         if used_margin is not None and used_margin > 0:
                             available_capital_for_loop -= used_margin
                         time.sleep(5)
-                    last_partial_scan_time = datetime.now()
+                    last_partial_scan_time = datetime.now(timezone.utc)
                 else:
                     print("AI found no high-probability setups.")
                 
