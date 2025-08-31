@@ -90,7 +90,7 @@ exchange = ccxt.binance({
 })
 
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-model = genai.GenerativeModel('gemini-2.5-pro')
+model = genai.GenerativeModel('gemini-2.5-flash')
 
 DB_FILE = "multi_coin_daytrading.db"
 
