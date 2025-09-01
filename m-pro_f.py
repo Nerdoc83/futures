@@ -964,6 +964,8 @@ ANALYSIS PROCESS:
 - **Correlation Risk**: Be aware that the system applies a correlation risk filter. If you provide strong opportunities for all available coins in the same direction (all LONG or all SHORT), the system will automatically select ONLY the one with the highest score to execute.
 - **Time-Cut Risk**: This strategy uses a strict **60-minute time-cut**. Any open position will be automatically closed after 60 minutes. Your PRIMARY GOAL is to have trades close via TP or SL, not the time-cut. The 60-minute time-cut is a last-resort failsafe. Propose TP/SL targets that are achievable within 30-60 minutes. For a 3-minute chart, a realistic TP target is a 0.5% to 1.5% price movement. Your reasoning must explain why the target is achievable within this timeframe.
 - **You MUST propose trades where the take_profit_percentage is at least 1.5 times greater than the stop_loss_percentage. For example, if the stop loss is 10%, the take profit must be 15% or more. Trades with a risk/reward ratio below 1.5 will be rejected.
+- **SYSTEM CONSTRAINT: NON-NEGOTIABLE STOP LOSS LIMIT**: This is a critical, non-negotiable system constraint. The MAXIMUM acceptable `stop_loss_percentage` for any trade is **15%** of the invested margin. Any proposal with a stop loss outside the **5% to 15%** range will be **AUTOMATICALLY REJECTED** by the system, and the trade will NOT be executed. It is a waste of resources to propose a trade that violates this hard limit.
+- **Your task is to find a trade that FITS WITHIN THIS CONSTRAINT.** If you analyze the market and cannot find a single high-quality trading opportunity that meets this strict 5-15% SL constraint, you **MUST** return an empty `trading_opportunities` list. Do not force a trade by proposing a wider stop loss.
 
 **RESPONSE JSON FORMAT:**
 - YOUR RESPONSE must be ONLY a valid JSON object, with no markdown.
@@ -1050,6 +1052,14 @@ def execute_single_trade(coin_name, opportunity, available_capital, all_coins_da
         leverage = parse_leverage(opportunity.get('recommended_leverage', 1))
         sl_pct = parse_percentage(opportunity.get('stop_loss_percentage', 0))
         tp_pct = parse_percentage(opportunity.get('take_profit_percentage', 0))
+
+        # 리스크 하드 리밋 필터 (매우 중요)
+        MAX_ACCEPTABLE_SL_PERCENTAGE = 15.0  # 최대 손절률을 15%로 강제 (원금 대비)
+        # AI가 제안한 sl_pct는 이미 100을 나눈 값이므로 (e.g., 10% -> 0.1), 비교 대상도 100으로 나눔
+        if sl_pct > (MAX_ACCEPTABLE_SL_PERCENTAGE / 100.0):
+            # 사용자가 보기 편하도록 다시 100을 곱해서 출력
+            print(f"\n❌ Trade Rejected (Excessive Risk): AI proposed SL of {sl_pct * 100:.2f}%, which exceeds the hard limit of {MAX_ACCEPTABLE_SL_PERCENTAGE}%.")
+            return None # 리스크가 너무 크므로 거래를 거부
         
         min_lev, max_lev = coin_config['leverage_range']
         original_leverage = leverage
