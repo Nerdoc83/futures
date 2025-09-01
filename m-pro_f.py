@@ -9,7 +9,7 @@ AI 멀티코인 데이트레이딩 봇 - Gemini + AI 전담 판단 (v6.6 - SQL �
 - Gemini API 기반 AI 분석 (100% AI 의존)
 - 동적 레버리지 및 포지션 사이징 (AI 자율 결정)
 - AI 기반 동적 SL/TP 설정
-- 90분 타임컷: 90분 경과 시 수익/손실 무관 포지션 자동 정리 (실제 포지션 기반)
+- 60분 타임컷: 60분 경과 시 수익/손실 무관 포지션 자동 정리 (실제 포지션 기반)
 - 3분봉 5% 급변동 손절: 레버리지 효과 고려한 급격한 변동 시 즉시 손절
 - 10분 부분 스캔: 포지션 보유 시 10분마다 비어있는 코인 재스캔
 - 상관관계 리스크 관리: 모든 코인 동시 진입 신호 시 최고점수 포지션만 진입
@@ -514,9 +514,9 @@ def initialize_position_tracker_on_startup():
     else:
         print("기존 포지션이 없습니다.")
 
-# ===== 실제 포지션 기반 90분 타임아웃 체크 (수정됨) =====
+# ===== 실제 포지션 기반 60분 타임아웃 체크 (수정됨) =====
 def check_trade_timeout():
-    """실제 거래소 포지션을 기준으로 90분 타임아웃 체크 (생성 시간 기반) - SQL 오류 수정"""
+    """실제 거래소 포지션을 기준으로 60분 타임아웃 체크 (생성 시간 기반) - SQL 오류 수정"""
     global POSITION_TRACKER
     timeout_count = 0
     current_time = datetime.now(timezone.utc)
@@ -555,17 +555,17 @@ def check_trade_timeout():
                                     print(f"포지션 감지: {coin_name} {position['side'].upper()} (진입 시간 불명, 현재부터 추적)")
                                 continue
                             
-                            # 90분 경과 체크
+                            # 60분 경과 체크
                             entry_time = POSITION_TRACKER[position_key]
                             time_elapsed = (current_time - entry_time).total_seconds() / 60
                             
-                            if time_elapsed >= 90:
+                            if time_elapsed >= 60:
                                 unrealized_pnl = float(position['info']['unRealizedProfit'])
                                 entry_price = float(position['info']['entryPrice'])
                                 current_price = exchange.fetch_ticker(coin_config['symbol'])['last']
                                 
                                 print(f"\n{'='*60}")
-                                print(f"⏰ 90분 타임컷 실행: {coin_name} {position['side'].upper()}")
+                                print(f"⏰ 60분 타임컷 실행: {coin_name} {position['side'].upper()}")
                                 print(f"   포지션 진입: {entry_time.strftime('%Y-%m-%d %H:%M:%S')}")
                                 print(f"   현재 시간: {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
                                 print(f"   경과 시간: {time_elapsed:.1f}분")
@@ -641,7 +641,7 @@ def check_trade_timeout():
                                 
                                 print(f"{'='*60}")
                             else:
-                                remaining = 90 - time_elapsed
+                                remaining = 60 - time_elapsed
                                 if remaining <= 10:  # 10분 이하 남았을 때 경고
                                     print(f"⚠️ {coin_name} {position['side'].upper()} - 타임컷까지 {remaining:.1f}분 남음")
                                     
@@ -962,7 +962,8 @@ ANALYSIS PROCESS:
 - **Trend Filter**: A strict trend filter is active. You are ONLY allowed to propose LONG positions if the current price is ABOVE the 1-hour 50 EMA, and ONLY SHORT positions if the price is BELOW the 1-hour 50 EMA. Any proposal against the major trend will be rejected.
 - **Self-Correction Rule**: Review the `recent_trades` data. If you see 2 or more consecutive losses, switch to a **conservative mode**. In this mode, only enter trades with an extremely high conviction score (e.g., score > 90) and reduce the recommended position size by half.
 - **Correlation Risk**: Be aware that the system applies a correlation risk filter. If you provide strong opportunities for all available coins in the same direction (all LONG or all SHORT), the system will automatically select ONLY the one with the highest score to execute.
-- **Time-Cut Risk**: This strategy uses a strict **90-minute time-cut**. Any open position will be automatically closed after 90 minutes. Therefore, you MUST set **tighter, more realistic TP and SL targets** that are likely to be hit within this 90-minute window.
+- **Time-Cut Risk**: This strategy uses a strict **60-minute time-cut**. Any open position will be automatically closed after 60 minutes. Your PRIMARY GOAL is to have trades close via TP or SL, not the time-cut. The 60-minute time-cut is a last-resort failsafe. Propose TP/SL targets that are achievable within 30-60 minutes. For a 3-minute chart, a realistic TP target is a 0.5% to 1.5% price movement. Your reasoning must explain why the target is achievable within this timeframe.
+- **You MUST propose trades where the take_profit_percentage is at least 1.5 times greater than the stop_loss_percentage. For example, if the stop loss is 10%, the take profit must be 15% or more. Trades with a risk/reward ratio below 1.5 will be rejected.
 
 **RESPONSE JSON FORMAT:**
 - YOUR RESPONSE must be ONLY a valid JSON object, with no markdown.
@@ -1147,7 +1148,7 @@ def main():
     print("\n=== Multi-Coin Day Trading Bot Started (v6.6 - SQL 오류 및 시간 추적 수정) ===")
     print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("Strategy: AI 완전 자율 판단, 3분봉 메인")
-    print("Risk Management: 90분 타임컷, 3분봉 5% 급변동 손절, 상관관계 필터")
+    print("Risk Management: 60분 타임컷, 3분봉 5% 급변동 손절, 상관관계 필터")
     print("Partial Scan: 10분마다 빈 코인슬롯 스캔")
     print("Position Tracking: 실제 포지션 기반 (수동 거래 포함)")
     print("Fixes: SQL 구문 오류 해결, 봇 시작 시 포지션 추적 초기화")
@@ -1169,7 +1170,7 @@ def main():
 
             sync_database_with_positions()
             
-            # 1. 90분 타임아웃 체크 (최우선)
+            # 1. 60분 타임아웃 체크 (최우선)
             if check_trade_timeout() > 0:
                 time.sleep(10)
                 continue
