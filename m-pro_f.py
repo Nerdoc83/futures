@@ -1,5 +1,5 @@
 """
-AI 멀티코인 데이트레이딩 봇 - Gemini + AI 전담 판단 (v6.6 - SQL 오류 및 시간 추적 수정)
+AI 멀티코인 데이트레이딩 봇 - Gemini + AI 전담 판단 (v6.7 - 거래 비용 및 시장 상황 필터 강화)
 --------------------------------------------------------
 기능:
 - 멀티코인 스캔 (BTC, ETH, SOL) - AI가 모든 판단 담당
@@ -9,7 +9,7 @@ AI 멀티코인 데이트레이딩 봇 - Gemini + AI 전담 판단 (v6.6 - SQL �
 - Gemini API 기반 AI 분석 (100% AI 의존)
 - 동적 레버리지 및 포지션 사이징 (AI 자율 결정)
 - AI 기반 동적 SL/TP 설정
-- 60분 타임컷: 60분 경과 시 수익/손실 무관 포지션 자동 정리 (실제 포지션 기반)
+- 90분 타임컷: 90분 경과 시 수익/손실 무관 포지션 자동 정리 (실제 포지션 기반)
 - 3분봉 5% 급변동 손절: 레버리지 효과 고려한 급격한 변동 시 즉시 손절
 - 10분 부분 스캔: 포지션 보유 시 10분마다 비어있는 코인 재스캔
 - 상관관계 리스크 관리: 모든 코인 동시 진입 신호 시 최고점수 포지션만 진입
@@ -18,7 +18,7 @@ AI 멀티코인 데이트레이딩 봇 - Gemini + AI 전담 판단 (v6.6 - SQL �
 - 실제 포지션 기반 추적: 수동 거래 포함 모든 포지션 추적
 - 24시간 무제한 거래
 - 최소 투자금액: 40-10 USDT
-- 수정사항: SQL 구문 오류 해결, 봇 시작 시 포지션 추적 초기화 강화
+- 수정사항(v6.7): 거래비용(수수료, 슬리피지) 고려 및 횡보장 회피를 위한 AI 프롬프트 강화, 코드 레벨 최소이익률 필터 추가
 --------------------------------------------------------
 """
 
@@ -90,7 +90,7 @@ exchange = ccxt.binance({
 })
 
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-model = genai.GenerativeModel('gemini-2.5-flash')
+model = genai.GenerativeModel('gemini-2.5-pro')
 
 DB_FILE = "multi_coin_daytrading.db"
 
@@ -514,9 +514,9 @@ def initialize_position_tracker_on_startup():
     else:
         print("기존 포지션이 없습니다.")
 
-# ===== 실제 포지션 기반 60분 타임아웃 체크 (수정됨) =====
+# ===== 실제 포지션 기반 90분 타임아웃 체크 (수정됨) =====
 def check_trade_timeout():
-    """실제 거래소 포지션을 기준으로 60분 타임아웃 체크 (생성 시간 기반) - SQL 오류 수정"""
+    """실제 거래소 포지션을 기준으로 90분 타임아웃 체크 (생성 시간 기반) - SQL 오류 수정"""
     global POSITION_TRACKER
     timeout_count = 0
     current_time = datetime.now(timezone.utc)
@@ -555,17 +555,17 @@ def check_trade_timeout():
                                     print(f"포지션 감지: {coin_name} {position['side'].upper()} (진입 시간 불명, 현재부터 추적)")
                                 continue
                             
-                            # 60분 경과 체크
+                            # 90분 경과 체크
                             entry_time = POSITION_TRACKER[position_key]
                             time_elapsed = (current_time - entry_time).total_seconds() / 60
                             
-                            if time_elapsed >= 60:
+                            if time_elapsed >= 90:
                                 unrealized_pnl = float(position['info']['unRealizedProfit'])
                                 entry_price = float(position['info']['entryPrice'])
                                 current_price = exchange.fetch_ticker(coin_config['symbol'])['last']
                                 
                                 print(f"\n{'='*60}")
-                                print(f"⏰ 60분 타임컷 실행: {coin_name} {position['side'].upper()}")
+                                print(f"⏰ 90분 타임컷 실행: {coin_name} {position['side'].upper()}")
                                 print(f"   포지션 진입: {entry_time.strftime('%Y-%m-%d %H:%M:%S')}")
                                 print(f"   현재 시간: {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
                                 print(f"   경과 시간: {time_elapsed:.1f}분")
@@ -641,7 +641,7 @@ def check_trade_timeout():
                                 
                                 print(f"{'='*60}")
                             else:
-                                remaining = 60 - time_elapsed
+                                remaining = 90 - time_elapsed
                                 if remaining <= 10:  # 10분 이하 남았을 때 경고
                                     print(f"⚠️ {coin_name} {position['side'].upper()} - 타임컷까지 {remaining:.1f}분 남음")
                                     
@@ -666,7 +666,7 @@ def check_trade_timeout():
         for key, time_val in POSITION_TRACKER.items():
             elapsed = (current_time - time_val).total_seconds() / 60
             time_val_local = time_val.astimezone()  # UTC를 로컬로 변환
-        print(f"  - {key}: {elapsed:.1f}분 경과 (진입: {time_val_local.strftime('%H:%M:%S')} 로컬)")
+            print(f"  - {key}: {elapsed:.1f}분 경과 (진입: {time_val_local.strftime('%H:%M:%S')} 로컬)")
     
     return timeout_count
 
@@ -948,31 +948,38 @@ def check_current_positions():
 def analyze_multi_coin_with_ai(all_coins_data, historical_data, performance_metrics):
     """3개 코인을 AI로 분석하고 최고 확률의 거래 기회를 선택 (AI가 100% 판단)"""
     
+    # ===== [STRATEGY UPGRADE] ===== AI 시스템 프롬프트 대폭 강화
     system_prompt = """
-You are an expert multi-cryptocurrency day trader AI. Your SOLE mission is to analyze real-time market data for BTC, ETH, and SOL to identify the highest probability long or short trading opportunities. You have COMPLETE AUTONOMY.
+You are an elite, risk-averse, multi-cryptocurrency day trader AI. Your primary mission is to identify ONLY A+ grade, high-probability trading opportunities in BTC, ETH, and SOL, while rigorously protecting capital.
 
-**CRITICAL INSTRUCTION: Your trading decisions (LONG/SHORT) MUST be based ONLY on the provided real-time technical and sentiment data for each coin. Do NOT let the general coin characteristics below create a preconceived bias. A high-volatility coin can have a strong uptrend, and a low-volatility coin can have a strong downtrend.**
+**ANALYSIS & EXECUTION PROTOCOL:**
 
-ANALYSIS PROCESS:
-1.  **Data-First Analysis**: Objectively analyze each coin's technical indicators (RSI, MACD, Stoch, etc.) and market sentiment data across all timeframes.
-2.  **Primary Timeframe**: The **3M (3-minute) chart is your PRIMARY** tool for determining the current momentum and precise entry timing.
-3.  **Objective Scoring**: Score each coin from 0-100 based purely on the quality of the immediate trading setup.
+1.  **Market Condition Filter (CRITICAL):**
+    - You MUST AVOID trading in low-volatility, sideways, or 'choppy' market conditions where price action is unclear.
+    - Only propose trades when there is a clear, high-momentum directional bias on the 3-minute chart, supported by higher timeframes.
+    - **If no such high-quality condition exists across any of the coins, you MUST return an empty "trading_opportunities" list. Waiting for a clear opportunity is a critical part of this strategy.**
 
-**RISK MANAGEMENT OVERLAY (VERY IMPORTANT):**
-- **Trend Filter**: A strict trend filter is active. You are ONLY allowed to propose LONG positions if the current price is ABOVE the 1-hour 50 EMA, and ONLY SHORT positions if the price is BELOW the 1-hour 50 EMA. Any proposal against the major trend will be rejected.
-- **Self-Correction Rule**: Review the `recent_trades` data. If you see 2 or more consecutive losses, switch to a **conservative mode**. In this mode, only enter trades with an extremely high conviction score (e.g., score > 90) and reduce the recommended position size by half.
-- **Correlation Risk**: Be aware that the system applies a correlation risk filter. If you provide strong opportunities for all available coins in the same direction (all LONG or all SHORT), the system will automatically select ONLY the one with the highest score to execute.
-- **Time-Cut Risk**: This strategy uses a strict **60-minute time-cut**. Any open position will be automatically closed after 60 minutes. Your PRIMARY GOAL is to have trades close via TP or SL, not the time-cut. The 60-minute time-cut is a last-resort failsafe. Propose TP/SL targets that are achievable within 30-60 minutes. For a 3-minute chart, a realistic TP target is a 0.5% to 1.5% price movement. Your reasoning must explain why the target is achievable within this timeframe.
-- **You MUST propose trades where the take_profit_percentage is at least 1.5 times greater than the stop_loss_percentage. For example, if the stop loss is 10%, the take profit must be 15% or more. Trades with a risk/reward ratio below 1.5 will be rejected.
-- **SYSTEM CONSTRAINT: NON-NEGOTIABLE STOP LOSS LIMIT**: This is a critical, non-negotiable system constraint. The MAXIMUM acceptable `stop_loss_percentage` for any trade is **15%** of the invested margin. Any proposal with a stop loss outside the **5% to 15%** range will be **AUTOMATICALLY REJECTED** by the system, and the trade will NOT be executed. It is a waste of resources to propose a trade that violates this hard limit.
-- **Your task is to find a trade that FITS WITHIN THIS CONSTRAINT.** If you analyze the market and cannot find a single high-quality trading opportunity that meets this strict 5-15% SL constraint, you **MUST** return an empty `trading_opportunities` list. Do not force a trade by proposing a wider stop loss.
+2.  **Data-Driven Decision:**
+    - Your trading decisions (LONG/SHORT) MUST be based ONLY on the provided real-time technical and sentiment data for each coin.
+    - The **3M (3-minute) chart is your PRIMARY** tool for determining precise entry timing. Higher timeframes (15m, 1h) provide context for the overall trend.
+
+3.  **Strict Risk Management Overlay (NON-NEGOTIABLE):**
+    - **Trend Filter:** You are ONLY allowed to propose LONG positions if the current price is ABOVE the 1-hour 50 EMA, and ONLY SHORT positions if the price is BELOW the 1-hour 50 EMA.
+    - **Maximum Stop Loss:** The **MAXIMUM acceptable `stop_loss_percentage`** on any single trade is **15%** of the invested margin. Your typical SL should be in the **5% to 10%** range.
+    - **Risk/Reward Ratio:** The proposed `take_profit_percentage` MUST be at least **1.5 times greater** than the `stop_loss_percentage`.
+    - **Self-Correction:** If you see 2 or more consecutive losses in `recent_trades`, enter a "conservative mode": only enter trades with an extremely high conviction score (>90) and reduce the recommended position size by half.
+
+4.  **Profitability Mandate (NEW & IMPORTANT):**
+    - **Acknowledge Costs:** All trades incur approximately **1.2%** in round-trip fees (Taker) and potential slippage at 10x leverage.
+    - **Net Profit Target:** Your proposed `take_profit_percentage` MUST be high enough to generate a **net profit of at least 3%** after covering these costs.
+    - **This means your gross `take_profit_percentage` must be greater than 4.2% (3% net profit + 1.2% costs).**
 
 **RESPONSE JSON FORMAT:**
 - YOUR RESPONSE must be ONLY a valid JSON object, with no markdown.
-- The root of the JSON must be an object with a key named "trading_opportunities" which is a list of opportunity objects.
+- If an opportunity is found, the root of the JSON must be an object with a key named "trading_opportunities" which is a list of opportunity objects.
 - Each opportunity object MUST contain: "coin", "score", "direction", "recommended_position_size", "recommended_leverage", "stop_loss_percentage", "take_profit_percentage", "priority", "reasoning".
 - The value for "coin" MUST be one of ["BTC", "ETH", "SOL"].
-- If no opportunities are found, return an empty "trading_opportunities" list.
+- If no high-quality opportunities meeting ALL above criteria are found, return an empty "trading_opportunities" list.
 """
 
     try:
@@ -991,19 +998,36 @@ ANALYSIS PROCESS:
             {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
         ]
         
-        response = model.generate_content([
-            system_prompt,
-            f"Multi-Coin Market Analysis: {market_analysis_json}"
-        ], safety_settings=safety_settings)
+        response = model.generate_content(
+            [system_prompt, f"Multi-Coin Market Analysis: {market_analysis_json}"],
+            generation_config=genai.types.GenerationConfig(
+                # candidate_count=1, # Is already default
+                # stop_sequences=['x'],
+                # max_output_tokens=2048,
+                temperature=0.4 # Slightly lower temperature for more deterministic and rule-following behavior
+            ),
+            safety_settings=safety_settings
+        )
         
         response_content = response.text.strip().replace("```json", "").replace("```", "")
         trading_decision = json.loads(response_content)
         
         print("\n=== AI Analysis Result ===")
-        opportunities = trading_decision.get('trading_opportunities', [])
+        
+        # AI 응답 형식에 따른 유연한 처리 로직
+        if isinstance(trading_decision, dict):
+            opportunities = trading_decision.get('trading_opportunities', [])
+        elif isinstance(trading_decision, list):
+            opportunities = trading_decision
+        else:
+            opportunities = []
+
         for opp in opportunities:
             print(f"- {opp.get('coin','N/A')}: {opp.get('direction','N/A')} (Score: {opp.get('score',0)})")
         
+        # 'trading_decision'이 리스트인 경우 딕셔너리로 감싸서 반환 통일
+        if isinstance(trading_decision, list):
+            return {"trading_opportunities": trading_decision}
         return trading_decision
         
     except Exception as e:
@@ -1036,7 +1060,7 @@ def execute_single_trade(coin_name, opportunity, available_capital, all_coins_da
             if isinstance(value, str): value = value.strip().replace('%', '')
             try:
                 num_value = float(value)
-                return num_value / 100.0 if num_value > 1 else num_value
+                return num_value
             except (ValueError, TypeError):
                 return 0.0
 
@@ -1048,18 +1072,22 @@ def execute_single_trade(coin_name, opportunity, available_capital, all_coins_da
             except (ValueError, TypeError):
                 return 1
 
-        pos_size_pct = parse_percentage(opportunity.get('recommended_position_size', 0))
+        pos_size_pct = parse_percentage(opportunity.get('recommended_position_size', 0)) / 100.0
         leverage = parse_leverage(opportunity.get('recommended_leverage', 1))
         sl_pct = parse_percentage(opportunity.get('stop_loss_percentage', 0))
         tp_pct = parse_percentage(opportunity.get('take_profit_percentage', 0))
 
-        # 리스크 하드 리밋 필터 (매우 중요)
-        MAX_ACCEPTABLE_SL_PERCENTAGE = 15.0  # 최대 손절률을 15%로 강제 (원금 대비)
-        # AI가 제안한 sl_pct는 이미 100을 나눈 값이므로 (e.g., 10% -> 0.1), 비교 대상도 100으로 나눔
-        if sl_pct > (MAX_ACCEPTABLE_SL_PERCENTAGE / 100.0):
-            # 사용자가 보기 편하도록 다시 100을 곱해서 출력
-            print(f"\n❌ Trade Rejected (Excessive Risk): AI proposed SL of {sl_pct * 100:.2f}%, which exceeds the hard limit of {MAX_ACCEPTABLE_SL_PERCENTAGE}%.")
-            return None # 리스크가 너무 크므로 거래를 거부
+        # ===== [STRATEGY UPGRADE] ===== 리스크 및 수익성 하드 리밋 필터 추가
+        MAX_ACCEPTABLE_SL_PERCENTAGE = 15.0
+        MIN_ACCEPTABLE_TP_PERCENTAGE = 4.2 # Net 3% + Cost 1.2%
+        
+        if sl_pct > MAX_ACCEPTABLE_SL_PERCENTAGE:
+            print(f"\n❌ Trade Rejected (Excessive Risk): AI proposed SL of {sl_pct:.2f}%, which exceeds the hard limit of {MAX_ACCEPTABLE_SL_PERCENTAGE}%.")
+            return None
+            
+        if tp_pct < MIN_ACCEPTABLE_TP_PERCENTAGE:
+            print(f"\n❌ Trade Rejected (Insufficient Profit Target): AI proposed TP of {tp_pct:.2f}%, below the minimum required target of {MIN_ACCEPTABLE_TP_PERCENTAGE}%.")
+            return None
         
         min_lev, max_lev = coin_config['leverage_range']
         original_leverage = leverage
@@ -1067,8 +1095,8 @@ def execute_single_trade(coin_name, opportunity, available_capital, all_coins_da
         if original_leverage != leverage:
             print(f"   Leverage Adjusted: AI recommended {original_leverage}x, adjusted to {leverage}x (Range: {min_lev}x-{max_lev}x).")
         
-        sl_price_check = current_price * (1 - (sl_pct / leverage)) if action == "long" else current_price * (1 + (sl_pct / leverage))
-        tp_price_check = current_price * (1 + (tp_pct / leverage)) if action == "long" else current_price * (1 - (tp_pct / leverage))
+        sl_price_check = current_price * (1 - (sl_pct / 100.0 / leverage)) if action == "long" else current_price * (1 + (sl_pct / 100.0 / leverage))
+        tp_price_check = current_price * (1 + (tp_pct / 100.0 / leverage)) if action == "long" else current_price * (1 - (tp_pct / 100.0 / leverage))
 
         tp_change_pct = abs((tp_price_check / current_price) - 1) * 100
         sl_change_pct = abs((sl_price_check / current_price) - 1) * 100
@@ -1111,8 +1139,8 @@ def execute_single_trade(coin_name, opportunity, available_capital, all_coins_da
         
         time.sleep(2) 
         
-        sl_price = entry_price * (1 - (sl_pct / leverage)) if action == "long" else entry_price * (1 + (sl_pct / leverage))
-        tp_price = entry_price * (1 + (tp_pct / leverage)) if action == "long" else entry_price * (1 - (tp_pct / leverage))
+        sl_price = entry_price * (1 - (sl_pct / 100.0 / leverage)) if action == "long" else entry_price * (1 + (sl_pct / 100.0 / leverage))
+        tp_price = entry_price * (1 + (tp_pct / 100.0 / leverage)) if action == "long" else entry_price * (1 - (tp_pct / 100.0 / leverage))
         
         sl_placed = False
         tp_placed = False
@@ -1155,13 +1183,12 @@ def execute_single_trade(coin_name, opportunity, available_capital, all_coins_da
 
 # ===== 메인 프로그램 시작 =====
 def main():
-    print("\n=== Multi-Coin Day Trading Bot Started (v6.6 - SQL 오류 및 시간 추적 수정) ===")
+    print("\n=== Multi-Coin Day Trading Bot Started (v6.7 - 거래 비용 및 시장 상황 필터 강화) ===")
     print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("Strategy: AI 완전 자율 판단, 3분봉 메인")
-    print("Risk Management: 60분 타임컷, 3분봉 5% 급변동 손절, 상관관계 필터")
+    print("Strategy: AI 완전 자율 판단, 3분봉 메인, 거래 비용 및 횡보장 필터 적용")
+    print("Risk Management: 90분 타임컷, 3분봉 5% 급변동 손절, 상관관계 필터")
     print("Partial Scan: 10분마다 빈 코인슬롯 스캔")
     print("Position Tracking: 실제 포지션 기반 (수동 거래 포함)")
-    print("Fixes: SQL 구문 오류 해결, 봇 시작 시 포지션 추적 초기화")
     print("===============================================\n")
 
     setup_database()
@@ -1180,7 +1207,7 @@ def main():
 
             sync_database_with_positions()
             
-            # 1. 60분 타임아웃 체크 (최우선)
+            # 1. 90분 타임아웃 체크 (최우선)
             if check_trade_timeout() > 0:
                 time.sleep(10)
                 continue
