@@ -1095,18 +1095,19 @@ def detect_position_closure():
 
 # ===== 메인 프로그램 시작 =====
 def main():
-    print("\n=== Multi-Coin Day Trading Bot Started (v6.8 - 학습 피드백 포함) ===")
+    print("\n=== Multi-Coin Day Trading Bot Started (v6.8 - 포지션 최적화) ===")
     print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("Strategy: AI 완전 자율 판단, 3분봉 메인, 1.5:1 TP/SL 비율 고정")
     print("Learning: AI 판단 근거 로깅 및 성공/실패 패턴 학습")
     print("Risk Management: 3분봉 5% 급변동 손절, 상관관계 필터")
-    print("Position Rescan: 포지션 종료 시 즉시 재탐색")
+    print("Position Strategy: 3개 포지션 유지 최적화 - 빈 슬롯 있으면 10분마다 스캔")
     print("Unified Settings: 모든 코인 동일한 설정 (최소 20 USDT, 5-30x 레버리지)")
     print("===============================================\n")
 
     setup_database()
     
     last_rapid_check_time = datetime.now(timezone.utc)
+    last_partial_scan_time = datetime.now(timezone.utc) - timedelta(minutes=10)  # 초기 스캔을 위해 10분 전으로 설정
 
     while True:
         try:
@@ -1125,90 +1126,108 @@ def main():
                 last_rapid_check_time = datetime.now(timezone.utc)
             
             current_positions = check_current_positions()
+            total_coins = len(TRADING_PAIRS)  # 3개 코인
+            current_position_count = len(current_positions)
             
-            if not current_positions:
-                print("No open positions. Starting full scan...")
-                all_data = fetch_all_coins_data()
-                if not all_data:
-                    time.sleep(60)
-                    continue
+            print(f"현재 포지션: {current_position_count}/{total_coins}")
+            
+            # 2. 포지션 전략: 빈 슬롯이 있으면 적극적으로 채우기
+            if current_position_count < total_coins:
+                print(f"빈 포지션 슬롯 감지: {total_coins - current_position_count}개")
                 
-                hist_data = get_historical_trading_data_with_reasoning(5)
-                perf_metrics = get_performance_metrics()
-                decision = analyze_multi_coin_with_ai(all_data, hist_data, perf_metrics)
-                opportunities = decision.get('trading_opportunities', [])
+                # 10분마다 또는 포지션이 없는 경우 즉시 스캔
+                time_since_last_scan = (current_utc - last_partial_scan_time).total_seconds() / 60
+                should_scan = False
                 
-                if len(opportunities) >= 2:
-                    directions = {opp.get('direction') for opp in opportunities}
-                    if len(directions) == 1:
-                        print(f"\n⚠️ Correlation Risk Detected: All {len(opportunities)} opportunities have the same direction.")
-                        highest_score_opp = max(opportunities, key=lambda x: x.get('score', 0))
-                        print(f"   Filtering to the highest score: {highest_score_opp.get('coin')} (Score: {highest_score_opp.get('score', 0)})")
-                        opportunities = [highest_score_opp]
-                
-                if opportunities:
-                    balance = exchange.fetch_balance()['USDT']['free']
-                    available_capital_for_loop = balance * 0.98
-                    
-                    for opp in opportunities:
-                        used_margin = execute_single_trade(opp['coin'], opp, available_capital_for_loop, all_data)
-                        if used_margin is not None and used_margin > 0:
-                            available_capital_for_loop -= used_margin
-                        time.sleep(5)
+                if current_position_count == 0:
+                    print("포지션 없음 - 즉시 전체 스캔")
+                    should_scan = True
+                elif time_since_last_scan >= 10:
+                    print(f"10분 경과 ({time_since_last_scan:.1f}분) - 빈 슬롯 스캔")
+                    should_scan = True
                 else:
-                    print("AI found no high-probability setups.")
+                    remaining_time = 10 - time_since_last_scan
+                    print(f"다음 스캔까지 {remaining_time:.1f}분 남음")
                 
-                time.sleep(120)
-
-            else: # 포지션이 있는 경우
-                print(f"{len(current_positions)} active position(s). Monitoring...")
+                if should_scan:
+                    # 빈 코인 식별
+                    occupied_coins = {p['coin'] for p in current_positions}
+                    available_coins = set(TRADING_PAIRS.keys()) - occupied_coins
+                    
+                    print(f"점유된 코인: {occupied_coins if occupied_coins else '없음'}")
+                    print(f"스캔 대상 코인: {available_coins}")
+                    
+                    if available_coins:
+                        # 빈 코인들만 데이터 수집
+                        available_data = {}
+                        for coin in available_coins:
+                            try:
+                                config = TRADING_PAIRS[coin]
+                                print(f"Collecting {coin} data...")
+                                tech = fetch_multi_timeframe_data_for_coin(config["symbol"])
+                                senti = fetch_market_sentiment_for_coin(config["binance_symbol"])
+                                price = tech.get("3m", {}).get("current_indicators", {}).get("close", 0)
+                                if price > 0:
+                                    available_data[coin] = {"technical_data": tech, "sentiment_data": senti, "current_price": price}
+                                    print(f"{coin}: ${price:,.2f}")
+                            except Exception as e:
+                                print(f"Error collecting {coin} data: {e}")
+                        
+                        if available_data:
+                            hist_data = get_historical_trading_data_with_reasoning(5)
+                            perf_metrics = get_performance_metrics()
+                            decision = analyze_multi_coin_with_ai(available_data, hist_data, perf_metrics)
+                            opportunities = decision.get('trading_opportunities', [])
+                            
+                            # 상관관계 리스크 관리 (2개 이상 기회가 있고 모두 같은 방향인 경우)
+                            if len(opportunities) >= 2:
+                                directions = {opp.get('direction') for opp in opportunities}
+                                if len(directions) == 1:
+                                    print(f"\n상관관계 리스크 감지: {len(opportunities)}개 기회 모두 {list(directions)[0]} 방향")
+                                    highest_score_opp = max(opportunities, key=lambda x: x.get('score', 0))
+                                    print(f"최고점수 선택: {highest_score_opp.get('coin')} (점수: {highest_score_opp.get('score', 0)})")
+                                    opportunities = [highest_score_opp]
+                            
+                            if opportunities:
+                                balance = exchange.fetch_balance()['USDT']['free']
+                                available_capital = balance * 0.98
+                                
+                                print(f"가용 자본: ${available_capital:,.2f}")
+                                
+                                for opp in opportunities:
+                                    used_margin = execute_single_trade(opp['coin'], opp, available_capital, available_data)
+                                    if used_margin is not None and used_margin > 0:
+                                        available_capital -= used_margin
+                                        current_position_count += 1
+                                        print(f"포지션 추가됨: {current_position_count}/{total_coins}")
+                                    time.sleep(5)
+                            else:
+                                print("AI가 적합한 기회를 찾지 못함")
+                        
+                    last_partial_scan_time = current_utc
+                    time.sleep(60)  # 스캔 후 1분 대기
+                else:
+                    time.sleep(60)  # 스캔하지 않는 경우 1분 대기
+            
+            else:  # 모든 포지션이 차있는 경우 (3/3)
+                print("모든 포지션 활성 - 종료 대기 모드")
                 
-                # 포지션 종료 감지를 위한 이전 포지션 수 기록
-                prev_position_count = len(current_positions)
+                # 포지션 종료 감지
+                prev_position_count = current_position_count
                 time.sleep(60)  # 1분 대기
                 
-                # 포지션 종료 확인
+                # 포지션 재확인
                 new_positions = check_current_positions()
                 new_position_count = len(new_positions)
                 
                 if new_position_count < prev_position_count:
-                    print(f"\n=== Position Closure Detected: {prev_position_count} → {new_position_count} ===")
+                    closed_count = prev_position_count - new_position_count
+                    print(f"\n=== 포지션 종료 감지: {prev_position_count} → {new_position_count} ({closed_count}개 종료) ===")
                     
-                    # 빈 코인 슬롯이 있으면 재탐색
-                    if new_position_count < len(TRADING_PAIRS):
-                        print("--- Scanning for additional opportunities after position closure ---")
-                        available_coins = set(TRADING_PAIRS.keys()) - {p['coin'] for p in new_positions}
-                        
-                        if available_coins:
-                            available_data = {c: d for c, d in fetch_all_coins_data().items() if c in available_coins}
-                            if available_data:
-                                hist_data = get_historical_trading_data_with_reasoning(5)
-                                perf_metrics = get_performance_metrics()
-                                decision = analyze_multi_coin_with_ai(available_data, hist_data, perf_metrics)
-                                opportunities = decision.get('trading_opportunities', [])
-                                
-                                num_scanned = len(available_data)
-                                if num_scanned > 1 and len(opportunities) == num_scanned:
-                                    directions = {opp.get('direction') for opp in opportunities}
-                                    if len(directions) == 1:
-                                        print(f"\n⚠️ Correlation Risk Detected: All {num_scanned} scanned coins have the same direction.")
-                                        highest_score_opp = max(opportunities, key=lambda x: x.get('score', 0))
-                                        print(f"   Filtering to the highest score: {highest_score_opp.get('coin')} (Score: {highest_score_opp.get('score', 0)})")
-                                        opportunities = [highest_score_opp]
-
-                                if opportunities:
-                                    balance = exchange.fetch_balance()['USDT']['free']
-                                    available_capital_for_loop = balance * 0.98
-                                    
-                                    for opp in opportunities:
-                                        used_margin = execute_single_trade(opp['coin'], opp, available_capital_for_loop, available_data)
-                                        if used_margin is not None and used_margin > 0:
-                                            available_capital_for_loop -= used_margin
-                                        time.sleep(5)
-                                else:
-                                    print("AI found no additional setups.")
-                        else:
-                            print("All remaining coins have open positions.")
+                    # 즉시 다음 사이클에서 빈 슬롯 스캔하도록 설정
+                    last_partial_scan_time = current_utc - timedelta(minutes=10)
+                    
+                    print("다음 사이클에서 빈 슬롯 즉시 스캔 예정")
 
         except Exception as e:
             print(f"\nMain loop error: {e.__class__.__name__}: {e}")
