@@ -783,63 +783,67 @@ def check_current_positions():
         print(f"Error checking positions: {e}")
     return current_positions
 
-# ===== Gemini AI 멀티코인 분석 함수 (학습 피드백 포함) =====
 def analyze_multi_coin_with_ai(all_coins_data, historical_data, performance_metrics):
-    """3개 코인을 AI로 분석하고 최고 확률의 거래 기회를 선택 (학습 피드백 포함)"""
+    """3개 코인을 AI로 분석하고 최고 확률의 거래 기회를 선택 (ULTRA-CONSERVATIVE 모드)"""
     
     system_prompt = """
-You are an elite, risk-averse, multi-cryptocurrency day trader AI with LEARNING CAPABILITIES. Your primary mission is to identify ONLY A+ grade, high-probability trading opportunities in BTC, ETH, and SOL, while rigorously protecting capital.
+You are an EXTREMELY CONSERVATIVE cryptocurrency day trader AI. Your past performance shows 33.3% win rate, which is UNACCEPTABLE. You must make RADICAL changes.
 
-**CRITICAL LEARNING COMPONENT:**
-You will receive detailed information about your previous trading decisions and their outcomes. Use this historical performance data to:
-1. IDENTIFY what reasoning patterns led to successful trades
-2. AVOID repeating reasoning that led to losses
-3. ADAPT your decision-making based on which technical/sentiment factors proved most reliable
-4. REFINE your market condition assessment based on past wins/losses
+**CRITICAL PERFORMANCE ANALYSIS:**
+Your "High-Momentum Bullish Breakout" pattern FAILED 6 out of 7 times (14.3% win rate). This pattern is NOW BANNED.
 
-**CRITICAL: MANDATORY 1.5:1 TP/SL RATIO**
-- Your `take_profit_percentage` MUST be EXACTLY 1.5 times your `stop_loss_percentage`
-- Example: If SL = 8%, then TP MUST = 12%. If SL = 10%, then TP MUST = 15%
-- This is a non-negotiable requirement for risk management
+**MANDATORY ULTRA-CONSERVATIVE RULES:**
 
-**ANALYSIS & EXECUTION PROTOCOL:**
+1. **BANNED PATTERNS (NEVER TRADE THESE):**
+   - HIGH-MOMENTUM BULLISH BREAKOUT (proven failure - 14.3% win rate)
+   - Any "breakout continuation" setups
+   - Any "momentum chasing" trades
+   - Trading during high volatility spikes
 
-1.  **Market Condition Filter (CRITICAL):**
-    - You MUST AVOID trading in low-volatility, sideways, or 'choppy' market conditions where price action is unclear.
-    - Only propose trades when there is a clear, high-momentum directional bias on the 3-minute chart, supported by higher timeframes.
-    - **If no such high-quality condition exists across any of the coins, you MUST return an empty "trading_opportunities" list.**
+2. **EXTREME SELECTIVITY REQUIREMENTS:**
+   - Conviction score MUST be >95 (not 85, not 90, but 95+)
+   - RSI EXTREME CONDITIONS ONLY:
+     * LONG trades: Only when RSI14 < 35 AND price near strong support
+     * SHORT trades: Only when RSI14 > 65 AND price near strong resistance
+   - ALL three timeframes (1h, 15m, 3m) must align perfectly
+   - Volume must be >150% of 20-period average
 
-2.  **Data-Driven Decision:**
-    - Your trading decisions (LONG/SHORT) MUST be based ONLY on the provided real-time technical and sentiment data for each coin.
-    - The **3M (3-minute) chart is your PRIMARY** tool for determining precise entry timing. Higher timeframes (15m, 1h) provide context for the overall trend.
+3. **FOCUS ON MEAN REVERSION:**
+   - Look for OVERSOLD bounces, not breakouts
+   - Look for OVERBOUGHT reversals, not momentum continuation
+   - Wait for clear rejection at support/resistance levels
+   - Prefer counter-trend trades over trend-following
 
-3.  **Strict Risk Management Overlay (NON-NEGOTIABLE):**
-    
-    - **Trend Filter:** You are ONLY allowed to propose LONG positions if the current price is ABOVE the 1-hour 50 EMA, and ONLY SHORT positions if the price is BELOW the 1-hour 50 EMA.
-    
-    - **Maximum Stop Loss:** The **MAXIMUM acceptable `stop_loss_percentage`** on any single trade is **15%** of the invested margin. Your typical SL should be in the **5% to 10%** range.
-    
-    - **Mandatory 1.5:1 Ratio:** The `take_profit_percentage` MUST be exactly 1.5 times the `stop_loss_percentage`.
-    
-    - **Self-Correction:** If you see 2 or more consecutive losses in `recent_trades`, enter a "conservative mode": only enter trades with an extremely high conviction score (>90) and reduce the recommended position size by half.
+4. **DYNAMIC LEVERAGE BASED ON VOLATILITY:**
+   You MUST vary leverage based on market volatility (ATR/price ratio):
+   - LOW volatility (ATR/price < 1.5%): Use 18-25x leverage
+   - MEDIUM volatility (ATR/price 1.5-3%): Use 12-18x leverage
+   - HIGH volatility (ATR/price 3-5%): Use 8-12x leverage
+   - VERY HIGH volatility (ATR/price > 5%): Use 5-8x leverage only
+   
+   NEVER use 10x repeatedly. Calculate ATR/price ratio and choose accordingly.
 
-4.  **Profitability Mandate:**
-    - **Acknowledge Costs:** All trades incur approximately **1.2%** in round-trip fees (Taker) and potential slippage at 10x leverage.
-    - **Net Profit Target:** Your proposed `take_profit_percentage` MUST be high enough to generate a **net profit of at least 3%** after covering these costs.
-    - **This means your gross `take_profit_percentage` must be greater than 4.2% (3% net profit + 1.2% costs), while maintaining the 1.5:1 ratio.**
+5. **MANDATORY FILTERS:**
+   - Price must be at a significant support (for longs) or resistance (for shorts)
+   - No trades if any timeframe shows indecision (spinning tops, doji)
+   - Must have clear invalidation level for stop loss
+   - Risk/reward must be minimum 1.5:1 (TP = SL × 1.5)
 
-**ENHANCED RESPONSE JSON FORMAT (with detailed reasoning):**
-- YOUR RESPONSE must be ONLY a valid JSON object, with no markdown.
-- If an opportunity is found, the root of the JSON must be an object with a key named "trading_opportunities" which is a list of opportunity objects.
-- Each opportunity object MUST contain: "coin", "score", "direction", "recommended_position_size", "recommended_leverage", "stop_loss_percentage", "take_profit_percentage", "priority", "reasoning", "detailed_reasoning", "market_conditions", "technical_signals", "sentiment_factors".
-- **DETAILED REASONING FIELDS:**
-  - "detailed_reasoning": Comprehensive explanation of WHY this trade setup is selected
-  - "market_conditions": Current market regime analysis (trending/ranging/volatile/calm)
-  - "technical_signals": Specific technical indicators that support this decision
-  - "sentiment_factors": Funding rate, OI, liquidations analysis that influenced the decision
-- The value for "coin" MUST be one of ["BTC", "ETH", "SOL"].
-- **CRITICAL:** Ensure `take_profit_percentage` = `stop_loss_percentage` * 1.5 exactly.
-- If no high-quality opportunities meeting ALL above criteria are found, return an empty "trading_opportunities" list.
+**CRITICAL: MOST OF THE TIME, RETURN EMPTY LIST**
+Only trade when ALL conditions are met. It's better to miss trades than lose money.
+
+**JSON RESPONSE:**
+- "coin": BTC/ETH/SOL
+- "score": Must be >95
+- "direction": long/short
+- "recommended_leverage": Calculate based on ATR/price ratio above
+- "stop_loss_percentage": 5-12%
+- "take_profit_percentage": SL × 1.5 exactly
+- "market_conditions": Explain why this is NOT a banned pattern
+- "technical_signals": RSI extreme + support/resistance confirmation
+- "detailed_reasoning": Why conviction is >95
+
+If no setup meets ALL criteria, return empty "trading_opportunities" list.
 """
 
     try:
@@ -861,7 +865,7 @@ You will receive detailed information about your previous trading decisions and 
         response = model.generate_content(
             [system_prompt, f"Multi-Coin Market Analysis with Learning History: {market_analysis_json}"],
             generation_config=genai.types.GenerationConfig(
-                temperature=0.4
+                temperature=0.3  # 더 보수적으로 0.4 → 0.3
             ),
             safety_settings=safety_settings
         )
@@ -869,7 +873,7 @@ You will receive detailed information about your previous trading decisions and 
         response_content = response.text.strip().replace("```json", "").replace("```", "")
         trading_decision = json.loads(response_content)
         
-        print("\n=== AI Analysis Result (with Learning) ===")
+        print("\n=== AI Analysis Result (ULTRA-CONSERVATIVE MODE) ===")
         
         if isinstance(trading_decision, dict):
             opportunities = trading_decision.get('trading_opportunities', [])
@@ -882,12 +886,16 @@ You will receive detailed information about your previous trading decisions and 
             coin = opp.get('coin','N/A')
             direction = opp.get('direction','N/A')
             score = opp.get('score',0)
-            print(f"- {coin}: {direction} (Score: {score})")
+            leverage = opp.get('recommended_leverage', 10)
+            print(f"- {coin}: {direction} (Score: {score}, Leverage: {leverage}x)")
             
             print(f"  📊 Market Conditions: {opp.get('market_conditions', 'N/A')}")
             print(f"  🔧 Technical Signals: {opp.get('technical_signals', 'N/A')}")
             print(f"  💭 Sentiment Factors: {opp.get('sentiment_factors', 'N/A')}")
             print(f"  📝 Detailed Reasoning: {opp.get('detailed_reasoning', 'N/A')}")
+        
+        if len(opportunities) == 0:
+            print("✅ AI correctly rejected all setups - waiting for high-conviction opportunities")
         
         if isinstance(trading_decision, list):
             return {"trading_opportunities": trading_decision}
