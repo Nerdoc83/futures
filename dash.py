@@ -32,7 +32,7 @@ st.set_page_config(
 def load_data_from_db(db_path):
     """데이터베이스에서 데이터 로드 (안정성 강화)"""
     if not os.path.exists(db_path):
-        st.error(f"⚠️ 데이터베이스 파일을 찾을 수 없습니다: '{db_path}'. `m1.py`를 먼저 실행해주세요.")
+        st.error(f"⚠️ 데이터베이스 파일을 찾을 수 없습니다: '{db_path}'. `swing.py`를 먼저 실행해주세요.")
         return pd.DataFrame(), pd.DataFrame()
 
     try:
@@ -169,7 +169,7 @@ def main():
     trades_df, ai_analysis_df = load_data_from_db(DB_FILE)
     
     if trades_df.empty and ai_analysis_df.empty:
-        st.warning("📊 표시할 데이터가 없습니다. `m1.py` 봇이 거래를 시작할 때까지 기다려주세요.")
+        st.warning("📊 표시할 데이터가 없습니다. `swing.py` 봇이 거래를 시작할 때까지 기다려주세요.")
         return
 
     # 사이드바
@@ -297,7 +297,7 @@ def main():
         st.text_area("최근 200줄 로그", value=log_text, height=300, key="log_display")
     else:
         st.info(f"'{LOG_FILE}' 파일을 찾을 수 없습니다.")
-        st.code(f"# Linux/macOS\npython m1.py > {LOG_FILE} 2>&1\n\n# Windows (PowerShell)\npython m1.py | Tee-Object -FilePath {LOG_FILE}", language='bash')
+        st.code(f"# Linux/macOS\npython swing.py > {LOG_FILE} 2>&1\n\n# Windows (PowerShell)\npython swing.py | Tee-Object -FilePath {LOG_FILE}", language='bash')
         st.caption(f"위와 같이 봇을 실행하면 로그가 여기에 표시됩니다.")
 
     # 자동 새로고침 로직
@@ -307,3 +307,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
