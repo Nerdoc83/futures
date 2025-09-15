@@ -15,8 +15,8 @@ import os
 
 warnings.filterwarnings('ignore')
 
-# ===== 기본 설정 (v2.0 - 스윙 트레이딩 봇에 맞게 수정) =====
-DB_FILE = "multi_coin_daytrading.db" # << 수정: 새로운 DB 파일명으로 변경
+# ===== 기본 설정 (v2.1 - DB & Log Feature Update) =====
+DB_FILE = "multi_coin_daytrading.db" # << 수정: 사용자가 지정한 DB 파일명으로 변경
 LOG_FILE = "output.log" # 스윙 트레이딩 봇 실행 시 생성되는 로그 파일명
 
 # ===== 페이지 설정 =====
@@ -32,12 +32,12 @@ st.set_page_config(
 def load_data_from_db(db_path):
     """데이터베이스에서 데이터 로드 (안정성 강화)"""
     if not os.path.exists(db_path):
-        st.error(f"⚠️ 데이터베이스 파일을 찾을 수 없습니다: '{db_path}'. `swing.py`를 먼저 실행해주세요.")
+        st.error(f"⚠️ 데이터베이스 파일을 찾을 수 없습니다: '{db_path}'. 거래 봇을 먼저 실행해주세요.")
         return pd.DataFrame()
 
     try:
         conn = sqlite3.connect(db_path, timeout=10)
-        # << 수정: ai_analysis 테이블은 더 이상 사용하지 않음
+        # ai_analysis 테이블은 더 이상 사용하지 않음
         trades_df = pd.read_sql_query("SELECT * FROM trades ORDER BY timestamp DESC", conn)
         conn.close()
         
@@ -57,12 +57,13 @@ def load_data_from_db(db_path):
 # ===== 로그 파일 읽기 함수 =====
 @st.cache_data(ttl=10)
 def load_log_file(log_path):
+    """지정된 로그 파일을 읽어서 반환"""
     if not os.path.exists(log_path):
         return []
     try:
         with open(log_path, 'r', encoding='utf-8') as f:
             lines = f.readlines()
-        return lines[-200:]
+        return lines[-200:] # 최근 200줄만 표시하여 성능 유지
     except Exception as e:
         return [f"로그 파일 읽기 오류: {e}"]
 
@@ -126,7 +127,7 @@ def calculate_performance_metrics(trades_df):
 # ===== 메인 대시보드 UI =====
 def main():
     st.title("🚀 AI-Verified Swing Trading Dashboard")
-    st.markdown("현재 **스윙 트레이딩 봇 (`m3_swing_trader_complete.py`)**의 실시간 상태를 모니터링합니다.")
+    st.markdown("현재 거래 봇의 실시간 상태를 모니터링합니다.")
     
     col_refresh, col_time = st.columns([1, 4])
     if col_refresh.button("🔄 새로고침"):
@@ -138,7 +139,16 @@ def main():
     trades_df = load_data_from_db(DB_FILE)
     
     if trades_df.empty:
-        st.warning("📊 표시할 데이터가 없습니다. `m3_swing_trader_complete.py` 봇이 거래를 시작할 때까지 기다려주세요.")
+        st.warning(f"📊 표시할 데이터가 없습니다. 거래 봇이 실행되고 '{DB_FILE}'에 데이터가 기록될 때까지 기다려주세요.")
+        # 로그 기능은 DB와 상관없이 작동하도록 분리
+        st.subheader("📜 실시간 로그")
+        log_lines = load_log_file(LOG_FILE)
+        if log_lines:
+            log_text = "".join(reversed(log_lines))
+            st.text_area("최근 200줄 로그", value=log_text, height=300, key="log_display")
+        else:
+            st.warning(f"'{LOG_FILE}' 파일을 찾을 수 없습니다. 아래와 같이 봇을 실행하면 로그가 여기에 표시됩니다.")
+            st.code(f"# Linux/macOS (백그라운드 실행)\n`nohup python your_bot_name.py > {LOG_FILE} 2>&1 &`\n\n# Windows (PowerShell)\n`Start-Process python -ArgumentList 'your_bot_name.py' -RedirectStandardOutput {LOG_FILE} -RedirectStandardError {LOG_FILE} -NoNewWindow`", language='bash')
         return
 
     # 사이드바
@@ -215,7 +225,7 @@ def main():
             pnl_events = []
             for _, row in filtered_trades.iterrows():
                 if row['status'] == 'PARTIALLY_CLOSED' and row['tp1_achieved'] == 1:
-                     pnl_events.append({'timestamp': row['timestamp'], 'pnl': row['profit_loss']}) # 이 시점의 PNL
+                     pnl_events.append({'timestamp': row['timestamp'], 'pnl': row['profit_loss']})
                 elif row['status'] == 'CLOSED':
                      pnl_events.append({'timestamp': row['timestamp'], 'pnl': row['profit_loss']})
             
@@ -248,7 +258,7 @@ def main():
         st.text_area("최근 200줄 로그", value=log_text, height=300, key="log_display")
     else:
         st.warning(f"'{LOG_FILE}' 파일을 찾을 수 없습니다. 아래와 같이 봇을 실행하면 로그가 여기에 표시됩니다.")
-        st.code(f"# Linux/macOS\npython m3_swing_trader_complete.py > {LOG_FILE} 2>&1 &\n\n# Windows (PowerShell)\nStart-Process python -ArgumentList 'm3_swing_trader_complete.py' -RedirectStandardOutput {LOG_FILE} -RedirectStandardError {LOG_FILE} -NoNewWindow", language='bash')
+        st.code(f"# Linux/macOS (백그라운드 실행)\n`nohup python your_bot_name.py > {LOG_FILE} 2>&1 &`\n\n# Windows (PowerShell)\n`Start-Process python -ArgumentList 'your_bot_name.py' -RedirectStandardOutput {LOG_FILE} -RedirectStandardError {LOG_FILE} -NoNewWindow`", language='bash')
 
     # 자동 새로고침 로직
     if auto_refresh_log:
@@ -257,3 +267,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
