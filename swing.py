@@ -1,5 +1,5 @@
 """
-AI-Verified Multi-Coin Swing Trading Bot (v2.0 - Max Positions 5)
+AI-Verified Multi-Coin Swing Trading Bot (v2.1 - Dynamic Buffer)
 ----------------------------------------------------------------
 전략:
 - 멀티코인 스윙 트레이딩 (BTC, ETH, SOL, XRP, ADA, AVAX, LINK, DOGE)
@@ -12,8 +12,12 @@ AI-Verified Multi-Coin Swing Trading Bot (v2.0 - Max Positions 5)
 - 청산 전략:
     - 손절(SL): ATR 기반 동적 손절매 (1.5 * ATR), 거래소에 STOP_MARKET 주문
     - 익절(TP): 2단계 분할 익절 (BB중심선 50% 익절 -> 반대편 밴드 50% 익절), 봇이 실시간 감시
-- 포지션 관리: 최대 5개의 동시 포지션 유지. DB가 아닌 바이낸스에서 직접 포지션 정보를 가져와 동기화 (v2.0)
-- 스캔 주기: 5분 고정 주기로 모든 포지션 관리 및 신규 기회 탐색 (v1.5)
+- 포지션 관리: 최대 5개의 동시 포지션 유지. DB가 아닌 바이낸스에서 직접 포지션 정보를 가져와 동기화
+- 스캔 주기: 5분 고정 주기로 모든 포지션 관리 및 신규 기회 탐색
+
+=== v2.1 변경 사항 ===
+- 고정 퍼센트 버퍼(`BB_PROXIMITY_BUFFER`) 제거
+- 변동성에 따라 자동으로 진입 존을 조절하는 동적 버퍼(`DYNAMIC_BB_BUFFER_RATIO`) 도입
 ----------------------------------------------------------------
 """
 
@@ -57,7 +61,8 @@ STRATEGY_CONFIG = {
     "ATR_SL_MULTIPLIER": 1.5,
     "BB_WINDOW": 20,
     "BB_STD_DEV": 2,
-    "BB_PROXIMITY_BUFFER": 0.005, # 0.5% 버퍼
+    # v2.1 변경: 고정 버퍼 제거, 동적 버퍼 비율 추가. (백테스팅을 통해 최적화 필요)
+    "DYNAMIC_BB_BUFFER_RATIO": 0.25, # 예: 중심선과 하단밴드 사이 공간의 25%를 버퍼 존으로 설정
     "RSI_WINDOW": 14,
     "RSI_OVERSOLD": 30,
     "RSI_OVERBOUGHT": 70,
@@ -179,7 +184,7 @@ def update_trade_in_db(trade_id, updates):
     conn.commit()
     conn.close()
 
-# ===== v1.9 변경점: 바이낸스에서 직접 포지션 조회 =====
+# ===== 바이낸스에서 직접 포지션 조회 =====
 def get_open_positions_from_binance():
     """바이낸스 거래소에서 직접 실제 포지션 정보를 가져옵니다."""
     try:
@@ -218,9 +223,16 @@ def check_for_trading_signal(coin_name, df):
     if df is None or len(df) < 2: return None
     latest = df.iloc[-1]
     
-    buffer = STRATEGY_CONFIG['BB_PROXIMITY_BUFFER']
-    lower_band_zone = latest['lower_band'] * (1 + buffer)
-    upper_band_zone = latest['upper_band'] * (1 - buffer)
+    # v2.1 변경: 동적 버퍼 로직으로 수정
+    dynamic_buffer_ratio = STRATEGY_CONFIG['DYNAMIC_BB_BUFFER_RATIO']
+    
+    # 롱 포지션 진입 존 계산 (하단 밴드 ~ 하단 밴드와 중심선 사이의 25% 지점)
+    band_width_to_mid_lower = latest['middle_band'] - latest['lower_band']
+    lower_band_zone = latest['lower_band'] + (band_width_to_mid_lower * dynamic_buffer_ratio)
+    
+    # 숏 포지션 진입 존 계산 (상단 밴드 ~ 상단 밴드와 중심선 사이의 25% 지점)
+    band_width_to_mid_upper = latest['upper_band'] - latest['middle_band']
+    upper_band_zone = latest['upper_band'] - (band_width_to_mid_upper * dynamic_buffer_ratio)
 
     is_long_signal = latest['close'] <= lower_band_zone and latest['rsi'] < STRATEGY_CONFIG['RSI_OVERSOLD']
     is_short_signal = latest['close'] >= upper_band_zone and latest['rsi'] > STRATEGY_CONFIG['RSI_OVERBOUGHT']
@@ -373,18 +385,16 @@ def manage_open_positions(open_positions):
 
 # ===== 메인 루프 =====
 def main():
-    print("\n=== AI-Verified Multi-Coin Swing Trading Bot (v2.0 Complete) Started ===")
+    print("\n=== AI-Verified Multi-Coin Swing Trading Bot (v2.1 Dynamic Buffer) Started ===")
     setup_database()
 
     while True:
         try:
             print(f"\n\n\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] --- 새로운 사이클 시작 ---")
             
-            # v1.9 변경점: 바이낸스에서 직접 포지션 조회
             open_positions = get_open_positions_from_binance()
             manage_open_positions(open_positions)
             
-            # 업데이트된 포지션 정보 다시 로드
             open_positions = get_open_positions_from_binance()
             occupied_coins = {p['coin_symbol'] for p in open_positions}
             balance = exchange.fetch_balance()['USDT']
@@ -410,17 +420,21 @@ def main():
                         price = latest['close']
                         upper_band = latest['upper_band']
                         lower_band = latest['lower_band']
+                        middle_band = latest['middle_band']
                         rsi = latest['rsi']
                         
-                        buffer = STRATEGY_CONFIG['BB_PROXIMITY_BUFFER']
-                        lower_band_zone = lower_band * (1 + buffer)
-                        upper_band_zone = upper_band * (1 - buffer)
+                        # v2.1 변경: 로깅을 위해 동적 버퍼 존을 여기서도 계산
+                        dynamic_buffer_ratio = STRATEGY_CONFIG['DYNAMIC_BB_BUFFER_RATIO']
+                        band_width_to_mid_lower = middle_band - lower_band
+                        lower_band_zone = lower_band + (band_width_to_mid_lower * dynamic_buffer_ratio)
+                        band_width_to_mid_upper = upper_band - middle_band
+                        upper_band_zone = upper_band - (band_width_to_mid_upper * dynamic_buffer_ratio)
 
                         bb_status_text = f"밴드 내 위치 ({lower_band:,.2f} ~ {upper_band:,.2f})"
                         if price <= lower_band_zone:
-                            bb_status_text = f"하단 근접 ({lower_band_zone:,.2f})"
+                            bb_status_text = f"하단 존 진입 ({lower_band_zone:,.2f} 이하)"
                         elif price >= upper_band_zone:
-                            bb_status_text = f"상단 근접 ({upper_band_zone:,.2f})"
+                            bb_status_text = f"상단 존 진입 ({upper_band_zone:,.2f} 이상)"
                             
                         print(f"   - 조건 미충족. 현재가: ${price:,.2f}, BB: {bb_status_text}, RSI: {rsi:.2f}")
                         continue
@@ -447,4 +461,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
