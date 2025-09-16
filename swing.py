@@ -1,21 +1,19 @@
 """
-AI-Verified Multi-Coin Swing Trading Bot (v1.5 - Fixed 5-Minute Scan Cycle)
+AI-Verified Multi-Coin Swing Trading Bot (v2.0 - Max Positions 5)
 ----------------------------------------------------------------
 전략:
-- 멀티코인 스윙 트레이딩 (BTC, ETH, SOL)
+- 멀티코인 스윙 트레이딩 (BTC, ETH, SOL, XRP, ADA, AVAX, LINK, DOGE)
 - 분석 타임프레임: 일봉 (1D)
 - 핵심 전략: 볼린저밴드 + RSI + MACD를 결합한 'Tiered' 평균 회귀 전략
-- AI 역할: 규칙 기반으로 포착된 신호를 최종 검증하는 '최고 분석가'
+- AI 역할: 규칙 기반으로 포착된 신호를 최종 검증하는 '최고 분석가' (Gemini 2.5 Pro)
 - 자금 관리:
     - Tier 2 (BB+RSI): 가용 자본의 20% 투자
     - Tier 1 (BB+RSI+MACD): 가용 자본의 30% 투자 (집중 투자)
 - 청산 전략:
     - 손절(SL): ATR 기반 동적 손절매 (1.5 * ATR), 거래소에 STOP_MARKET 주문
     - 익절(TP): 2단계 분할 익절 (BB중심선 50% 익절 -> 반대편 밴드 50% 익절), 봇이 실시간 감시
-- 포지션 관리: 3개 코인 슬롯을 항상 채우기 위해 지속적으로 빈 슬롯 탐색
+- 포지션 관리: 최대 5개의 동시 포지션 유지. DB가 아닌 바이낸스에서 직접 포지션 정보를 가져와 동기화 (v2.0)
 - 스캔 주기: 5분 고정 주기로 모든 포지션 관리 및 신규 기회 탐색 (v1.5)
-- 상세 로깅: 신호 미발생 시 주요 지표(BB, RSI) 값과 미충족 사유 출력 (v1.3)
-- 진입 조건 완화: 볼린저밴드 근접 시(0.5% 버퍼)를 진입 조건으로 인정 (v1.4)
 ----------------------------------------------------------------
 """
 
@@ -34,12 +32,20 @@ from datetime import datetime
 # .env 파일 로드
 load_dotenv()
 
-# ===== 멀티코인 설정 =====
+# ===== 멀티코인 설정 (v1.8 - 8개 코인으로 확장) =====
 TRADING_PAIRS = {
     "BTC": {"symbol": "BTC/USDT"},
     "ETH": {"symbol": "ETH/USDT"},
     "SOL": {"symbol": "SOL/USDT"},
+    "XRP": {"symbol": "XRP/USDT"},
+    "ADA": {"symbol": "ADA/USDT"},
+    "AVAX": {"symbol": "AVAX/USDT"},
+    "LINK": {"symbol": "LINK/USDT"},
+    "DOGE": {"symbol": "DOGE/USDT"},
 }
+
+# ===== 동시 포지션 제한 설정 (v2.0 - 5개로 확장) =====
+MAX_CONCURRENT_POSITIONS = 5
 
 # ===== 전략 설정 =====
 STRATEGY_CONFIG = {
@@ -51,7 +57,7 @@ STRATEGY_CONFIG = {
     "ATR_SL_MULTIPLIER": 1.5,
     "BB_WINDOW": 20,
     "BB_STD_DEV": 2,
-    "BB_PROXIMITY_BUFFER": 0.005, # 0.5% 버퍼 (v1.4)
+    "BB_PROXIMITY_BUFFER": 0.005, # 0.5% 버퍼
     "RSI_WINDOW": 14,
     "RSI_OVERSOLD": 30,
     "RSI_OVERBOUGHT": 70,
@@ -72,6 +78,7 @@ exchange = ccxt.binance({
     'options': {'defaultType': 'future', 'adjustForTimeDifference': True}
 })
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+# 최신 Gemini 2.5 Pro 모델 사용
 model = genai.GenerativeModel('gemini-2.5-pro')
 DB_FILE = "multi_coin_daytrading.db"
 
@@ -105,7 +112,7 @@ def calculate_atr(high, low, close, window=14):
     true_range = ranges.max(axis=1)
     return true_range.rolling(window=window).mean()
 
-# ===== 데이터베이스 함수 =====
+# ===== 데이터베이스 함수 (기록용) =====
 def setup_database():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -124,7 +131,8 @@ def setup_database():
         status TEXT DEFAULT 'OPEN',
         binance_order_id TEXT,
         tp1_achieved INTEGER DEFAULT 0,
-        profit_loss REAL DEFAULT 0
+        profit_loss REAL DEFAULT 0,
+        exit_timestamp TEXT
     )
     ''')
     conn.commit()
@@ -135,8 +143,8 @@ def save_trade_to_db(trade_data):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute('''
-    INSERT INTO trades (timestamp, coin_symbol, tier, action, entry_price, initial_amount, current_amount, leverage, sl_price, binance_order_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO trades (timestamp, coin_symbol, tier, action, entry_price, initial_amount, current_amount, leverage, sl_price, binance_order_id, status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN')
     ''', (
         datetime.now().isoformat(),
         trade_data['coin_symbol'],
@@ -152,6 +160,15 @@ def save_trade_to_db(trade_data):
     conn.commit()
     conn.close()
 
+def find_trade_in_db(coin_symbol, action):
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM trades WHERE coin_symbol = ? AND action = ? AND (status = 'OPEN' OR status = 'PARTIALLY_CLOSED') ORDER BY timestamp DESC LIMIT 1", (coin_symbol, action))
+    trade = cursor.fetchone()
+    conn.close()
+    return dict(trade) if trade else None
+
 def update_trade_in_db(trade_id, updates):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -162,14 +179,25 @@ def update_trade_in_db(trade_id, updates):
     conn.commit()
     conn.close()
 
-def get_open_trades():
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM trades WHERE status = 'OPEN' OR status = 'PARTIALLY_CLOSED'")
-    trades = [dict(row) for row in cursor.fetchall()]
-    conn.close()
-    return trades
+# ===== v1.9 변경점: 바이낸스에서 직접 포지션 조회 =====
+def get_open_positions_from_binance():
+    """바이낸스 거래소에서 직접 실제 포지션 정보를 가져옵니다."""
+    try:
+        positions = exchange.fetch_positions()
+        open_positions = []
+        for pos in positions:
+            if float(pos['info']['positionAmt']) != 0:
+                coin_symbol = pos['symbol'].replace('/USDT:USDT', '')
+                open_positions.append({
+                    "coin_symbol": coin_symbol,
+                    "action": 'long' if float(pos['info']['positionAmt']) > 0 else 'short',
+                    "entry_price": float(pos['entryPrice']),
+                    "amount": float(pos['contracts']),
+                })
+        return open_positions
+    except Exception as e:
+        print(f"바이낸스 포지션 조회 오류: {e}")
+        return []
 
 # ===== 데이터 수집 및 분석 함수 =====
 def fetch_and_analyze_coin_data(symbol):
@@ -190,7 +218,6 @@ def check_for_trading_signal(coin_name, df):
     if df is None or len(df) < 2: return None
     latest = df.iloc[-1]
     
-    # v1.4 변경점: 버퍼를 적용한 진입 영역 계산
     buffer = STRATEGY_CONFIG['BB_PROXIMITY_BUFFER']
     lower_band_zone = latest['lower_band'] * (1 + buffer)
     upper_band_zone = latest['upper_band'] * (1 - buffer)
@@ -250,11 +277,9 @@ def execute_trade(signal, available_capital):
         print(f"\n--- {signal['coin']} ({signal['tier']}) {signal['direction'].upper()} 거래 실행 ---")
         exchange.set_leverage(leverage, symbol)
         
-        # 시장가 주문
         order = exchange.create_market_order(symbol, order_side, amount)
-        entry_price = order['price']
+        entry_price = float(order['price'])
         
-        # SL 주문
         sl_order = exchange.create_order(symbol, 'STOP_MARKET', sl_side, amount, params={'stopPrice': sl_price, 'reduceOnly': True})
         
         trade_data = {
@@ -262,7 +287,7 @@ def execute_trade(signal, available_capital):
             'entry_price': entry_price, 'amount': amount, 'leverage': leverage,
             'sl_price': sl_price, 'sl_order_id': sl_order['id']
         }
-        save_trade_to_db(trade_data)
+        save_trade_to_db(trade_data) # 거래 기록
         
         print(f"✅ 포지션 진입 성공: {signal['coin']} @ ${entry_price:,.4f}")
         print(f"   - 투자금: ${investment:,.2f}, 수량: {amount:.4f}")
@@ -272,101 +297,107 @@ def execute_trade(signal, available_capital):
         print(f"❌ 거래 실행 오류: {e}")
         return None
 
-def manage_open_positions():
-    open_trades = get_open_trades()
-    if not open_trades: return
+def manage_open_positions(open_positions):
+    if not open_positions: return
 
     print("\n--- 오픈 포지션 관리 ---")
-    for trade in open_trades:
-        symbol = TRADING_PAIRS[trade['coin_symbol']]['symbol']
+    for pos in open_positions:
+        symbol = TRADING_PAIRS[pos['coin_symbol']]['symbol']
+        db_trade = find_trade_in_db(pos['coin_symbol'], pos['action'])
+        if not db_trade:
+            print(f"   - 경고: {pos['coin_symbol']} 포지션이 DB에 없습니다. (수동 거래 가능성)")
+            continue
+        
         try:
             ticker = exchange.fetch_ticker(symbol)
             current_price = ticker['last']
-            df = fetch_and_analyze_coin_data(symbol) # 최신 BB값 확인
+            df = fetch_and_analyze_coin_data(symbol)
             if df is None: continue
             latest_data = df.iloc[-1]
 
-            is_long = trade['action'] == 'long'
+            is_long = db_trade['action'] == 'long'
             
-            # TP1: BB 중심선 도달 (분할 익절)
-            if trade['tp1_achieved'] == 0:
+            if db_trade['tp1_achieved'] == 0:
                 tp1_price = latest_data['middle_band']
                 if (is_long and current_price >= tp1_price) or (not is_long and current_price <= tp1_price):
-                    print(f"🔥 TP1 도달: {trade['coin_symbol']} @ ${current_price:,.4f}")
+                    print(f"🔥 TP1 도달: {db_trade['coin_symbol']} @ ${current_price:,.4f}")
                     
-                    # 50% 물량 익절
-                    close_amount = trade['initial_amount'] / 2
+                    close_amount = db_trade['initial_amount'] / 2
                     close_side = 'sell' if is_long else 'buy'
                     exchange.create_market_order(symbol, close_side, close_amount, params={'reduceOnly': True})
                     
-                    # 기존 SL 주문 취소
-                    exchange.cancel_order(trade['binance_order_id'], symbol)
+                    open_orders = exchange.fetch_open_orders(symbol)
+                    for order in open_orders:
+                        if order['id'] == db_trade['binance_order_id']:
+                            exchange.cancel_order(db_trade['binance_order_id'], symbol)
+                            break
                     
-                    # SL을 본절(entry_price)로 재설정
-                    new_sl_order = exchange.create_order(symbol, 'STOP_MARKET', close_side, close_amount, params={'stopPrice': trade['entry_price'], 'reduceOnly': True})
+                    new_sl_order = exchange.create_order(symbol, 'STOP_MARKET', close_side, close_amount, params={'stopPrice': db_trade['entry_price'], 'reduceOnly': True})
                     
-                    # DB 업데이트
-                    pnl = (current_price - trade['entry_price']) * close_amount if is_long else (trade['entry_price'] - current_price) * close_amount
-                    update_trade_in_db(trade['id'], {
+                    pnl = (current_price - db_trade['entry_price']) * close_amount if is_long else (db_trade['entry_price'] - current_price) * close_amount
+                    update_trade_in_db(db_trade['id'], {
                         'status': 'PARTIALLY_CLOSED',
                         'current_amount': close_amount,
                         'binance_order_id': new_sl_order['id'],
                         'tp1_achieved': 1,
-                        'profit_loss': trade['profit_loss'] + pnl
+                        'profit_loss': db_trade['profit_loss'] + pnl,
+                        'exit_timestamp': datetime.now().isoformat()
                     })
-                    print(f"   - 50% 익절 완료, SL을 본절(${trade['entry_price']})로 이동.")
+                    print(f"   - 50% 익절 완료, SL을 본절(${db_trade['entry_price']})로 이동.")
 
-            # TP2: 반대편 BB 도달 (최종 익절)
-            else:
+            else: # TP1 달성 후
                 tp2_price = latest_data['upper_band'] if is_long else latest_data['lower_band']
                 if (is_long and current_price >= tp2_price) or (not is_long and current_price <= tp2_price):
-                    print(f"🚀 TP2 도달: {trade['coin_symbol']} @ ${current_price:,.4f}")
+                    print(f"🚀 TP2 도달: {db_trade['coin_symbol']} @ ${current_price:,.4f}")
                     
-                    # 남은 물량 전량 익절
                     close_side = 'sell' if is_long else 'buy'
-                    exchange.create_market_order(symbol, close_side, trade['current_amount'], params={'reduceOnly': True})
+                    exchange.create_market_order(symbol, close_side, db_trade['current_amount'], params={'reduceOnly': True})
                     
-                    # SL 주문 취소
-                    exchange.cancel_order(trade['binance_order_id'], symbol)
+                    open_orders = exchange.fetch_open_orders(symbol)
+                    for order in open_orders:
+                        if order['id'] == db_trade['binance_order_id']:
+                            exchange.cancel_order(db_trade['binance_order_id'], symbol)
+                            break
                     
-                    # DB 업데이트
-                    pnl = (current_price - trade['entry_price']) * trade['current_amount'] if is_long else (trade['entry_price'] - current_price) * trade['current_amount']
-                    update_trade_in_db(trade['id'], {
+                    pnl = (current_price - db_trade['entry_price']) * db_trade['current_amount'] if is_long else (db_trade['entry_price'] - current_price) * db_trade['current_amount']
+                    update_trade_in_db(db_trade['id'], {
                         'status': 'CLOSED',
                         'current_amount': 0,
-                        'profit_loss': trade['profit_loss'] + pnl
+                        'profit_loss': db_trade['profit_loss'] + pnl,
+                        'exit_timestamp': datetime.now().isoformat()
                     })
                     print(f"   - 최종 익절 완료. 거래 종료.")
 
         except Exception as e:
-            print(f"포지션 관리 오류 ({trade['coin_symbol']}): {e}")
+            print(f"포지션 관리 오류 ({db_trade['coin_symbol']}): {e}")
 
 # ===== 메인 루프 =====
 def main():
-    print("\n=== AI-Verified Multi-Coin Swing Trading Bot (v1.5 Complete) Started ===")
+    print("\n=== AI-Verified Multi-Coin Swing Trading Bot (v2.0 Complete) Started ===")
     setup_database()
 
     while True:
         try:
             print(f"\n\n\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] --- 새로운 사이클 시작 ---")
             
-            # 1. 오픈된 포지션 관리 (매 사이클마다 가격 체크)
-            manage_open_positions()
-
-            # 2. 현재 포지션 및 가용 자본 확인
-            open_trades = get_open_trades()
-            occupied_coins = {t['coin_symbol'] for t in open_trades}
+            # v1.9 변경점: 바이낸스에서 직접 포지션 조회
+            open_positions = get_open_positions_from_binance()
+            manage_open_positions(open_positions)
+            
+            # 업데이트된 포지션 정보 다시 로드
+            open_positions = get_open_positions_from_binance()
+            occupied_coins = {p['coin_symbol'] for p in open_positions}
             balance = exchange.fetch_balance()['USDT']
             available_capital = balance['free']
             
             print(f"\n--- 현재 상태 ---")
-            print(f"가용 자본: ${available_capital:,.2f} | 보유 포지션: {len(open_trades)}개 ({occupied_coins})")
+            print(f"가용 자본: ${available_capital:,.2f} | 보유 포지션: {len(open_positions)}/{MAX_CONCURRENT_POSITIONS}개 ({occupied_coins})")
 
-            # 3. 빈 슬롯에 대해 신호 탐색
-            if len(occupied_coins) < len(TRADING_PAIRS):
+            if len(occupied_coins) < MAX_CONCURRENT_POSITIONS:
                 print("\n--- 빈 슬롯 신호 탐색 ---")
                 for coin_name, config in TRADING_PAIRS.items():
                     if coin_name in occupied_coins: continue
+                    if len(get_open_positions_from_binance()) >= MAX_CONCURRENT_POSITIONS: break
 
                     print(f"-> {coin_name} 스캔 중...")
                     df = fetch_and_analyze_coin_data(config['symbol'])
@@ -402,13 +433,11 @@ def main():
                         used_capital = execute_trade(signal, available_capital)
                         if used_capital:
                             available_capital -= used_capital
-                            occupied_coins.add(signal['coin'])
                     else:
                         print("❌ AI 검증 실패. 거래를 진행하지 않습니다.")
                     time.sleep(5)
             
-            # 4. 고정 스캔 주기 설정 (v1.5 변경점)
-            wait_time = 300  # 5분
+            wait_time = 300
             print(f"\n--- 사이클 완료. {int(wait_time/60)}분 후 다시 시작합니다. ---")
             time.sleep(wait_time)
 
