@@ -1,5 +1,5 @@
 """
-AI-Verified Multi-Coin Swing Trading Bot (v2.1 - Dynamic Buffer)
+AI-Verified Multi-Coin Swing Trading Bot (v2.3 - AI Retry Logic)
 ----------------------------------------------------------------
 전략:
 - 멀티코인 스윙 트레이딩 (BTC, ETH, SOL, XRP, ADA, AVAX, LINK, DOGE)
@@ -15,9 +15,9 @@ AI-Verified Multi-Coin Swing Trading Bot (v2.1 - Dynamic Buffer)
 - 포지션 관리: 최대 5개의 동시 포지션 유지. DB가 아닌 바이낸스에서 직접 포지션 정보를 가져와 동기화
 - 스캔 주기: 5분 고정 주기로 모든 포지션 관리 및 신규 기회 탐색
 
-=== v2.1 변경 사항 ===
-- 고정 퍼센트 버퍼(`BB_PROXIMITY_BUFFER`) 제거
-- 변동성에 따라 자동으로 진입 존을 조절하는 동적 버퍼(`DYNAMIC_BB_BUFFER_RATIO`) 도입
+=== v2.3 변경 사항 ===
+- AI 응답 실패 시, 즉시 포기하지 않고 최대 3회까지 자동으로 재시도하는 로직 추가
+- 봇의 안정성을 높여 일시적인 네트워크/API 오류로 인한 기회 손실 방지
 ----------------------------------------------------------------
 """
 
@@ -36,7 +36,7 @@ from datetime import datetime
 # .env 파일 로드
 load_dotenv()
 
-# ===== 멀티코인 설정 (v1.8 - 8개 코인으로 확장) =====
+# ===== 멀티코인 설정 =====
 TRADING_PAIRS = {
     "BTC": {"symbol": "BTC/USDT"},
     "ETH": {"symbol": "ETH/USDT"},
@@ -48,7 +48,7 @@ TRADING_PAIRS = {
     "DOGE": {"symbol": "DOGE/USDT"},
 }
 
-# ===== 동시 포지션 제한 설정 (v2.0 - 5개로 확장) =====
+# ===== 동시 포지션 제한 설정 =====
 MAX_CONCURRENT_POSITIONS = 5
 
 # ===== 전략 설정 =====
@@ -56,13 +56,12 @@ STRATEGY_CONFIG = {
     "TIMEFRAME": '1d',
     "TIER2_POSITION_SIZE": 0.20,
     "TIER1_POSITION_SIZE": 0.30,
-    "LEVERAGE_TIER2": 5, # Tier 2 고정 레버리지
-    "LEVERAGE_TIER1": 8, # Tier 1 고정 레버리지
+    "LEVERAGE_TIER2": 5,
+    "LEVERAGE_TIER1": 8,
     "ATR_SL_MULTIPLIER": 1.5,
     "BB_WINDOW": 20,
     "BB_STD_DEV": 2,
-    # v2.1 변경: 고정 버퍼 제거, 동적 버퍼 비율 추가. (백테스팅을 통해 최적화 필요)
-    "DYNAMIC_BB_BUFFER_RATIO": 0.25, # 예: 중심선과 하단밴드 사이 공간의 25%를 버퍼 존으로 설정
+    "DYNAMIC_BB_BUFFER_RATIO": 0.25,
     "RSI_WINDOW": 14,
     "RSI_OVERSOLD": 30,
     "RSI_OVERBOUGHT": 70,
@@ -71,6 +70,7 @@ STRATEGY_CONFIG = {
     "MACD_SIGNAL": 9,
     "MACD_CHECK_WINDOW": 3,
     "AI_CONVICTION_THRESHOLD": 85,
+    "AI_RETRY_ATTEMPTS": 3, # v2.3 추가: AI 요청 재시도 횟수
 }
 
 # ===== API 및 DB 설정 =====
@@ -83,7 +83,6 @@ exchange = ccxt.binance({
     'options': {'defaultType': 'future', 'adjustForTimeDifference': True}
 })
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-# 최신 Gemini 2.5 Pro 모델 사용
 model = genai.GenerativeModel('gemini-2.5-pro')
 DB_FILE = "multi_coin_daytrading.db"
 
@@ -186,7 +185,6 @@ def update_trade_in_db(trade_id, updates):
 
 # ===== 바이낸스에서 직접 포지션 조회 =====
 def get_open_positions_from_binance():
-    """바이낸스 거래소에서 직접 실제 포지션 정보를 가져옵니다."""
     try:
         positions = exchange.fetch_positions()
         open_positions = []
@@ -223,14 +221,9 @@ def check_for_trading_signal(coin_name, df):
     if df is None or len(df) < 2: return None
     latest = df.iloc[-1]
     
-    # v2.1 변경: 동적 버퍼 로직으로 수정
     dynamic_buffer_ratio = STRATEGY_CONFIG['DYNAMIC_BB_BUFFER_RATIO']
-    
-    # 롱 포지션 진입 존 계산 (하단 밴드 ~ 하단 밴드와 중심선 사이의 25% 지점)
     band_width_to_mid_lower = latest['middle_band'] - latest['lower_band']
     lower_band_zone = latest['lower_band'] + (band_width_to_mid_lower * dynamic_buffer_ratio)
-    
-    # 숏 포지션 진입 존 계산 (상단 밴드 ~ 상단 밴드와 중심선 사이의 25% 지점)
     band_width_to_mid_upper = latest['upper_band'] - latest['middle_band']
     upper_band_zone = latest['upper_band'] - (band_width_to_mid_upper * dynamic_buffer_ratio)
 
@@ -252,21 +245,44 @@ def check_for_trading_signal(coin_name, df):
         signal['tier'] = "Tier 1"
     return signal
 
-# ===== AI 검증 함수 =====
+# ===== AI 검증 함수 (v2.3 수정: 재시도 로직 추가) =====
 def verify_signal_with_ai(signal):
     system_prompt = f"""당신은 암호화폐 스윙 트레이딩 전략을 검증하는 최고 리스크 분석가입니다. 당신의 역할은 '결정'이 아닌 '검증'입니다. "{signal['coin']}" 코인에 대해 "{signal['tier']}" 등급의 "{signal['direction']}" 신호가 포착되었습니다. 기술적 분석, 거시 경제, 시장 심리를 종합하여 이 거래의 신뢰도 점수(1-100), 핵심 근거, 잠재적 리스크를 분석하세요. 85점 이상이 권장됩니다. 반드시 아래의 JSON 형식으로만 응답해야 합니다: {{"conviction_score": <int>, "reasoning": "<요약>", "risk_analysis": "<분석>"}}"""
-    try:
-        response = model.generate_content(system_prompt)
-        ai_response = json.loads(response.text.strip())
-        print(f"\n=== AI Signal Verification: {signal['coin']} ===")
-        print(f"Tier: {signal['tier']}, Direction: {signal['direction']}")
-        print(f"AI Conviction Score: {ai_response.get('conviction_score')}")
-        print(f"Reasoning: {ai_response.get('reasoning')}")
-        print(f"Risk Analysis: {ai_response.get('risk_analysis')}")
-        return ai_response
-    except Exception as e:
-        print(f"AI 분석 오류: {e}")
-        return {"conviction_score": 0}
+    
+    attempts = STRATEGY_CONFIG['AI_RETRY_ATTEMPTS']
+    for attempt in range(attempts):
+        raw_response_text = ""
+        try:
+            print(f"   - AI 분석 요청 시도 ({attempt + 1}/{attempts})...")
+            response = model.generate_content(system_prompt)
+            raw_response_text = response.text.strip()
+
+            if not raw_response_text:
+                print(f"   - AI 분석 오류: 모델이 빈 응답을 반환했습니다. 재시도합니다.")
+                time.sleep(2) # 재시도 전 2초 대기
+                continue # 다음 재시도 실행
+
+            ai_response = json.loads(raw_response_text)
+            print(f"\n=== AI Signal Verification: {signal['coin']} ===")
+            print(f"Tier: {signal['tier']}, Direction: {signal['direction']}")
+            print(f"AI Conviction Score: {ai_response.get('conviction_score')}")
+            print(f"Reasoning: {ai_response.get('reasoning')}")
+            print(f"Risk Analysis: {ai_response.get('risk_analysis')}")
+            return ai_response # 성공 시 즉시 결과 반환
+
+        except json.JSONDecodeError as e:
+            print(f"   - AI 분석 오류 (JSON 파싱 실패): {e}")
+            print(f"   - AI가 반환한 원본 내용: '{raw_response_text}'")
+            time.sleep(2)
+            continue
+            
+        except Exception as e:
+            print(f"   - AI 분석 중 예기치 않은 오류 발생: {e}")
+            time.sleep(2)
+            continue
+
+    print(f"❌ AI 분석 최종 실패: {attempts}번의 시도 후에도 유효한 응답을 받지 못했습니다.")
+    return {"conviction_score": 0}
 
 # ===== 거래 실행 및 관리 함수 =====
 def execute_trade(signal, available_capital):
@@ -299,7 +315,7 @@ def execute_trade(signal, available_capital):
             'entry_price': entry_price, 'amount': amount, 'leverage': leverage,
             'sl_price': sl_price, 'sl_order_id': sl_order['id']
         }
-        save_trade_to_db(trade_data) # 거래 기록
+        save_trade_to_db(trade_data)
         
         print(f"✅ 포지션 진입 성공: {signal['coin']} @ ${entry_price:,.4f}")
         print(f"   - 투자금: ${investment:,.2f}, 수량: {amount:.4f}")
@@ -333,19 +349,15 @@ def manage_open_positions(open_positions):
                 tp1_price = latest_data['middle_band']
                 if (is_long and current_price >= tp1_price) or (not is_long and current_price <= tp1_price):
                     print(f"🔥 TP1 도달: {db_trade['coin_symbol']} @ ${current_price:,.4f}")
-                    
                     close_amount = db_trade['initial_amount'] / 2
                     close_side = 'sell' if is_long else 'buy'
                     exchange.create_market_order(symbol, close_side, close_amount, params={'reduceOnly': True})
-                    
                     open_orders = exchange.fetch_open_orders(symbol)
                     for order in open_orders:
                         if order['id'] == db_trade['binance_order_id']:
                             exchange.cancel_order(db_trade['binance_order_id'], symbol)
                             break
-                    
                     new_sl_order = exchange.create_order(symbol, 'STOP_MARKET', close_side, close_amount, params={'stopPrice': db_trade['entry_price'], 'reduceOnly': True})
-                    
                     pnl = (current_price - db_trade['entry_price']) * close_amount if is_long else (db_trade['entry_price'] - current_price) * close_amount
                     update_trade_in_db(db_trade['id'], {
                         'status': 'PARTIALLY_CLOSED',
@@ -361,16 +373,13 @@ def manage_open_positions(open_positions):
                 tp2_price = latest_data['upper_band'] if is_long else latest_data['lower_band']
                 if (is_long and current_price >= tp2_price) or (not is_long and current_price <= tp2_price):
                     print(f"🚀 TP2 도달: {db_trade['coin_symbol']} @ ${current_price:,.4f}")
-                    
                     close_side = 'sell' if is_long else 'buy'
                     exchange.create_market_order(symbol, close_side, db_trade['current_amount'], params={'reduceOnly': True})
-                    
                     open_orders = exchange.fetch_open_orders(symbol)
                     for order in open_orders:
                         if order['id'] == db_trade['binance_order_id']:
                             exchange.cancel_order(db_trade['binance_order_id'], symbol)
                             break
-                    
                     pnl = (current_price - db_trade['entry_price']) * db_trade['current_amount'] if is_long else (db_trade['entry_price'] - current_price) * db_trade['current_amount']
                     update_trade_in_db(db_trade['id'], {
                         'status': 'CLOSED',
@@ -385,7 +394,7 @@ def manage_open_positions(open_positions):
 
 # ===== 메인 루프 =====
 def main():
-    print("\n=== AI-Verified Multi-Coin Swing Trading Bot (v2.1 Dynamic Buffer) Started ===")
+    print("\n=== AI-Verified Multi-Coin Swing Trading Bot (v2.3 AI Retry Logic) Started ===")
     setup_database()
 
     while True:
@@ -423,7 +432,6 @@ def main():
                         middle_band = latest['middle_band']
                         rsi = latest['rsi']
                         
-                        # v2.1 변경: 로깅을 위해 동적 버퍼 존을 여기서도 계산
                         dynamic_buffer_ratio = STRATEGY_CONFIG['DYNAMIC_BB_BUFFER_RATIO']
                         band_width_to_mid_lower = middle_band - lower_band
                         lower_band_zone = lower_band + (band_width_to_mid_lower * dynamic_buffer_ratio)
