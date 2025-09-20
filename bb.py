@@ -1,5 +1,5 @@
 """
-Dual Bollinger Band Strategy Bot (v1.3 - 15min + RSI Filter)
+Dual Bollinger Band Strategy Bot (v1.4 - 15min + RSI Filter with Detailed Logging)
 ----------------------------------------------------------------
 전략:
 - 멀티코인 단기 트레이딩 (BTC, ETH 등 8개 코인)
@@ -61,7 +61,7 @@ MAX_CONCURRENT_POSITIONS = 5
 
 # ===== 전략 설정 =====
 STRATEGY_CONFIG = {
-    "TIMEFRAME": '15m',  # 분석 타임프레임 15분으로 변경 (오류 수정)
+    "TIMEFRAME": '15m',
     "POSITION_SIZE": 0.20,
     "LEVERAGE": 5,
     
@@ -91,7 +91,7 @@ exchange = ccxt.binance({
     'enableRateLimit': True,
     'options': {'defaultType': 'future', 'adjustForTimeDifference': True}
 })
-DB_FILE = "multi_coin_daytrading_v1_3.db" # DB 파일명 변경하여 이전 전략과 분리
+DB_FILE = "multi_coin_daytrading_v1_4.db" # DB 파일명 변경하여 이전 전략과 분리
 
 # ===== 기술 지표 계산 함수 =====
 def calculate_bollinger_bands(prices, window, std_dev):
@@ -173,18 +173,16 @@ def get_open_positions_from_binance():
         print(f"바이낸스 포지션 조회 오류: {e}")
         return []
 
-# ===== 데이터 수집 및 분석 함수 (RSI 계산 추가) =====
+# ===== 데이터 수집 및 분석 함수 (기존과 동일) =====
 def fetch_and_analyze_coin_data(symbol):
     try:
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe=STRATEGY_CONFIG['TIMEFRAME'], limit=100)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         
-        # 볼린저밴드 계산
         df['bb1_upper'], df['bb1_middle'], df['bb1_lower'] = calculate_bollinger_bands(df['close'], STRATEGY_CONFIG['BB1_WINDOW'], STRATEGY_CONFIG['BB1_STD_DEV'])
         df['bb2_upper'], df['bb2_middle'], df['bb2_lower'] = calculate_bollinger_bands(df['close'], STRATEGY_CONFIG['BB2_WINDOW'], STRATEGY_CONFIG['BB2_STD_DEV'])
         
-        # RSI 계산 추가
-        df.ta.rsi(length=STRATEGY_CONFIG['RSI_PERIOD'], append=True) # 컬럼명 'RSI_14'로 자동 추가
+        df.ta.rsi(length=STRATEGY_CONFIG['RSI_PERIOD'], append=True)
 
         df.dropna(inplace=True)
         return df
@@ -192,45 +190,63 @@ def fetch_and_analyze_coin_data(symbol):
         print(f"데이터 수집/분석 오류 ({symbol}): {e}")
         return None
 
-# ===== 신규 진입 신호 확인 함수 (RSI 필터 추가) =====
+# ===== [수정됨] 신규 진입 신호 확인 함수 (상세 사유 반환 기능 추가) =====
 def check_for_entry_signal(df):
-    if df is None or len(df) < 2: return None
+    if df is None or len(df) < 2:
+        return None, "데이터프레임이 비어있거나 분석에 필요한 데이터 길이가 부족합니다."
     
     cfg = STRATEGY_CONFIG
     setup = df.iloc[-2]
     confirm = df.iloc[-1]
     
-    rsi_col = f'RSI_{cfg["RSI_PERIOD"]}' # RSI 컬럼 이름 (e.g., 'RSI_14')
+    rsi_col = f'RSI_{cfg["RSI_PERIOD"]}'
 
-    # 롱 진입 조건: BB하단 터치 + RSI 과매도 + 양봉 확인
+    # 롱 진입 조건 검사
     is_bb_touch_low = (setup['close'] <= setup['bb1_lower'] * (1 + cfg['TOUCH_BUFFER']) and
                        setup['close'] <= setup['bb2_lower'] * (1 + cfg['TOUCH_BUFFER']))
-    is_rsi_oversold = setup[rsi_col] < cfg['RSI_OVERSOLD']
-    is_confirm_bullish = confirm['close'] > confirm['open']
-
-    if is_bb_touch_low and is_rsi_oversold and is_confirm_bullish:
+    
+    if is_bb_touch_low:
+        is_rsi_oversold = setup[rsi_col] < cfg['RSI_OVERSOLD']
+        if not is_rsi_oversold:
+            return None, f"BB 하단 터치, 그러나 RSI({setup[rsi_col]:.2f})가 과매도({cfg['RSI_OVERSOLD']}) 아님"
+        
+        is_confirm_bullish = confirm['close'] > confirm['open']
+        if not is_confirm_bullish:
+            return None, "BB 하단 터치 및 RSI 과매도, 그러나 다음 봉이 양봉 마감되지 않음"
+            
+        # 모든 롱 조건 충족
         stop_loss_price = setup['low'] * (1 - cfg['SL_BUFFER'])
-        return {
+        signal = {
             "direction": "long", 
             "price": confirm['close'], 
             "stop_loss": stop_loss_price,
         }
+        return signal, "롱 진입 조건 충족"
 
-    # 숏 진입 조건: BB상단 터치 + RSI 과매수 + 음봉 확인
+    # 숏 진입 조건 검사
     is_bb_touch_high = (setup['close'] >= setup['bb1_upper'] * (1 - cfg['TOUCH_BUFFER']) and
                         setup['close'] >= setup['bb2_upper'] * (1 - cfg['TOUCH_BUFFER']))
-    is_rsi_overbought = setup[rsi_col] > cfg['RSI_OVERBOUGHT']
-    is_confirm_bearish = confirm['close'] < confirm['open']
+    
+    if is_bb_touch_high:
+        is_rsi_overbought = setup[rsi_col] > cfg['RSI_OVERBOUGHT']
+        if not is_rsi_overbought:
+            return None, f"BB 상단 터치, 그러나 RSI({setup[rsi_col]:.2f})가 과매수({cfg['RSI_OVERBOUGHT']}) 아님"
 
-    if is_bb_touch_high and is_rsi_overbought and is_confirm_bearish:
+        is_confirm_bearish = confirm['close'] < confirm['open']
+        if not is_confirm_bearish:
+            return None, "BB 상단 터치 및 RSI 과매수, 그러나 다음 봉이 음봉 마감되지 않음"
+
+        # 모든 숏 조건 충족
         stop_loss_price = setup['high'] * (1 + cfg['SL_BUFFER'])
-        return {
+        signal = {
             "direction": "short", 
             "price": confirm['close'], 
             "stop_loss": stop_loss_price,
         }
+        return signal, "숏 진입 조건 충족"
     
-    return None
+    # 위 조건들에 아무것도 해당되지 않을 경우
+    return None, "BB 밴드 상/하단을 터치하지 않음"
 
 # ===== 거래 실행 함수 (기존과 동일) =====
 def execute_trade(coin_name, signal, available_capital):
@@ -245,11 +261,9 @@ def execute_trade(coin_name, signal, available_capital):
         print(f"\n--- {coin_name} {signal['direction'].upper()} 신규 포지션 진입 실행 ---")
         exchange.set_leverage(leverage, symbol)
         
-        # 1. 진입 주문 (시장가)
         order = exchange.create_market_order(symbol, order_side, amount)
         entry_price = float(order['price']) if order['price'] else signal['price']
         
-        # 2. 손절 주문 (Stop Market)
         sl_side = 'sell' if signal['direction'] == 'long' else 'buy'
         params = {'stopPrice': sl_price, 'reduceOnly': True}
         exchange.create_order(symbol, 'STOP_MARKET', sl_side, amount, None, params)
@@ -267,7 +281,6 @@ def execute_trade(coin_name, signal, available_capital):
     except Exception as e:
         print(f"❌ 거래 실행 오류: {e}")
         return None
-
 
 # ===== 오픈 포지션 관리 (청산) 함수 (기존과 동일) =====
 def manage_open_positions(open_positions):
@@ -288,14 +301,12 @@ def manage_open_positions(open_positions):
             exit_signal = False
             exit_reason = ""
             
-            # 롱 포지션 익절 조건
             if pos['action'] == 'long':
                 if (current_price >= latest['bb1_upper'] * (1 - buffer) or
                     current_price >= latest['bb2_upper'] * (1 - buffer)):
                     exit_signal = True
                     exit_reason = "Take Profit: Upper BB Touch"
 
-            # 숏 포지션 익절 조건
             elif pos['action'] == 'short':
                 if (current_price <= latest['bb1_lower'] * (1 + buffer) or 
                     current_price <= latest['bb2_lower'] * (1 + buffer)):
@@ -318,7 +329,7 @@ def manage_open_positions(open_positions):
 
 # ===== 메인 루프 =====
 def main():
-    print("\n=== Dual BB Strategy Bot (v1.3 - 15min + RSI) Started ===")
+    print("\n=== Dual BB Strategy Bot (v1.4 - 15min + RSI + Log) Started ===")
     setup_database()
 
     while True:
@@ -343,25 +354,26 @@ def main():
                     if len(get_open_positions_from_binance()) >= MAX_CONCURRENT_POSITIONS:
                         break
 
-                    # 로그 추가: 어떤 코인을 스캔하는지 명확히 표시
                     print(f"-> {coin_name} 스캔 중...")
                     df = fetch_and_analyze_coin_data(config['symbol'])
                     if df is None or df.empty: continue
-
-                    signal = check_for_entry_signal(df)
+                    
+                    # [수정됨] 반환값을 signal과 reason으로 함께 받음
+                    signal, reason = check_for_entry_signal(df)
+                    
                     if signal:
-                        print(f"🔥 진입 신호 포착! Coin: {coin_name}, Direction: {signal['direction']}")
+                        print(f"🔥 진입 신호 포착! Coin: {coin_name}, Direction: {signal['direction']} (이유: {reason})")
                         used_capital = execute_trade(coin_name, signal, available_capital)
                         if used_capital:
                             available_capital -= used_capital
                             occupied_coins.add(coin_name)
                     else:
-                        # 로그 추가: 진입 조건이 맞지 않았음을 명확히 표시
-                        print(f"   - 조건 미충족.")
+                        # [수정됨] 진입 조건이 맞지 않았을 때, 구체적인 이유를 출력
+                        print(f"   - {reason}")
             else:
                  print(f"\n--- 현재 상태: 포지션 슬롯({len(current_positions)}/{MAX_CONCURRENT_POSITIONS}) 가득 참 ---")
 
-            wait_time = 60 # 1분 대기
+            wait_time = 60
             print(f"\n--- 사이클 완료. {wait_time}초 후 다시 시작합니다. ---")
             time.sleep(wait_time)
 
@@ -371,4 +383,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
