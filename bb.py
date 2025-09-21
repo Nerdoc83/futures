@@ -1,8 +1,8 @@
 """
-Dual Bollinger Band Strategy Bot (v1.4 - 15min + RSI Filter with Detailed Logging)
+Dual Bollinger Band Strategy Bot (v1.5 - 11 Coins, 15min + RSI Filter with Detailed Logging)
 ----------------------------------------------------------------
 전략:
-- 멀티코인 단기 트레이딩 (BTC, ETH 등 8개 코인)
+- 멀티코인 단기 트레이딩 (BTC, ETH 등 11개 코인)
 - 분석 타임프레임: 15분봉 (15m)
 - 핵심 전략: 15분봉의 과매도/과매수 상태를 듀얼 볼린저밴드와 RSI로 확인 후, 반전 캔들에서 정밀 진입
 
@@ -44,7 +44,7 @@ import pandas_ta as ta
 # .env 파일 로드
 load_dotenv()
 
-# ===== 멀티코인 설정 =====
+# ===== 멀티코인 설정 (WIF, NEAR, ARB 추가) =====
 TRADING_PAIRS = {
     "BTC": {"symbol": "BTC/USDT"},
     "ETH": {"symbol": "ETH/USDT"},
@@ -54,6 +54,9 @@ TRADING_PAIRS = {
     "AVAX": {"symbol": "AVAX/USDT"},
     "LINK": {"symbol": "LINK/USDT"},
     "DOGE": {"symbol": "DOGE/USDT"},
+    "WIF": {"symbol": "WIF/USDT"},    # 신규 추가
+    "NEAR": {"symbol": "NEAR/USDT"},  # 신규 추가
+    "ARB": {"symbol": "ARB/USDT"},    # 신규 추가
 }
 
 # ===== 동시 포지션 제한 설정 =====
@@ -329,7 +332,7 @@ def manage_open_positions(open_positions):
 
 # ===== 메인 루프 =====
 def main():
-    print("\n=== Dual BB Strategy Bot (v1.4 - 15min + RSI + Log) Started ===")
+    print("\n=== Dual BB Strategy Bot (v1.5 - 11 Coins + RSI + Log) Started ===")
     setup_database()
 
     while True:
@@ -382,6 +385,4 @@ def main():
             time.sleep(60)
 
 if __name__ == "__main__":
-
     main()
-
