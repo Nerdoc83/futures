@@ -91,7 +91,7 @@ exchange = ccxt.binance({
     'enableRateLimit': True,
     'options': {'defaultType': 'future', 'adjustForTimeDifference': True}
 })
-DB_FILE = "multi_coin_daytrading_v1_4.db" # DB 파일명 변경하여 이전 전략과 분리
+DB_FILE = "multi_coin_daytrading.db" # DB 파일명 변경하여 이전 전략과 분리
 
 # ===== 기술 지표 계산 함수 =====
 def calculate_bollinger_bands(prices, window, std_dev):
@@ -382,4 +382,5 @@ def main():
             time.sleep(60)
 
 if __name__ == "__main__":
+
     main()
