@@ -373,7 +373,7 @@ def main():
             else:
                  print(f"\n--- 현재 상태: 포지션 슬롯({len(current_positions)}/{MAX_CONCURRENT_POSITIONS}) 가득 참 ---")
 
-            wait_time = 60
+            wait_time = 300
             print(f"\n--- 사이클 완료. {wait_time}초 후 다시 시작합니다. ---")
             time.sleep(wait_time)
 
@@ -384,3 +384,4 @@ def main():
 if __name__ == "__main__":
 
     main()
+
