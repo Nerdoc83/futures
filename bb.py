@@ -292,11 +292,12 @@ def main():
             else:
                 print(f"\n--- 현재 상태: 포지션 슬롯({occupied_slots}/{MAX_CONCURRENT_POSITIONS}) 가득 참 ---")
 
-            print(f"\n--- 사이클 완료. 60초 후 다시 시작합니다. ---")
-            time.sleep(60)
+            print(f"\n--- 사이클 완료. 5분 후 다시 시작합니다. ---")
+            time.sleep(300)
         except Exception as e:
             print(f"메인 루프 심각한 오류: {e}"); time.sleep(60)
 
 if __name__ == "__main__":
     main()
+
 
