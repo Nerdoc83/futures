@@ -1,5 +1,5 @@
 """
-Dual Bollinger Band Strategy Bot (v4.2 - Stability Patch)
+Dual Bollinger Band Strategy Bot (v4.3 - Fixed Sizing)
 ----------------------------------------------------------------
 전략:
 - 멀티코인 단기 트레이딩 (BTC, ETH 등 11개 코인)
@@ -29,6 +29,7 @@ Dual Bollinger Band Strategy Bot (v4.2 - Stability Patch)
 - 관리:
     - 스캔 주기: 1분마다 모든 코인을 스캔하여 진입/청산 신호 확인
     - 포지션 관리: 최대 5개의 동시 포지션 유지 (확증 대기 포함)
+    - 포지션 크기: 첫 진입 시 '전체 자본의 20%'로 투자금을 고정하고, 모든 포지션이 청산될 때까지 동일한 금액으로 진입. <- [핵심 수정]
 ----------------------------------------------------------------
 """
 
@@ -60,7 +61,7 @@ MAX_CONCURRENT_POSITIONS = 5
 
 # ===== 전략 설정 =====
 STRATEGY_CONFIG = {
-    "POSITION_SIZE": 0.40, "LEVERAGE": 10,
+    "POSITION_SIZE": 0.20, "LEVERAGE": 10, # POSITION_SIZE는 이제 초기 투자 비율로 사용됨
     "BB1_WINDOW": 20, "BB1_STD_DEV": 2,
     "BB2_WINDOW": 4, "BB2_STD_DEV": 4,
     "RSI_PERIOD": 14, "RSI_OVERBOUGHT": 70, "RSI_OVERSOLD": 30,
@@ -74,12 +75,15 @@ exchange = ccxt.binance({
     'apiKey': api_key, 'secret': secret, 'enableRateLimit': True,
     'options': {'defaultType': 'future', 'adjustForTimeDifference': True}
 })
-DB_FILE = "multi_coin_confirm_v4.db"
+DB_FILE = "multi_coin_confirm_v4_fixedsize.db"
 
-# ===== [신규] 확증 대기 신호 저장소 =====
+# ===== 확증 대기 신호 저장소 =====
 pending_confirmation = {}
 
-# ===== 기술 지표 계산 함수 =====
+# ===== [신규] 고정 투자금 관리 변수 =====
+fixed_investment_per_trade = 0
+
+# ===== 기술 지표 계산 함수 (기존과 동일) =====
 def calculate_bollinger_bands(prices, window, std_dev):
     rolling_mean = prices.rolling(window=window).mean()
     rolling_std = prices.rolling(window=window).std()
@@ -119,13 +123,12 @@ def close_trade_in_db(coin_symbol, exit_price, pnl, reason):
     ''', (exit_price, pnl, reason, datetime.now().isoformat(), coin_symbol))
     conn.commit(); conn.close()
 
-# ===== [수정됨] 포지션 조회 함수 (안정성 강화) =====
+# ===== 포지션 조회 함수 (기존과 동일) =====
 def get_open_positions_from_binance():
     try:
         positions = exchange.fetch_positions()
         open_positions = []
         for pos in positions:
-            # positionAmt가 0이 아닌 실제 포지션만 필터링
             if float(pos['info'].get('positionAmt', 0)) != 0:
                 coin_symbol = pos['symbol'].replace('/USDT:USDT', '')
                 open_positions.append({
@@ -133,7 +136,6 @@ def get_open_positions_from_binance():
                     "action": 'long' if float(pos['info']['positionAmt']) > 0 else 'short',
                     "entry_price": float(pos.get('entryPrice', 0)),
                     "amount": float(pos.get('contracts', 0)),
-                    # [수정됨] .get()을 사용하여 'leverage' 키가 없어도 오류가 발생하지 않도록 함
                     "leverage": int(pos['info'].get('leverage', 0))
                 })
         return open_positions
@@ -160,30 +162,24 @@ def check_for_initial_signal(df_1h, current_price):
     cfg = STRATEGY_CONFIG
     current_1h_candle = df_1h.iloc[-1]
     rsi_col = f'RSI_{cfg["RSI_PERIOD"]}'
-
-    # 롱 초기 신호
     if current_price <= current_1h_candle['bb1_lower'] or current_price <= current_1h_candle['bb2_lower']:
         if current_1h_candle[rsi_col] < cfg['RSI_OVERSOLD']:
             signal = {"direction": "long", "stop_loss": current_1h_candle['low'] * (1 - cfg['SL_BUFFER'])}
             return signal, f"초기 롱 신호 감지 @ ${current_price:,.2f} (1h RSI: {current_1h_candle[rsi_col]:.2f})"
         else: return None, f"BB 하단 터치, 1h RSI({current_1h_candle[rsi_col]:.2f}) 과매도 아님"
-
-    # 숏 초기 신호
     if current_price >= current_1h_candle['bb1_upper'] or current_price >= current_1h_candle['bb2_upper']:
         if current_1h_candle[rsi_col] > cfg['RSI_OVERBOUGHT']:
             signal = {"direction": "short", "stop_loss": current_1h_candle['high'] * (1 + cfg['SL_BUFFER'])}
             return signal, f"초기 숏 신호 감지 @ ${current_price:,.2f} (1h RSI: {current_1h_candle[rsi_col]:.2f})"
         else: return None, f"BB 상단 터치, 1h RSI({current_1h_candle[rsi_col]:.2f}) 과매수 아님"
-
     return None, "초기 신호 없음"
 
-# ===== 거래 실행 함수 (기존과 동일) =====
-def execute_trade(coin_name, signal, available_capital):
+# ===== [수정됨] 거래 실행 함수 =====
+def execute_trade(coin_name, signal, investment_amount):
     symbol = TRADING_PAIRS[coin_name]['symbol']
     leverage = STRATEGY_CONFIG['LEVERAGE']
     current_price = exchange.fetch_ticker(symbol)['last']
-    investment = available_capital * STRATEGY_CONFIG['POSITION_SIZE']
-    amount = (investment * leverage) / current_price
+    amount = (investment_amount * leverage) / current_price
     order_side = 'buy' if signal['direction'] == 'long' else 'sell'
     sl_price = signal['stop_loss']
     try:
@@ -196,10 +192,12 @@ def execute_trade(coin_name, signal, available_capital):
         trade_data = {'coin_symbol': coin_name, 'action': signal['direction'], 'entry_price': entry_price,
                       'amount': amount, 'leverage': leverage}
         save_trade_to_db(trade_data)
-        print(f"✅ 포지션 진입 성공: {coin_name} @ ${entry_price:,.4f}, 수량: {amount:.4f}, SL: ${sl_price:,.4f}")
-        return investment
+        print(f"✅ 포지션 진입 성공: {coin_name} @ ${entry_price:,.4f}")
+        print(f"   - 투자금: ${investment_amount:,.2f}, 수량: {amount:.4f}")
+        print(f"   - 손절매(SL) 설정 완료: ${sl_price:,.4f}")
+        return True
     except Exception as e:
-        print(f"❌ 거래 실행 오류: {e}"); return None
+        print(f"❌ 거래 실행 오류: {e}"); return False
 
 # ===== 오픈 포지션 관리 함수 (기존과 동일) =====
 def manage_open_positions(open_positions):
@@ -229,9 +227,10 @@ def manage_open_positions(open_positions):
         except Exception as e:
             print(f"포지션 관리 오류 ({pos['coin_symbol']}): {e}")
 
-# ===== 메인 루프 =====
+# ===== [수정됨] 메인 루프 =====
 def main():
-    print("\n=== Dual BB Strategy Bot (v4.2 - Stability Patch) Started ===")
+    global fixed_investment_per_trade
+    print("\n=== Dual BB Strategy Bot (v4.3 - Fixed Sizing) Started ===")
     setup_database()
     while True:
         try:
@@ -242,7 +241,15 @@ def main():
             open_positions = get_open_positions_from_binance()
             manage_open_positions(open_positions)
             
-            # 2. 확증 대기 신호 처리
+            current_positions = get_open_positions_from_binance()
+            
+            # 2. 모든 포지션 종료 시 고정 투자금 초기화
+            if not current_positions and not pending_confirmation:
+                if fixed_investment_per_trade != 0:
+                    print("모든 포지션 종료. 다음 사이클에서 투자금을 재계산합니다.")
+                    fixed_investment_per_trade = 0
+            
+            # 3. 확증 대기 신호 처리
             confirmed_coins = []
             for coin, data in list(pending_confirmation.items()):
                 if now >= data['confirmation_timestamp']:
@@ -258,43 +265,53 @@ def main():
 
                     if is_confirmed:
                         print(f"   - 🔥 확증 성공! {coin} {data['direction']} 포지션 진입 시도.")
-                        balance = exchange.fetch_balance()['USDT']
-                        execute_trade(coin, data, balance['free'])
+                        execute_trade(coin, data, data['investment_amount'])
                     else:
                         print(f"   - ❌ 확증 실패. {coin} 신호 폐기.")
                     confirmed_coins.append(coin)
 
             for coin in confirmed_coins: del pending_confirmation[coin]
             
-            # 3. 신규 초기 신호 탐색
+            # 4. 신규 초기 신호 탐색
             current_positions = get_open_positions_from_binance()
             occupied_slots = len(current_positions) + len(pending_confirmation)
             
             if occupied_slots < MAX_CONCURRENT_POSITIONS:
-                print(f"\n--- 현재 상태: 보유 {len(current_positions)}개, 대기 {len(pending_confirmation)}개. ({occupied_slots}/{MAX_CONCURRENT_POSITIONS}) ---")
-                print("--- 신규 초기 신호 탐색 ---")
-                for coin, config in TRADING_PAIRS.items():
-                    if coin in [p['coin_symbol'] for p in current_positions] or coin in pending_confirmation: continue
-                    if len(get_open_positions_from_binance()) + len(pending_confirmation) >= MAX_CONCURRENT_POSITIONS: break
+                # 첫 진입 시 고정 투자금 계산
+                if fixed_investment_per_trade == 0 and occupied_slots == 0:
+                    balance = exchange.fetch_balance()['USDT']
+                    fixed_investment_per_trade = balance['total'] * STRATEGY_CONFIG['POSITION_SIZE']
+                    print(f"새로운 거래 사이클 시작. 포지션당 고정 투자금 설정: ${fixed_investment_per_trade:,.2f}")
 
-                    try:
-                        print(f"-> {coin} 스캔 중...")
-                        current_price = exchange.fetch_ticker(config['symbol'])['last']
-                        df_1h = fetch_and_analyze_data(config['symbol'], '1h', STRATEGY_CONFIG, calculate_bb=True, calculate_rsi=True)
-                        if df_1h is None: continue
-                        
-                        initial_signal, reason = check_for_initial_signal(df_1h, current_price)
-                        if initial_signal:
-                            print(f"   - 🚨 {reason}. 5분봉 확증 대기열에 추가.")
-                            minutes_to_next_5m = 5 - (now.minute % 5)
-                            confirm_time = now.replace(second=5, microsecond=0) + timedelta(minutes=minutes_to_next_5m)
-                            initial_signal['confirmation_timestamp'] = confirm_time
-                            pending_confirmation[coin] = initial_signal
-                            print(f"   - (확증 예정 시각: {confirm_time.strftime('%H:%M:%S')})")
-                        else:
-                            print(f"   - ({reason})")
-                    except Exception as e:
-                        print(f"스캔 오류 ({coin}): {e}")
+                # 투자금이 설정된 경우에만 신호 탐색
+                if fixed_investment_per_trade > 0:
+                    balance = exchange.fetch_balance()['USDT']
+                    if balance['free'] < fixed_investment_per_trade:
+                        print(f"\n--- 가용 자본 부족으로 신규 진입 탐색 중단 (필요: ${fixed_investment_per_trade:,.2f}, 보유: ${balance['free']:,.2f}) ---")
+                    else:
+                        print(f"\n--- 현재 상태: 보유 {len(current_positions)}개, 대기 {len(pending_confirmation)}개. ({occupied_slots}/{MAX_CONCURRENT_POSITIONS}) ---")
+                        print(f"--- 신규 초기 신호 탐색 (고정 투자금: ${fixed_investment_per_trade:,.2f}) ---")
+                        for coin, config in TRADING_PAIRS.items():
+                            if coin in [p['coin_symbol'] for p in current_positions] or coin in pending_confirmation: continue
+                            if len(get_open_positions_from_binance()) + len(pending_confirmation) >= MAX_CONCURRENT_POSITIONS: break
+                            try:
+                                print(f"-> {coin} 스캔 중...")
+                                current_price = exchange.fetch_ticker(config['symbol'])['last']
+                                df_1h = fetch_and_analyze_data(config['symbol'], '1h', STRATEGY_CONFIG, calculate_bb=True, calculate_rsi=True)
+                                if df_1h is None: continue
+                                initial_signal, reason = check_for_initial_signal(df_1h, current_price)
+                                if initial_signal:
+                                    print(f"   - 🚨 {reason}. 5분봉 확증 대기열에 추가.")
+                                    minutes_to_next_5m = 5 - (now.minute % 5)
+                                    confirm_time = now.replace(second=5, microsecond=0) + timedelta(minutes=minutes_to_next_5m)
+                                    initial_signal['confirmation_timestamp'] = confirm_time
+                                    initial_signal['investment_amount'] = fixed_investment_per_trade
+                                    pending_confirmation[coin] = initial_signal
+                                    print(f"   - (확증 예정 시각: {confirm_time.strftime('%H:%M:%S')})")
+                                else:
+                                    print(f"   - ({reason})")
+                            except Exception as e:
+                                print(f"스캔 오류 ({coin}): {e}")
             else:
                 print(f"\n--- 현재 상태: 포지션 슬롯({occupied_slots}/{MAX_CONCURRENT_POSITIONS}) 가득 참 ---")
 
