@@ -75,7 +75,7 @@ exchange = ccxt.binance({
     'apiKey': api_key, 'secret': secret, 'enableRateLimit': True,
     'options': {'defaultType': 'future', 'adjustForTimeDifference': True}
 })
-DB_FILE = "multi_coin_confirm_v4_fixedsize.db"
+DB_FILE = "multi_coin_daytrading.db"
 
 # ===== 확증 대기 신호 저장소 =====
 pending_confirmation = {}
@@ -322,4 +322,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
