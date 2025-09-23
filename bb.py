@@ -1,5 +1,5 @@
 """
-Dual Bollinger Band Strategy Bot (v4.0 - Confirmation Logic Engine)
+Dual Bollinger Band Strategy Bot (v4.2 - Stability Patch)
 ----------------------------------------------------------------
 전략:
 - 멀티코인 단기 트레이딩 (BTC, ETH 등 11개 코인)
@@ -74,7 +74,7 @@ exchange = ccxt.binance({
     'apiKey': api_key, 'secret': secret, 'enableRateLimit': True,
     'options': {'defaultType': 'future', 'adjustForTimeDifference': True}
 })
-DB_FILE = "multi_coin_daytrading.db"
+DB_FILE = "multi_coin_confirm_v4.db"
 
 # ===== [신규] 확증 대기 신호 저장소 =====
 pending_confirmation = {}
@@ -119,18 +119,23 @@ def close_trade_in_db(coin_symbol, exit_price, pnl, reason):
     ''', (exit_price, pnl, reason, datetime.now().isoformat(), coin_symbol))
     conn.commit(); conn.close()
 
-# ===== 포지션 조회 함수 (기존과 동일) =====
+# ===== [수정됨] 포지션 조회 함수 (안정성 강화) =====
 def get_open_positions_from_binance():
     try:
         positions = exchange.fetch_positions()
         open_positions = []
         for pos in positions:
-            if float(pos['info']['positionAmt']) != 0:
+            # positionAmt가 0이 아닌 실제 포지션만 필터링
+            if float(pos['info'].get('positionAmt', 0)) != 0:
                 coin_symbol = pos['symbol'].replace('/USDT:USDT', '')
-                open_positions.append({"coin_symbol": coin_symbol,
+                open_positions.append({
+                    "coin_symbol": coin_symbol,
                     "action": 'long' if float(pos['info']['positionAmt']) > 0 else 'short',
-                    "entry_price": float(pos['entryPrice']), "amount": float(pos['contracts']),
-                    "leverage": int(pos['info']['leverage'])})
+                    "entry_price": float(pos.get('entryPrice', 0)),
+                    "amount": float(pos.get('contracts', 0)),
+                    # [수정됨] .get()을 사용하여 'leverage' 키가 없어도 오류가 발생하지 않도록 함
+                    "leverage": int(pos['info'].get('leverage', 0))
+                })
         return open_positions
     except Exception as e:
         print(f"바이낸스 포지션 조회 오류: {e}"); return []
@@ -149,7 +154,7 @@ def fetch_and_analyze_data(symbol, timeframe, cfg, calculate_bb=False, calculate
     except Exception as e:
         print(f"데이터 수집/분석 오류 ({symbol}, {timeframe}): {e}"); return None
 
-# ===== [신규] 초기 신호 감지 함수 =====
+# ===== 초기 신호 감지 함수 (기존과 동일) =====
 def check_for_initial_signal(df_1h, current_price):
     if df_1h is None or len(df_1h) < 1: return None, "1시간봉 데이터 부족"
     cfg = STRATEGY_CONFIG
@@ -199,6 +204,7 @@ def execute_trade(coin_name, signal, available_capital):
 # ===== 오픈 포지션 관리 함수 (기존과 동일) =====
 def manage_open_positions(open_positions):
     if not open_positions: return
+    print("\n--- 오픈 포지션 익절 조건 확인 ---")
     for pos in open_positions:
         symbol = TRADING_PAIRS[pos['coin_symbol']]['symbol']
         try:
@@ -225,7 +231,7 @@ def manage_open_positions(open_positions):
 
 # ===== 메인 루프 =====
 def main():
-    print("\n=== Dual BB Strategy Bot (v4.0 - Confirmation Logic) Started ===")
+    print("\n=== Dual BB Strategy Bot (v4.2 - Stability Patch) Started ===")
     setup_database()
     while True:
         try:
@@ -236,7 +242,7 @@ def main():
             open_positions = get_open_positions_from_binance()
             manage_open_positions(open_positions)
             
-            # 2. [신규] 확증 대기 신호 처리
+            # 2. 확증 대기 신호 처리
             confirmed_coins = []
             for coin, data in list(pending_confirmation.items()):
                 if now >= data['confirmation_timestamp']:
@@ -292,12 +298,11 @@ def main():
             else:
                 print(f"\n--- 현재 상태: 포지션 슬롯({occupied_slots}/{MAX_CONCURRENT_POSITIONS}) 가득 참 ---")
 
-            print(f"\n--- 사이클 완료. 5분 후 다시 시작합니다. ---")
-            time.sleep(300)
+            print(f"\n--- 사이클 완료. 60초 후 다시 시작합니다. ---")
+            time.sleep(60)
         except Exception as e:
             print(f"메인 루프 심각한 오류: {e}"); time.sleep(60)
 
 if __name__ == "__main__":
     main()
-
 
