@@ -1,8 +1,8 @@
 """
-Dual Bollinger Band Strategy Bot (v4.3 - Fixed Sizing)
+Dual Bollinger Band Strategy Bot (v4.5 - Stricter Entry)
 ----------------------------------------------------------------
 전략:
-- 멀티코인 단기 트레이딩 (BTC, ETH 등 11개 코인)
+- 멀티코인 단기 트레이딩
 - 분석 타임프레임: 1시간봉 (Real-time Setup/Filter) + 5분봉 (Confirmation)
 - 핵심 전략: '실시간 가격'이 1시간봉 BB/RSI 조건을 만족하면 '초기 신호'로 감지.
              즉시 진입하지 않고, '다음 5분봉'이 완성되어 반전을 '확증'하면 최종 진입.
@@ -14,22 +14,20 @@ Dual Bollinger Band Strategy Bot (v4.3 - Fixed Sizing)
 
 - 진입 조건 (Entry):
     - 롱(Long):
-        1. (Detect) '실시간 가격'이 1시간봉 BB 하단 터치 & 1시간봉 RSI 30 미만
+        1. (Detect) '실시간 가격'이 1시간봉 BB1 '그리고' BB2 하단을 '모두' 터치 & 1시간봉 RSI 30 미만 <- [핵심 수정]
         2. (Wait) 다음 5분봉이 완성될 때까지 대기
         3. (Confirm) 대기 후 완성된 5분봉이 '양봉'일 경우 최종 진입
     - 숏(Short):
-        1. (Detect) '실시간 가격'이 1시간봉 BB 상단 터치 & 1시간봉 RSI 70 초과
+        1. (Detect) '실시간 가격'이 1시간봉 BB1 '그리고' BB2 상단을 '모두' 터치 & 1시간봉 RSI 70 초과 <- [핵심 수정]
         2. (Wait) 다음 5분봉이 완성될 때까지 대기
         3. (Confirm) 대기 후 완성된 5분봉이 '음봉'일 경우 최종 진입
 
 - 청산 조건 (Exit):
-    - 익절(Take Profit): '1시간봉' 기준 반대편 밴드 터치 (실시간 가격 기준)
+    - 익절(Take Profit): '1시간봉' 기준 BB1 '또는' BB2 반대편 밴드 터치 (실시간 가격 기준)
     - 손절(Stop Loss): '초기 신호 감지 시점'의 1시간봉 고점/저점 기준 자동 설정
 
 - 관리:
-    - 스캔 주기: 1분마다 모든 코인을 스캔하여 진입/청산 신호 확인
-    - 포지션 관리: 최대 5개의 동시 포지션 유지 (확증 대기 포함)
-    - 포지션 크기: 첫 진입 시 '전체 자본의 20%'로 투자금을 고정하고, 모든 포지션이 청산될 때까지 동일한 금액으로 진입. <- [핵심 수정]
+    - 포지션 크기: 첫 진입 시 '전체 자본의 20%'로 투자금을 고정하고, 모든 포지션이 청산될 때까지 동일한 금액으로 진입.
 ----------------------------------------------------------------
 """
 
@@ -61,7 +59,7 @@ MAX_CONCURRENT_POSITIONS = 5
 
 # ===== 전략 설정 =====
 STRATEGY_CONFIG = {
-    "POSITION_SIZE": 0.20, "LEVERAGE": 10, # POSITION_SIZE는 이제 초기 투자 비율로 사용됨
+    "POSITION_SIZE": 0.20, "LEVERAGE": 10,
     "BB1_WINDOW": 20, "BB1_STD_DEV": 2,
     "BB2_WINDOW": 4, "BB2_STD_DEV": 4,
     "RSI_PERIOD": 14, "RSI_OVERBOUGHT": 70, "RSI_OVERSOLD": 30,
@@ -75,12 +73,12 @@ exchange = ccxt.binance({
     'apiKey': api_key, 'secret': secret, 'enableRateLimit': True,
     'options': {'defaultType': 'future', 'adjustForTimeDifference': True}
 })
-DB_FILE = "multi_coin_daytrading.db"
+DB_FILE = "multi_coin_final_v4.5.db"
 
 # ===== 확증 대기 신호 저장소 =====
 pending_confirmation = {}
 
-# ===== [신규] 고정 투자금 관리 변수 =====
+# ===== 고정 투자금 관리 변수 =====
 fixed_investment_per_trade = 0
 
 # ===== 기술 지표 계산 함수 (기존과 동일) =====
@@ -156,25 +154,30 @@ def fetch_and_analyze_data(symbol, timeframe, cfg, calculate_bb=False, calculate
     except Exception as e:
         print(f"데이터 수집/분석 오류 ({symbol}, {timeframe}): {e}"); return None
 
-# ===== 초기 신호 감지 함수 (기존과 동일) =====
+# ===== [수정됨] 초기 신호 감지 함수 (AND 조건) =====
 def check_for_initial_signal(df_1h, current_price):
     if df_1h is None or len(df_1h) < 1: return None, "1시간봉 데이터 부족"
     cfg = STRATEGY_CONFIG
     current_1h_candle = df_1h.iloc[-1]
     rsi_col = f'RSI_{cfg["RSI_PERIOD"]}'
-    if current_price <= current_1h_candle['bb1_lower'] or current_price <= current_1h_candle['bb2_lower']:
+    
+    # [수정됨] 롱 초기 신호: AND 조건으로 변경
+    if current_price <= current_1h_candle['bb1_lower'] and current_price <= current_1h_candle['bb2_lower']:
         if current_1h_candle[rsi_col] < cfg['RSI_OVERSOLD']:
             signal = {"direction": "long", "stop_loss": current_1h_candle['low'] * (1 - cfg['SL_BUFFER'])}
             return signal, f"초기 롱 신호 감지 @ ${current_price:,.2f} (1h RSI: {current_1h_candle[rsi_col]:.2f})"
-        else: return None, f"BB 하단 터치, 1h RSI({current_1h_candle[rsi_col]:.2f}) 과매도 아님"
-    if current_price >= current_1h_candle['bb1_upper'] or current_price >= current_1h_candle['bb2_upper']:
+        else: return None, f"양쪽 BB 하단 터치, 1h RSI({current_1h_candle[rsi_col]:.2f}) 과매도 아님"
+
+    # [수정됨] 숏 초기 신호: AND 조건으로 변경
+    if current_price >= current_1h_candle['bb1_upper'] and current_price >= current_1h_candle['bb2_upper']:
         if current_1h_candle[rsi_col] > cfg['RSI_OVERBOUGHT']:
             signal = {"direction": "short", "stop_loss": current_1h_candle['high'] * (1 + cfg['SL_BUFFER'])}
             return signal, f"초기 숏 신호 감지 @ ${current_price:,.2f} (1h RSI: {current_1h_candle[rsi_col]:.2f})"
-        else: return None, f"BB 상단 터치, 1h RSI({current_1h_candle[rsi_col]:.2f}) 과매수 아님"
+        else: return None, f"양쪽 BB 상단 터치, 1h RSI({current_1h_candle[rsi_col]:.2f}) 과매수 아님"
+
     return None, "초기 신호 없음"
 
-# ===== [수정됨] 거래 실행 함수 =====
+# ===== 거래 실행 함수 (기존과 동일) =====
 def execute_trade(coin_name, signal, investment_amount):
     symbol = TRADING_PAIRS[coin_name]['symbol']
     leverage = STRATEGY_CONFIG['LEVERAGE']
@@ -227,29 +230,25 @@ def manage_open_positions(open_positions):
         except Exception as e:
             print(f"포지션 관리 오류 ({pos['coin_symbol']}): {e}")
 
-# ===== [수정됨] 메인 루프 =====
+# ===== 메인 루프 (기존과 동일) =====
 def main():
     global fixed_investment_per_trade
-    print("\n=== Dual BB Strategy Bot (v4.3 - Fixed Sizing) Started ===")
+    print("\n=== Dual BB Strategy Bot (v4.5 - Stricter Entry) Started ===")
     setup_database()
     while True:
         try:
             now = datetime.now()
             print(f"\n\n\n[{now.strftime('%Y-%m-d %H:%M:%S')}] --- 새로운 사이클 시작 ---")
             
-            # 1. 기존 포지션 관리
             open_positions = get_open_positions_from_binance()
             manage_open_positions(open_positions)
             
             current_positions = get_open_positions_from_binance()
-            
-            # 2. 모든 포지션 종료 시 고정 투자금 초기화
             if not current_positions and not pending_confirmation:
                 if fixed_investment_per_trade != 0:
                     print("모든 포지션 종료. 다음 사이클에서 투자금을 재계산합니다.")
                     fixed_investment_per_trade = 0
             
-            # 3. 확증 대기 신호 처리
             confirmed_coins = []
             for coin, data in list(pending_confirmation.items()):
                 if now >= data['confirmation_timestamp']:
@@ -272,18 +271,15 @@ def main():
 
             for coin in confirmed_coins: del pending_confirmation[coin]
             
-            # 4. 신규 초기 신호 탐색
             current_positions = get_open_positions_from_binance()
             occupied_slots = len(current_positions) + len(pending_confirmation)
             
             if occupied_slots < MAX_CONCURRENT_POSITIONS:
-                # 첫 진입 시 고정 투자금 계산
                 if fixed_investment_per_trade == 0 and occupied_slots == 0:
                     balance = exchange.fetch_balance()['USDT']
                     fixed_investment_per_trade = balance['total'] * STRATEGY_CONFIG['POSITION_SIZE']
                     print(f"새로운 거래 사이클 시작. 포지션당 고정 투자금 설정: ${fixed_investment_per_trade:,.2f}")
 
-                # 투자금이 설정된 경우에만 신호 탐색
                 if fixed_investment_per_trade > 0:
                     balance = exchange.fetch_balance()['USDT']
                     if balance['free'] < fixed_investment_per_trade:
@@ -322,5 +318,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
