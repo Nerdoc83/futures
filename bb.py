@@ -1,5 +1,5 @@
 """
-Dual Bollinger Band Strategy Bot (v5.30 - 15m Confirmation)
+Dual Bollinger Band Strategy Bot (v5.31 - Strategy Update)
 ----------------------------------------------------------------
 전략:
 - 거래대금 상위 코인 단기 트레이딩
@@ -14,7 +14,7 @@ Dual Bollinger Band Strategy Bot (v5.30 - 15m Confirmation)
 
 - 진입 조건 (Entry):
     - 일반 신호 (1x 투자):
-        1. (Detect) '실시간 가격'이 1시간봉 BB1 '또는' BB2 중 하나를 터치 & 1시간봉 RSI 조건 만족
+        1. (Detect) '실시간 가격'이 1시간봉 BB1을 터치 & 1시간봉 RSI 조건 만족
         2. (Confirm) 다음 15분봉이 완성되어 반전을 '확증'하면 기본 투자금으로 진입
     - 강력 신호 (2x 투자):
         1. (Detect) '실시간 가격'이 1시간봉 BB1 '그리고' BB2를 '모두' 터치 & 1시간봉 RSI 조건 만족
@@ -23,8 +23,8 @@ Dual Bollinger Band Strategy Bot (v5.30 - 15m Confirmation)
 - 청산 조건 (Exit):
     - 분할 익절(Partial Take Profit):
         1. (1차 익절) '1시간봉' 기준 BB1 중앙선(20MA)에 1% 근접 시, 보유 물량의 50% 익절
-        2. (최종 익절) '1시간봉' 기준 BB1/BB2 반대편 밴드에 1% 근접 시, 남은 물량 전체 익절
-    - 손절(Stop Loss): '증거금' 기준 -20% 손실로 고정 (10배 레버리지 시, 진입 가격 대비 -2% 변동 시)
+        2. (최종 익절) '1시간봉' 기준 BB1 반대편 밴드에 1% 근접 시, 남은 물량 전체 익절
+    - 손절(Stop Loss): '증거금' 기준 -10% 손실로 고정 (10배 레버리지 시, 진입 가격 대비 -1% 변동 시)
 
 - 관리:
     - 포지션 크기: 첫 진입 시 '전체 자본의 20%'로 기본 투자금을 고정.
@@ -76,7 +76,7 @@ fixed_investment_per_trade = 0
 partial_tp_status = {}
 
 # ===== 거래대금 상위 코인 조회 함수 =====
-def get_top_volume_coins(exchange, limit=10):
+def get_top_volume_coins(exchange, limit=15):
     try:
         tickers = exchange.fetch_tickers()
         usdt_futures = {s: t for s, t in tickers.items() if s.endswith('/USDT:USDT')}
@@ -190,7 +190,7 @@ def fetch_and_analyze_data(symbol, timeframe, cfg, calculate_bb=False, calculate
         print(f"      ㄴ 데이터 수집/분석 상세 오류 ({symbol}): {e}")
         return None
 
-# ===== 초기 신호 감지 함수 =====
+# ===== [수정됨] 초기 신호 감지 함수 =====
 def check_for_initial_signal(df_1h, current_price):
     if df_1h is None or len(df_1h) < 1: return None, "1시간봉 데이터 부족"
     cfg = STRATEGY_CONFIG
@@ -202,10 +202,10 @@ def check_for_initial_signal(df_1h, current_price):
 
     is_bb1_touch_low = current_price <= current_1h_candle['bb1_lower']
     is_bb2_touch_low = current_price <= current_1h_candle['bb2_lower']
-    is_bb_touch_low = is_bb1_touch_low or is_bb2_touch_low
     is_rsi_oversold = rsi_value < cfg['RSI_OVERSOLD']
 
-    if is_bb_touch_low and is_rsi_oversold:
+    # [수정됨] 일반 롱 신호는 BB1만 확인
+    if is_bb1_touch_low and is_rsi_oversold:
         size_multiplier = 2.0 if is_bb1_touch_low and is_bb2_touch_low else 1.0
         signal_type = "강력(2x)" if size_multiplier == 2.0 else "일반(1x)"
         signal = { "direction": "long", "size_multiplier": size_multiplier }
@@ -214,38 +214,34 @@ def check_for_initial_signal(df_1h, current_price):
 
     is_bb1_touch_high = current_price >= current_1h_candle['bb1_upper']
     is_bb2_touch_high = current_price >= current_1h_candle['bb2_upper']
-    is_bb_touch_high = is_bb1_touch_high or is_bb2_touch_high
     is_rsi_overbought = rsi_value > cfg['RSI_OVERBOUGHT']
-
-    if is_bb_touch_high and is_rsi_overbought:
+    
+    # [수정됨] 일반 숏 신호는 BB1만 확인
+    if is_bb1_touch_high and is_rsi_overbought:
         size_multiplier = 2.0 if is_bb1_touch_high and is_bb2_touch_high else 1.0
         signal_type = "강력(2x)" if size_multiplier == 2.0 else "일반(1x)"
         signal = { "direction": "short", "size_multiplier": size_multiplier }
         reason = f"초기 숏 신호({signal_type}) 감지 @ ${current_price:,.2f} (1h RSI: {rsi_value:.2f})"
         return signal, reason
 
-    bb_long_status = "O" if is_bb_touch_low else "X"
+    # 신호가 없을 때의 로그 메시지용 상태값
+    bb_long_status = "O" if is_bb1_touch_low else "X"
     rsi_long_status = "O" if is_rsi_oversold else "X"
-    bb_short_status = "O" if is_bb_touch_high else "X"
+    bb_short_status = "O" if is_bb1_touch_high else "X"
     rsi_short_status = "O" if is_rsi_overbought else "X"
 
-    reason = f"롱[BB:{bb_long_status},RSI:{rsi_long_status}] 숏[BB:{bb_short_status},RSI:{rsi_short_status}] (RSI:{rsi_value:.2f})"
+    reason = f"롱[BB1:{bb_long_status},RSI:{rsi_long_status}] 숏[BB1:{bb_short_status},RSI:{rsi_short_status}] (RSI:{rsi_value:.2f})"
     return None, reason
 
-# ===== [최종 수정] 거래 실행 함수 - 주문 수량 계산 로직 수정 =====
+# ===== [수정됨] 거래 실행 함수 - 손절 로직 수정 =====
 def execute_trade(coin_name, signal, base_investment, multiplier):
     global partial_tp_status
     symbol = f"{coin_name}/USDT"
     cfg = STRATEGY_CONFIG
     leverage = cfg['LEVERAGE']
-    final_investment = base_investment * multiplier # 최종 증거금 (예: 9.99 USDT)
-
+    final_investment = base_investment * multiplier
     current_price = exchange.fetch_ticker(symbol)['last']
-    
-    # [수정됨] 최종 포지션 크기에 해당하는 코인 수량을 계산하도록 변경
-    # (기존) amount = final_investment / current_price
     amount = (final_investment * leverage) / current_price
-
     order_side = 'buy' if signal['direction'] == 'long' else 'sell'
 
     try:
@@ -254,8 +250,9 @@ def execute_trade(coin_name, signal, base_investment, multiplier):
         order = exchange.create_market_order(symbol, order_side, amount)
         entry_price = float(order['price']) if order['price'] else current_price
 
-        # 증거금의 20% 손실 지점을 가격으로 계산 (레버리지 반영)
-        sl_price_change_percentage = 0.20 / leverage
+        # [수정됨] 증거금의 10% 손실 지점을 가격으로 계산 (레버리지 반영)
+        # 예: 10배 레버리지에서 증거금의 10% 손실 = 진입가 대비 1% 가격 변동
+        sl_price_change_percentage = 0.10 / leverage
 
         if signal['direction'] == 'long':
             sl_price = entry_price * (1 - sl_price_change_percentage)
@@ -269,24 +266,20 @@ def execute_trade(coin_name, signal, base_investment, multiplier):
         trade_data = {'coin_symbol': coin_name, 'action': signal['direction'], 'entry_price': entry_price,
                       'amount': amount, 'leverage': leverage}
         save_trade_to_db(trade_data)
-
         partial_tp_status[coin_name] = False
-
         log_msg_signal_type = f"(강력 신호: {multiplier}x)" if multiplier > 1 else "(일반 신호)"
-        
-        # 최종 포지션 크기를 정확히 표시하도록 print문 수정
         final_position_size = amount * entry_price
 
         print(f"✅ 포지션 진입 성공: {coin_name} @ ${entry_price:,.4f} {log_msg_signal_type}")
         print(f"   - 증거금(Margin): ${final_investment:,.2f}")
-        print(f"   - 포지션 크기(Size): 약 ${final_position_size:,.2f}") # 정확한 포지션 크기 표시
+        print(f"   - 포지션 크기(Size): 약 ${final_position_size:,.2f}")
         print(f"   - 수량: {amount:.4f} {coin_name.replace('USDT', '')}")
-        print(f"   - 손절매(SL) 설정 완료: ${sl_price:,.4f} (증거금 대비 -20%)")
+        print(f"   - 손절매(SL) 설정 완료: ${sl_price:,.4f} (증거금 대비 -10%)")
         return True
     except Exception as e:
         print(f"❌ 거래 실행 오류: {e}"); return False
 
-# ===== 오픈 포지션 관리 함수 =====
+# ===== [수정됨] 오픈 포지션 관리 함수 =====
 def manage_open_positions(open_positions):
     global partial_tp_status
     print("\n--- 오픈 포지션 익절 조건 확인 ---")
@@ -334,17 +327,17 @@ def manage_open_positions(open_positions):
             final_tp_triggered = False
             if pos['action'] == 'long':
                 tp_target_bb1 = latest['bb1_upper'] * (1 - tp_buffer)
-                tp_target_bb2 = latest['bb2_upper'] * (1 - tp_buffer)
-                if current_price >= tp_target_bb1 or current_price >= tp_target_bb2:
+                # [수정됨] 최종 익절은 BB1만 확인
+                if current_price >= tp_target_bb1:
                     final_tp_triggered = True
             elif pos['action'] == 'short':
-                tp_target_bb1 = latest['bb1_lower'] * (1 - tp_buffer)
-                tp_target_bb2 = latest['bb2_lower'] * (1 + tp_buffer)
-                if current_price <= tp_target_bb1 or current_price <= tp_target_bb2:
+                tp_target_bb1 = latest['bb1_lower'] * (1 + tp_buffer)
+                # [수정됨] 최종 익절은 BB1만 확인
+                if current_price <= tp_target_bb1:
                     final_tp_triggered = True
 
             if final_tp_triggered:
-                reason = f"최종 익절: 반대편 BB 근접 (버퍼: {tp_buffer*100}%)"
+                reason = f"최종 익절: 반대편 BB1 근접 (버퍼: {tp_buffer*100}%)"
                 print(f"🚨 {reason} 신호 포착: {pos['coin_symbol']} ({pos['action']})")
                 exchange.cancel_all_orders(symbol)
                 remaining_pos = next((p for p in get_open_positions_from_binance() if p['coin_symbol'] == pos['coin_symbol']), None)
@@ -360,10 +353,10 @@ def manage_open_positions(open_positions):
         except Exception as e:
             print(f"포지션 관리 오류 ({pos['coin_symbol']}): {e}")
 
-# ===== 메인 루프 - 잔고 확인 코드 추가 =====
+# ===== 메인 루프 =====
 def main():
     global fixed_investment_per_trade, partial_tp_status
-    print("\n=== Dual BB Strategy Bot (v5.30 - 15m Confirmation) Started ===")
+    print("\n=== Dual BB Strategy Bot (v5.31 - Strategy Update) Started ===")
     setup_database()
     while True:
         try:
