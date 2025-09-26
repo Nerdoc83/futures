@@ -1,5 +1,5 @@
 """
-Dual Bollinger Band Strategy Bot (v6.1 - DB Sync for Dashboard)
+Dual Bollinger Band Strategy Bot (v6.2 - Enhanced Logging)
 ----------------------------------------------------------------
 전략:
 - 거래대금 상위 코인 단기 트레이딩
@@ -126,16 +126,20 @@ def get_open_trade_from_db(coin_symbol):
     """코인 심볼로 DB에서 오픈된 거래 정보를 가져오는 함수"""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM trades WHERE coin_symbol = ? AND status = 'OPEN' ORDER BY timestamp DESC LIMIT 1", (coin_symbol,))
-    trade = cursor.fetchone()
-    conn.close()
-    if trade:
-        # 컬럼 이름과 값을 딕셔너리로 매핑
-        columns = [description[0] for description in cursor.description]
-        return dict(zip(columns, trade))
+    # Use a try-except block to handle cases where the table or columns might not exist yet
+    try:
+        cursor.execute("SELECT * FROM trades WHERE coin_symbol = ? AND status = 'OPEN' ORDER BY timestamp DESC LIMIT 1", (coin_symbol,))
+        trade = cursor.fetchone()
+        if trade:
+            columns = [description[0] for description in cursor.description]
+            return dict(zip(columns, trade))
+    except sqlite3.OperationalError as e:
+        print(f"DB Error in get_open_trade_from_db: {e}")
+        return None
+    finally:
+        conn.close()
     return None
 
-# ... (close_trade_in_db, save_ai_analysis_to_db 함수는 이전과 동일) ...
 def close_trade_in_db(coin_symbol, exit_price, pnl, reason):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -155,7 +159,6 @@ def save_ai_analysis_to_db(analysis_data):
           analysis_data['ai_decision'], analysis_data['reasoning'], analysis_data.get('related_trade_id')))
     conn.commit(); conn.close()
 
-# ... (fetch_and_analyze_data, get_ai_confirmation, get_top_volume_coins, get_open_positions_from_binance, check_for_initial_signal 함수는 이전과 동일) ...
 def fetch_and_analyze_data(symbol, timeframe, cfg, calculate_bb=False, calculate_rsi=False, calculate_macd=False, calculate_atr=False):
     try:
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=100)
@@ -191,7 +194,6 @@ def get_ai_confirmation(coin_symbol, direction, df_1h, df_15m):
         prompt = f"""당신은 변동성이 큰 암호화폐 선물 시장의 단기 트레이딩을 전문으로 하는 AI 분석가입니다. 당신의 임무는 기술적 분석 신호의 함정 가능성을 판단하여 자산을 보호하는 것입니다.\n\n[분석 요청]\n- 코인: {coin_symbol}\n- 포지션 방향: {direction}\n- 현재 가격: ${current_price:.4f}\n\n[상황]\n1시간봉 차트에서 볼린저밴드와 RSI를 기반으로 한 과매수/과매도 반전 신호가 감지되었습니다. 이후 15분봉 차트에서 기술적 반전 캔들이 확인되어 1차 진입 조건이 충족되었습니다. 이제 최종 진입 여부를 결정하기 위해 당신의 종합적인 분석이 필요합니다.\n\n[분석 데이터]\n- 최신 15분봉 MACD 지표:\n{macd_info}\n\n- 최근 1시간봉 데이터:\n{recent_1h_data}\n\n- 최근 15분봉 데이터:\n{recent_15m_data}\n\n[지시사항]\n위 데이터를 바탕으로 지금 {direction} 포지션에 진입하는 것이 타당한지 최종 판단을 내려주세요. 특히 최근 가격 움직임, 거래량 변화, 캔들 패턴, 그리고 **MACD 지표(시그널선 교차, 히스토그램의 추세)를 종합적으로 고려하여** 이것이 진짜 반전 신호인지, 아니면 단기적인 속임수(Fakeout)일 가능성이 높은지 분석해주세요.\n\n답변은 반드시 다음 형식 중 하나로 시작해야 합니다.\n"결론: [진입 동의]" 또는 "결론: [진입 보류]"\n\n그 뒤에 구체적인 분석 이유를 2~3줄로 요약하여 설명해주세요."""
         response = model.generate_content(prompt)
         analysis = response.text
-        print(f"   - 🤖 AI 분석 결과 ({coin_symbol}): {analysis.strip()}")
         analysis_data['reasoning'] = analysis
         if "결론: [진입 동의]" in analysis:
             analysis_data['ai_decision'] = '동의'
@@ -203,7 +205,6 @@ def get_ai_confirmation(coin_symbol, direction, df_1h, df_15m):
             return False, analysis
     except Exception as e:
         error_msg = f"AI 분석 중 오류 발생: {e}"
-        print(f"   - ❌ {error_msg}")
         analysis_data['reasoning'] = error_msg
         save_ai_analysis_to_db(analysis_data)
         return False, error_msg
@@ -214,7 +215,6 @@ def get_top_volume_coins(exchange, limit=15):
         usdt_futures = {s: t for s, t in tickers.items() if s.endswith('/USDT:USDT')}
         sorted_tickers = sorted(usdt_futures.values(), key=lambda x: x.get('quoteVolume', 0), reverse=True)
         top_coins = {ticker['symbol'].split('/')[0]: {"symbol": ticker['symbol'].split(':')[0]} for ticker in sorted_tickers[:limit]}
-        print(f"거래대금 상위 {limit}개 코인: {list(top_coins.keys())}")
         return top_coins
     except Exception as e: return {}
 
@@ -224,25 +224,38 @@ def get_open_positions_from_binance():
         return [{ "coin_symbol": pos['symbol'].split('/')[0], "action": 'long' if float(pos['info']['positionAmt']) > 0 else 'short', "entry_price": float(pos.get('entryPrice', 0)), "amount": float(pos.get('contracts', 0)), "leverage": int(pos['info'].get('leverage', 0)) } for pos in positions if float(pos['info'].get('positionAmt', 0)) != 0]
     except Exception as e: return []
 
+# ===== 초기 신호 감지 함수 (수정됨) =====
 def check_for_initial_signal(df_1h, current_price):
-    if df_1h is None or len(df_1h) < 1: return None, "1시간봉 데이터 부족"
+    if df_1h is None or len(df_1h) < 1: return None, "데이터 부족"
     cfg = STRATEGY_CONFIG; candle = df_1h.iloc[-1]; rsi_val = candle.get(f'RSI_{cfg["RSI_PERIOD"]}')
-    if rsi_val is None: return None, "RSI 데이터 없음"
+    if rsi_val is None: return None, "RSI 계산 불가"
+    
     bb1_low, bb1_high = candle.get('bb1_lower'), candle.get('bb1_upper')
     bb2_low, bb2_high = candle.get('bb2_lower'), candle.get('bb2_upper')
+
     is_bb1_touch_low = current_price <= bb1_low if bb1_low else False
     is_bb2_touch_low = current_price <= bb2_low if bb2_low else False
+    is_rsi_oversold = rsi_val < cfg['RSI_OVERSOLD']
+    
     is_bb1_touch_high = current_price >= bb1_high if bb1_high else False
     is_bb2_touch_high = current_price >= bb2_high if bb2_high else False
-    if is_bb1_touch_low and rsi_val < cfg['RSI_OVERSOLD']:
-        mult = 2.0 if is_bb2_touch_low else 1.0
-        return {"direction": "long", "size_multiplier": mult}, f"초기 롱 신호({'강력' if mult==2.0 else '일반'}) 감지"
-    if is_bb1_touch_high and rsi_val > cfg['RSI_OVERBOUGHT']:
-        mult = 2.0 if is_bb2_touch_high else 1.0
-        return {"direction": "short", "size_multiplier": mult}, f"초기 숏 신호({'강력' if mult==2.0 else '일반'}) 감지"
-    return None, "신호 없음"
+    is_rsi_overbought = rsi_val > cfg['RSI_OVERBOUGHT']
 
-# ===== 거래 실행 함수 (수정됨) =====
+    # 롱 신호 조건
+    if is_bb1_touch_low and is_rsi_oversold:
+        mult = 2.0 if is_bb2_touch_low else 1.0
+        return {"direction": "long", "size_multiplier": mult}, f"🚨 초기 롱 신호({'강력' if mult==2.0 else '일반'}) 감지"
+    
+    # 숏 신호 조건
+    if is_bb1_touch_high and is_rsi_overbought:
+        mult = 2.0 if is_bb2_touch_high else 1.0
+        return {"direction": "short", "size_multiplier": mult}, f"🚨 초기 숏 신호({'강력' if mult==2.0 else '일반'}) 감지"
+
+    # 신호 없음 상세 로그 반환
+    bb_status = 'O' if is_bb1_touch_low or is_bb1_touch_high else 'X'
+    rsi_status = 'O' if is_rsi_oversold or is_rsi_overbought else 'X'
+    return None, f"BB:{bb_status}, RSI:{rsi_status}"
+
 def execute_trade(coin_name, signal, base_investment, multiplier):
     global position_states
     symbol = f"{coin_name}/USDT"; cfg = STRATEGY_CONFIG; leverage = cfg['LEVERAGE']
@@ -284,11 +297,9 @@ def execute_trade(coin_name, signal, base_investment, multiplier):
     except Exception as e:
         print(f"❌ 거래 실행 오류: {e}"); return False
 
-# ===== 포지션 관리 함수 (수정됨) =====
 def manage_open_positions(open_positions):
     global position_states
     if not open_positions: return
-    print("\n--- 오픈 포지션 관리 ---")
     
     for pos in open_positions:
         coin = pos['coin_symbol']
@@ -348,10 +359,10 @@ def manage_open_positions(open_positions):
         except Exception as e:
             print(f"포지션 관리 오류 ({coin}): {e}")
 
-# ===== 메인 루프 =====
+# ===== 메인 루프 (수정됨) =====
 def main():
     global fixed_investment_per_trade, position_states
-    print("\n=== Dual BB Strategy Bot (v6.1 - DB Sync for Dashboard) Started ===")
+    print("\n=== Dual BB Strategy Bot (v6.2 - Enhanced Logging) Started ===")
     setup_database()
     while True:
         try:
@@ -371,39 +382,49 @@ def main():
             if not get_open_positions_from_binance() and not pending_confirmation:
                 if fixed_investment_per_trade != 0: fixed_investment_per_trade = 0
 
-            # --- 확증 프로세스 ---
             confirmed_coins = []
             if pending_confirmation:
-                print("\n--- 15분봉 및 AI 확증 확인 ---")
+                print("\n--- 확증 확인 ---")
             for coin, data in list(pending_confirmation.items()):
                 if now >= data['confirmation_timestamp']:
-                    print(f"-> {coin} ({data['direction']}) 확증 확인 중...")
+                    log_prefix = f"-> {coin} ({data['direction']})"
                     symbol = f"{coin}/USDT"
                     df_15m = fetch_and_analyze_data(symbol, '15m', STRATEGY_CONFIG, calculate_macd=True)
                     if df_15m is None or len(df_15m) < 2:
                         confirmed_coins.append(coin); continue
+
                     last_15m_candle = df_15m.iloc[-2]
                     is_candle_confirmed = (data['direction'] == 'long' and last_15m_candle['close'] > last_15m_candle['open']) or \
                                           (data['direction'] == 'short' and last_15m_candle['close'] < last_15m_candle['open'])
+                    
+                    log_prefix += f" | 15분봉: {'✅' if is_candle_confirmed else '❌'}"
+
                     if is_candle_confirmed:
-                        print(f"   - ✅ 1차 확증 성공. AI 최종 판단 요청 중...")
+                        log_prefix += " | AI: ⏳"
+                        print(log_prefix, end='\r') # AI 분석 중임을 표시
                         df_1h = fetch_and_analyze_data(symbol, '1h', STRATEGY_CONFIG, calculate_bb=True, calculate_rsi=True, calculate_macd=True)
                         if df_1h is not None:
                             is_ai_confirmed, reason = get_ai_confirmation(coin, data['direction'], df_1h, df_15m)
+                            reason_summary = reason.split('결론: [')[-1].split(']')[-1].strip().split('\n')[0]
+                            
                             if is_ai_confirmed:
-                                print(f"   - ✅ AI 최종 확증 성공. 거래를 실행합니다.")
+                                log_prefix = f"-> {coin} ({data['direction']}) | 15분봉: ✅ | AI: ✅ 동의 ({reason_summary})"
+                                print(log_prefix)
                                 execute_trade(coin, data, data['investment_amount'], data.get('size_multiplier', 1.0))
                             else:
-                                print(f"   - ❌ AI 최종 확증 실패 (진입 보류).")
+                                log_prefix = f"-> {coin} ({data['direction']}) | 15분봉: ✅ | AI: ❌ 보류 ({reason_summary})"
+                                print(log_prefix)
                         else:
-                            print(f"   - ❌ AI 분석용 데이터 로드 실패.")
+                            log_prefix += " | AI: ❌ (데이터 로드 실패)"
+                            print(log_prefix)
                     else:
-                        print(f"   - ❌ 1차 확증 실패 (15분봉 캔들).")
+                        print(log_prefix) # 15분봉 실패 로그 출력
+                    
                     confirmed_coins.append(coin)
+
             for coin in confirmed_coins:
                 if coin in pending_confirmation: del pending_confirmation[coin]
             
-            # --- 투자금 설정 및 신규 탐색 ---
             if fixed_investment_per_trade == 0:
                 balance = exchange.fetch_balance()['USDT']
                 total_capital = balance['total']
@@ -412,24 +433,31 @@ def main():
 
             occupied_slots = len(get_open_positions_from_binance()) + len(pending_confirmation)
             if occupied_slots < MAX_CONCURRENT_POSITIONS:
-                print(f"\n--- 신규 진입 탐색 시작 (기본 투자금: ${fixed_investment_per_trade:.2f}) ---")
+                print(f"\n--- 신규 진입 탐색 ---")
                 for coin, config in coins_to_scan.items():
                     if len(get_open_positions_from_binance()) + len(pending_confirmation) >= MAX_CONCURRENT_POSITIONS: break
                     if coin in [p['coin_symbol'] for p in get_open_positions_from_binance()] or coin in pending_confirmation: continue
-                    print(f"-> {coin} 스캔 중...")
+                    
                     try:
                         current_price = exchange.fetch_ticker(config['symbol'])['last']
                         df_1h = fetch_and_analyze_data(config['symbol'], '1h', STRATEGY_CONFIG, calculate_bb=True, calculate_rsi=True)
-                        if df_1h is None: continue
+                        if df_1h is None: 
+                            print(f"-> {coin} 스캔 중... (데이터 부족)")
+                            continue
+                            
                         initial_signal, reason = check_for_initial_signal(df_1h, current_price)
+
                         if initial_signal:
-                            print(f"   - 🚨 {reason}. 확증 대기열에 추가.")
+                            print(f"-> {coin} 스캔 중... {reason}")
                             minutes_to_next_15m = 15 - (now.minute % 15)
                             confirm_time = now.replace(second=5, microsecond=0) + timedelta(minutes=minutes_to_next_15m)
                             initial_signal['confirmation_timestamp'] = confirm_time
                             initial_signal['investment_amount'] = fixed_investment_per_trade
                             pending_confirmation[coin] = initial_signal
-                            print(f"     (확증 예정 시각: {confirm_time.strftime('%H:%M:%S')})")
+                            print(f"     ㄴ 확증 대기열 추가 (예정 시각: {confirm_time.strftime('%H:%M:%S')})")
+                        else:
+                            print(f"-> {coin} 스캔 중... ({reason})")
+
                     except Exception as e:
                         print(f"   - 스캔 중 오류 발생 ({coin}): {e}")
 
