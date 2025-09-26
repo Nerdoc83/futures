@@ -212,7 +212,7 @@ def fetch_and_analyze_data(symbol, timeframe, cfg, calculate_bb=False, calculate
 def get_ai_confirmation(coin_symbol, direction, df_1h, df_15m):
     analysis_data = {'coin_symbol': coin_symbol, 'direction': direction, 'ai_decision': '보류', 'reasoning': ''}
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-2.5-flash')
         current_price = df_15m.iloc[-1]['close']
         cols_1h = [col for col in ['open', 'high', 'low', 'close', 'volume', f'RSI_{STRATEGY_CONFIG["RSI_PERIOD"]}', 'MACD_12_26_9', 'MACDh_12_26_9', 'MACDs_12_26_9'] if col in df_1h.columns]
         cols_15m = [col for col in ['open', 'high', 'low', 'close', 'volume', 'MACD_12_26_9', 'MACDh_12_26_9', 'MACDs_12_26_9'] if col in df_15m.columns]
@@ -518,4 +518,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
