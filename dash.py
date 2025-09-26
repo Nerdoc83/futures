@@ -1,6 +1,6 @@
 """
 멀티코인 데이트레이딩 봇 대시보드 - Streamlit
-실행 방법: streamlit run streamlit_app_multi_coin.py
+실행 방법: streamlit run dash.py
 """
 
 import streamlit as st
@@ -22,7 +22,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# ===== 데이터 로드 함수 (수정됨) =====
+# ===== 데이터 로드 함수 =====
 @st.cache_data(ttl=30)
 def load_data():
     """거래 및 AI 분석 데이터를 DB에서 로드하고 필요한 값을 계산"""
@@ -36,7 +36,6 @@ def load_data():
         
         conn.close()
 
-        # 거래 데이터 전처리
         if not trades_df.empty:
             trades_df['timestamp'] = pd.to_datetime(trades_df['timestamp'])
             trades_df['exit_timestamp'] = pd.to_datetime(trades_df['exit_timestamp'], errors='coerce')
@@ -143,8 +142,6 @@ def main():
             st.write("**🔴 현재 오픈 포지션**")
             for _, trade in open_trades.iterrows():
                 with st.container(border=True):
-                    # --- [수정됨] ---
-                    # 트레일링 스탑 상태 확인
                     is_trailing = False
                     if trade['action'] == 'long' and trade['current_sl_price'] >= trade['entry_price']:
                         is_trailing = True
@@ -154,9 +151,7 @@ def main():
                     trailing_icon = "🛡️ Trailing" if is_trailing else ""
                     
                     st.markdown(f"**{trade['coin_symbol']} | {trade['action'].upper()} | {trade['leverage']}x {trailing_icon}**")
-                    # DB에서 직접 읽어온 손절가 표시
                     st.text(f"  - 진입: ${trade['entry_price']:,.4f} | 손절: ${trade.get('current_sl_price', 0):,.4f}")
-                    # --- [수정 완료] ---
         else:
             st.info("현재 오픈된 포지션이 없습니다.")
 
@@ -174,7 +169,23 @@ def main():
 
     st.subheader("📋 거래 내역 상세")
     if not filtered_trades.empty:
-        st.dataframe(filtered_trades, use_container_width=True, hide_index=True)
+        # [수정됨] 청산 이유 컬럼 추가
+        display_columns = [
+            'timestamp', 'coin_symbol', 'action', 'entry_price', 'exit_price', 
+            'profit_loss', 'profit_loss_percentage', 'status', 'exit_reason'
+        ]
+        
+        display_trades = filtered_trades[display_columns].copy()
+        
+        # 컬럼명 한글화
+        column_mapping = {
+            'timestamp': '시간', 'coin_symbol': '코인', 'action': '방향', 'entry_price': '진입가',
+            'exit_price': '청산가', 'profit_loss': '손익(USDT)', 
+            'profit_loss_percentage': '손익률(%)', 'status': '상태', 'exit_reason': '청산 이유'
+        }
+        display_trades = display_trades.rename(columns=column_mapping)
+
+        st.dataframe(display_trades, use_container_width=True, hide_index=True)
 
     st.subheader("📜 실시간 봇 로그")
     log_content = read_log_file()
@@ -187,4 +198,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
