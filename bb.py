@@ -1,24 +1,24 @@
 """
-Dual Bollinger Band Strategy Bot (v6.4 - Enhanced Exit Logging)
+Dual Bollinger Band Strategy Bot (v6.8 - Logging Fix)
 ----------------------------------------------------------------
 전략:
 - 거래대금 상위 코인 단기 트레이딩
 - 분석 타임프레임: 1시간봉 (Real-time Setup/Filter) + 15분봉 (Confirmation) + AI (Final Confirmation)
-- 핵심 전략: '실시간 가격'이 1시간봉 BB/RSI 조건을 만족하면 '초기 신호'로 감지. AI의 최종 판단 후 진입.
+- 핵심 전략: '실시간 가격'을 반영하여 재계산된 1시간봉 BB/RSI 조건을 만족하면 '초기 신호'로 즉시 감지. AI의 최종 판단 후 진입.
 
 - 지표 설정:
-    1. 메인 볼린저밴드 (BB1): 20 periods, 2 standard deviations
-    2. 보조 볼린저밴드 (BB2): 4 periods, 4 standard deviations
-    3. 상대강도지수 (RSI): 14 periods
+    1. 메인 볼린저밴드 (BB1): 20 periods, 2 standard deviations (정확한 터치 시 진입)
+    2. 보조 볼린저밴드 (BB2): 4 periods, 4 standard deviations (정확한 터치 시 진입)
+    3. 상대강도지수 (RSI): 14 periods (실시간 가격 반영하여 계산)
     4. 평균 실제 범위 (ATR): 14 periods (손절매 계산용)
 
 - 진입 조건 (Entry):
     - 일반 신호 (1x 투자):
-        1. (Detect) '실시간 가격'이 1시간봉 BB1을 터치 & 1시간봉 RSI 조건 만족
+        1. (Detect) '실시간 가격'이 1시간봉 BB1을 정확히 터치 & '실시간 가격' 기준 1시간봉 RSI 조건 만족
         2. (Confirm) 다음 15분봉이 완성되어 반전을 '확증'
         3. (AI Confirm) AI가 시장 상황을 분석하여 최종 진입을 '동의'하면 기본 투자금으로 진입
     - 강력 신호 (2x 투자):
-        1. (Detect) '실시간 가격'이 1시간봉 BB1 '그리고' BB2를 '모두' 터치 & 1시간봉 RSI 조건 만족
+        1. (Detect) '실시간 가격'이 1시간봉 BB1 '그리고' BB2를 '모두' 정확히 터치 & '실시간 가격' 기준 1시간봉 RSI 조건 만족
         2. (Confirm) 다음 15분봉이 완성되어 반전을 '확증'
         3. (AI Confirm) AI가 시장 상황을 분석하여 최종 진입을 '동의'하면 '2배'의 투자금으로 진입
 
@@ -59,14 +59,14 @@ except Exception as e:
 # ===== 동시 포지션 제한 설정 =====
 MAX_CONCURRENT_POSITIONS = 5
 
-# ===== 전략 설정 (ATR 추가) =====
+# ===== 전략 설정 (진입 버퍼 제거) =====
 STRATEGY_CONFIG = {
     "MARGIN_SIZE": 0.20, "LEVERAGE": 10,
     "BB1_WINDOW": 20, "BB1_STD_DEV": 2.0,
     "BB2_WINDOW": 4, "BB2_STD_DEV": 4.0,
     "RSI_PERIOD": 14, "RSI_OVERBOUGHT": 70, "RSI_OVERSOLD": 30,
     "ATR_PERIOD": 14, "ATR_MULTIPLIER": 2.0, # ATR 기반 손절 설정
-    "TP_BUFFER": 0.01,
+    "TP_BUFFER": 0.01, # 분할 익절 버퍼
     "MAX_DATA_DELAY_MINUTES": 120
 }
 
@@ -180,25 +180,27 @@ def fetch_and_analyze_data(symbol, timeframe, cfg, calculate_bb=False, calculate
         if not ohlcv: return None
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         if len(df) < cfg['BB1_WINDOW']: return None
-        
+
+        # pandas_ta를 사용하여 지표 계산
         if calculate_bb:
+            # BBANDS
             bb1 = df.ta.bbands(length=cfg['BB1_WINDOW'], std=cfg['BB1_STD_DEV'])
             bbu1_col = next((col for col in bb1.columns if col.startswith('BBU_')), None)
             bbm1_col = next((col for col in bb1.columns if col.startswith('BBM_')), None)
             bbl1_col = next((col for col in bb1.columns if col.startswith('BBL_')), None)
-            
+
             bb2 = df.ta.bbands(length=cfg['BB2_WINDOW'], std=cfg['BB2_STD_DEV'])
             bbu2_col = next((col for col in bb2.columns if col.startswith('BBU_')), None)
             bbl2_col = next((col for col in bb2.columns if col.startswith('BBL_')), None)
 
             if not all([bbu1_col, bbm1_col, bbl1_col, bbu2_col, bbl2_col]): return None
-                
+
             df['bb1_upper'] = bb1[bbu1_col]
             df['bb1_middle'] = bb1[bbm1_col]
             df['bb1_lower'] = bb1[bbl1_col]
             df['bb2_upper'] = bb2[bbu2_col]
             df['bb2_lower'] = bb2[bbl2_col]
-        
+
         if calculate_rsi: df.ta.rsi(length=cfg['RSI_PERIOD'], append=True)
         if calculate_macd: df.ta.macd(append=True)
         if calculate_atr: df.ta.atr(length=cfg['ATR_PERIOD'], append=True)
@@ -245,7 +247,7 @@ def get_top_volume_coins(exchange, limit=15):
         sorted_tickers = sorted(usdt_futures.values(), key=lambda x: x.get('quoteVolume', 0), reverse=True)
         top_coins = {ticker['symbol'].split('/')[0]: {"symbol": ticker['symbol'].split(':')[0]} for ticker in sorted_tickers[:limit]}
         return top_coins
-    except Exception as e: 
+    except Exception as e:
         print(f"거래대금 상위 코인 조회 오류: {e}")
         return {}
 
@@ -253,31 +255,52 @@ def get_open_positions_from_binance():
     try:
         positions = exchange.fetch_positions()
         return [{ "coin_symbol": pos['symbol'].split('/')[0], "action": 'long' if float(pos['info']['positionAmt']) > 0 else 'short', "entry_price": float(pos.get('entryPrice', 0)), "amount": float(pos.get('contracts', 0)), "leverage": int(pos['info'].get('leverage', 0)) } for pos in positions if float(pos['info'].get('positionAmt', 0)) != 0]
-    except Exception as e: 
+    except Exception as e:
         print(f"바이낸스 포지션 조회 오류: {e}")
         return []
 
-def check_for_initial_signal(df_1h, current_price):
-    if df_1h is None or len(df_1h) < 1: return None, "데이터 부족"
-    cfg = STRATEGY_CONFIG; candle = df_1h.iloc[-1]; rsi_val = candle.get(f'RSI_{cfg["RSI_PERIOD"]}')
-    if rsi_val is None: return None, "RSI 계산 불가"
-    bb1_low, bb1_high = candle.get('bb1_lower'), candle.get('bb1_upper')
-    bb2_low, bb2_high = candle.get('bb2_lower'), candle.get('bb2_upper')
+# ===== 신호 감지 함수 (로그 오류 수정) =====
+def check_for_initial_signal(df_realtime, current_price):
+    """
+    실시간 가격과 이를 반영한 지표(BB, RSI)로 초기 신호를 감지하는 함수.
+    BB 터치 조건에 버퍼를 사용하지 않고 정확한 터치/교차를 확인.
+    """
+    if df_realtime is None or len(df_realtime) < 1: return None, "데이터 부족"
+    cfg = STRATEGY_CONFIG
+    
+    last_row = df_realtime.iloc[-1]
+    rsi_col_name = f'RSI_{cfg["RSI_PERIOD"]}'
+    
+    if rsi_col_name not in last_row.index:
+        return None, f"{rsi_col_name} 컬럼 없음"
+        
+    rsi_val = last_row[rsi_col_name]
+    
+    if pd.isna(rsi_val): return None, "RSI 계산 불가"
+
+    bb1_low, bb1_high = last_row.get('bb1_lower'), last_row.get('bb1_upper')
+    bb2_low, bb2_high = last_row.get('bb2_lower'), last_row.get('bb2_upper')
+
+    # 버퍼 없이 정확한 터치 또는 교차를 확인
     is_bb1_touch_low = current_price <= bb1_low if bb1_low else False
     is_bb2_touch_low = current_price <= bb2_low if bb2_low else False
     is_rsi_oversold = rsi_val < cfg['RSI_OVERSOLD']
+
     is_bb1_touch_high = current_price >= bb1_high if bb1_high else False
     is_bb2_touch_high = current_price >= bb2_high if bb2_high else False
     is_rsi_overbought = rsi_val > cfg['RSI_OVERBOUGHT']
+
     if is_bb1_touch_low and is_rsi_oversold:
         mult = 2.0 if is_bb2_touch_low else 1.0
         return {"direction": "long", "size_multiplier": mult}, f"🚨 초기 롱 신호({'강력' if mult==2.0 else '일반'}) 감지"
+    
     if is_bb1_touch_high and is_rsi_overbought:
         mult = 2.0 if is_bb2_touch_high else 1.0
         return {"direction": "short", "size_multiplier": mult}, f"🚨 초기 숏 신호({'강력' if mult==2.0 else '일반'}) 감지"
+
     bb_status = 'O' if is_bb1_touch_low or is_bb1_touch_high else 'X'
-    rsi_status = 'O' if is_rsi_oversold or is_rsi_overbought else 'X'
-    return None, f"BB:{bb_status}, RSI:{rsi_status}"
+    # [FIX] 문자열 변수(rsi_status) 대신 실제 숫자 값(rsi_val)을 사용하도록 수정하여 서식 오류 해결
+    return None, f"BB:{bb_status}, RSI:{rsi_val:.1f}"
 
 def execute_trade(coin_name, signal, base_investment, multiplier):
     global position_states
@@ -375,7 +398,6 @@ def manage_open_positions(open_positions):
                     try: exchange.cancel_order(state.get('sl_order_id'), symbol)
                     except Exception: pass
                     
-                    # API에서 남은 수량을 다시 조회하여 정확성 확보
                     current_pos_info = next((p for p in get_open_positions_from_binance() if p['coin_symbol'] == coin), None)
                     if current_pos_info:
                         remaining_amount = current_pos_info['amount']
@@ -387,10 +409,10 @@ def manage_open_positions(open_positions):
         except Exception as e:
             print(f"포지션 관리 오류 ({coin}): {e}")
 
-# ===== 메인 루프 (수정됨) =====
+# ===== 메인 루프 (실시간 계산 로직 추가) =====
 def main():
     global fixed_investment_per_trade, position_states
-    print("\n=== Dual BB Strategy Bot (v6.4 - Enhanced Exit Logging) Started ===")
+    print("\n=== Dual BB Strategy Bot (v6.8 - Logging Fix) Started ===")
     setup_database()
     while True:
         try:
@@ -407,7 +429,6 @@ def main():
                 if coin not in api_symbols:
                     print(f"   - ⚠️ 포지션 불일치 감지: {coin}이(가) DB에 있지만 API에 없습니다. 외부에서 종료된 것으로 간주합니다.")
                     reason = "외부 요인에 의해 포지션 종료됨 (봇 외부 청산)"
-                    # PNL은 알 수 없으므로 0으로 기록하거나, 마지막 가격을 조회하여 추정할 수 있음
                     close_trade_in_db(coin, 0, 0, reason)
             
             open_position_symbols = {p['coin_symbol'] for p in api_positions}
@@ -483,19 +504,65 @@ def main():
 
             occupied_slots = len(get_open_positions_from_binance()) + len(pending_confirmation)
             if occupied_slots < MAX_CONCURRENT_POSITIONS:
-                print(f"\n--- 신규 진입 탐색 ---")
+                print(f"\n--- 신규 진입 탐색 (실시간) ---")
                 for coin, config in coins_to_scan.items():
                     if len(get_open_positions_from_binance()) + len(pending_confirmation) >= MAX_CONCURRENT_POSITIONS: break
                     if coin in [p['coin_symbol'] for p in get_open_positions_from_binance()] or coin in pending_confirmation: continue
                     
                     try:
+                        # 1. 완성된 1시간봉 데이터(베이스) 가져오기
+                        df_1h_base = fetch_and_analyze_data(config['symbol'], '1h', STRATEGY_CONFIG)
+                        if df_1h_base is None:
+                            print(f"-> {coin} 스캔 중... (기본 데이터 부족)")
+                            continue
+                        
+                        # 2. 실시간 가격 가져오기
                         current_price = exchange.fetch_ticker(config['symbol'])['last']
-                        df_1h = fetch_and_analyze_data(config['symbol'], '1h', STRATEGY_CONFIG, calculate_bb=True, calculate_rsi=True)
-                        if df_1h is None: 
-                            print(f"-> {coin} 스캔 중... (데이터 부족)")
+                        
+                        # 3. 실시간 가격을 반영하여 지표 재계산 (안정성 강화)
+                        df_realtime = df_1h_base.copy()
+                        df_realtime.iloc[-1, df_realtime.columns.get_loc('close')] = current_price
+                        
+                        df_realtime.ta.rsi(length=STRATEGY_CONFIG['RSI_PERIOD'], append=True)
+                        
+                        bb1_bands = df_realtime.ta.bbands(length=STRATEGY_CONFIG['BB1_WINDOW'], std=STRATEGY_CONFIG['BB1_STD_DEV'])
+                        bb2_bands = df_realtime.ta.bbands(length=STRATEGY_CONFIG['BB2_WINDOW'], std=STRATEGY_CONFIG['BB2_STD_DEV'])
+
+                        if bb1_bands is None or bb2_bands is None:
+                            print(f"-> {coin} 스캔 중... (실시간 BB 계산 실패)")
+                            continue
+                        
+                        # 동적으로 컬럼 이름 찾기 (더 안정적인 방식)
+                        bbu1_col = next((col for col in bb1_bands.columns if col.startswith('BBU_')), None)
+                        bbm1_col = next((col for col in bb1_bands.columns if col.startswith('BBM_')), None)
+                        bbl1_col = next((col for col in bb1_bands.columns if col.startswith('BBL_')), None)
+
+                        if not all([bbu1_col, bbm1_col, bbl1_col]):
+                            print(f"-> {coin} 스캔 중... (실시간 BB1 컬럼 파싱 오류)")
+                            continue
+
+                        bbu2_col = next((col for col in bb2_bands.columns if col.startswith('BBU_')), None)
+                        bbl2_col = next((col for col in bb2_bands.columns if col.startswith('BBL_')), None)
+
+                        if not all([bbu2_col, bbl2_col]):
+                            print(f"-> {coin} 스캔 중... (실시간 BB2 컬럼 파싱 오류)")
+                            continue
+
+                        # 찾은 컬럼 이름을 사용하여 데이터 할당
+                        df_realtime['bb1_upper'] = bb1_bands[bbu1_col]
+                        df_realtime['bb1_middle'] = bb1_bands[bbm1_col]
+                        df_realtime['bb1_lower'] = bb1_bands[bbl1_col]
+                        
+                        df_realtime['bb2_upper'] = bb2_bands[bbu2_col]
+                        df_realtime['bb2_lower'] = bb2_bands[bbl2_col]
+                        
+                        df_realtime.dropna(inplace=True)
+                        if df_realtime.empty:
+                            print(f"-> {coin} 스캔 중... (실시간 지표 계산 후 데이터 없음)")
                             continue
                             
-                        initial_signal, reason = check_for_initial_signal(df_1h, current_price)
+                        # 4. 실시간 데이터로 신호 확인
+                        initial_signal, reason = check_for_initial_signal(df_realtime, current_price)
 
                         if initial_signal:
                             print(f"-> {coin} 스캔 중... {reason}")
@@ -518,5 +585,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
