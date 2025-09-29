@@ -29,23 +29,21 @@ st.set_page_config(
 DB_FILE = 'multi_coin_daytrading.db'
 
 
-# ===== 데이터 로드 함수 (수정됨) =====
+# ===== 데이터 로드 함수 (DB 스키마 호환성 수정) =====
 @st.cache_data(ttl=30)
 def load_data():
     """거래 및 AI 분석 데이터를 DB에서 로드하고 필요한 값을 계산"""
     if not os.path.exists(DB_FILE):
-        # st.error 대신 st.warning을 사용하여 앱이 멈추지 않도록 함
         return None, None
 
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
         
-        # 'trades' 테이블 존재 여부 확인
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='trades';")
         if cursor.fetchone() is None:
             conn.close()
-            return pd.DataFrame(), pd.DataFrame(columns=['timestamp']) # AI DF 스키마 일관성 유지
+            return pd.DataFrame(), pd.DataFrame(columns=['timestamp'])
 
         trades_query = "SELECT * FROM trades ORDER BY timestamp DESC"
         trades_df = pd.read_sql_query(trades_query, conn)
@@ -55,16 +53,38 @@ def load_data():
         
         conn.close()
 
+        # DB 스키마 차이 대응
+        if 'initial_amount' in trades_df.columns and 'amount' not in trades_df.columns:
+            trades_df = trades_df.rename(columns={'initial_amount': 'amount'})
+        if 'sl_price' in trades_df.columns and 'current_sl_price' not in trades_df.columns:
+            trades_df = trades_df.rename(columns={'sl_price': 'current_sl_price'})
+        if 'tp1_achieved' in trades_df.columns and 'partial_tp_hit' not in trades_df.columns:
+            trades_df = trades_df.rename(columns={'tp1_achieved': 'partial_tp_hit'})
+
         if not trades_df.empty:
             trades_df['timestamp'] = pd.to_datetime(trades_df['timestamp'])
-            trades_df['exit_timestamp'] = pd.to_datetime(trades_df['exit_timestamp'], errors='coerce')
-            trades_df['leverage'] = trades_df['leverage'].replace(0, 1) # 레버리지 0일 경우 오류 방지
-            trades_df['investment_amount'] = (trades_df['entry_price'] * trades_df['amount']) / trades_df['leverage']
-            trades_df['profit_loss_percentage'] = np.where(
-                trades_df['investment_amount'] > 0,
-                (trades_df['profit_loss'] / trades_df['investment_amount']) * 100,
-                0
-            )
+            if 'exit_timestamp' in trades_df.columns:
+                trades_df['exit_timestamp'] = pd.to_datetime(trades_df['exit_timestamp'], errors='coerce')
+            
+            trades_df['leverage'] = trades_df['leverage'].replace(0, 1)
+            
+            # profit_loss가 0으로만 되어 있는 구버전 DB를 위해 재계산 로직 추가
+            if 'profit_loss' in trades_df.columns and trades_df[trades_df['status'] == 'CLOSED']['profit_loss'].sum() == 0:
+                 trades_df['profit_loss'] = np.where(
+                    trades_df['status'] == 'CLOSED',
+                    (trades_df['exit_price'] - trades_df['entry_price']) * trades_df['amount'] * np.where(trades_df['action'] == 'long', 1, -1),
+                    0
+                )
+
+            if 'investment_amount' not in trades_df.columns:
+                 trades_df['investment_amount'] = (trades_df['entry_price'] * trades_df['amount']) / trades_df['leverage']
+
+            if 'profit_loss_percentage' not in trades_df.columns:
+                trades_df['profit_loss_percentage'] = np.where(
+                    trades_df['investment_amount'] > 0,
+                    (trades_df['profit_loss'] / trades_df['investment_amount']) * 100,
+                    0
+                )
         
         if not ai_df.empty:
             ai_df['timestamp'] = pd.to_datetime(ai_df['timestamp'])
@@ -100,12 +120,12 @@ def calculate_performance_metrics(trades_df):
         'profit_factor': 0
     }
 
-    if not closed_trades.empty:
+    if not closed_trades.empty and 'profit_loss' in closed_trades.columns:
         winning_trades = closed_trades[closed_trades['profit_loss'] > 0]
         total_profit = winning_trades['profit_loss'].sum()
-        total_loss = abs(closed_trades[closed_trades['profit_loss'] < 0]['profit_loss'].sum())
+        total_loss = abs(closed_trades[closed_trades['profit_loss'] <= 0]['profit_loss'].sum())
         
-        metrics['win_rate'] = (len(winning_trades) / len(closed_trades)) * 100
+        metrics['win_rate'] = (len(winning_trades) / len(closed_trades)) * 100 if len(closed_trades) > 0 else 0
         metrics['total_pnl'] = closed_trades['profit_loss'].sum()
         metrics['profit_factor'] = total_profit / total_loss if total_loss > 0 else float('inf')
 
@@ -118,11 +138,10 @@ def main():
     
     trades_df, ai_df = load_data()
 
-    # 데이터 로드 실패 또는 DB 파일 없음 처리
     if trades_df is None:
         st.error(f"🚨 데이터베이스 파일을 찾을 수 없습니다: '{DB_FILE}'")
         st.info("봇이 실행되는 폴더에 있는 `multi_coin_daytrading.db` 파일을 이 대시보드(`dash.py`)가 있는 폴더로 복사해주세요.\n\n또는 `dash.py` 코드 상단의 `DB_FILE` 변수에 데이터베이스 파일의 전체 경로를 직접 지정할 수 있습니다.")
-        return # 대시보드 실행 중단
+        return
 
     if trades_df.empty:
         st.warning("📊 거래 데이터가 없습니다. 봇이 아직 거래를 기록하지 않았을 수 있습니다.")
@@ -158,29 +177,30 @@ def main():
     
     with col_left:
         st.subheader("📈 누적 손익 추이")
-        if not filtered_trades.empty:
+        if not filtered_trades.empty and 'status' in filtered_trades.columns:
             closed_trades = filtered_trades[filtered_trades['status'] == 'CLOSED'].sort_values('timestamp')
-            if not closed_trades.empty:
+            if not closed_trades.empty and 'profit_loss' in closed_trades.columns:
                 closed_trades['cumulative_pnl'] = closed_trades['profit_loss'].cumsum()
-                fig = px.area(closed_trades, x='exit_timestamp', y='cumulative_pnl', labels={'cumulative_pnl': '누적 손익 (USDT)', 'exit_timestamp': '시간'})
+                
+                # exit_timestamp가 없는 구버전 DB 호환
+                x_axis = 'exit_timestamp' if 'exit_timestamp' in closed_trades.columns and not closed_trades['exit_timestamp'].isnull().all() else 'timestamp'
+                
+                fig = px.area(closed_trades, x=x_axis, y='cumulative_pnl', labels={'cumulative_pnl': '누적 손익 (USDT)', x_axis: '시간'})
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.info("표시할 완료된 거래가 없습니다.")
     
     with col_right:
         st.subheader("📊 실시간 상태")
-        open_trades = filtered_trades[filtered_trades['status'] == 'OPEN'] if not filtered_trades.empty else pd.DataFrame()
+        open_trades = filtered_trades[filtered_trades['status'] == 'OPEN'] if not filtered_trades.empty and 'status' in filtered_trades.columns else pd.DataFrame()
         if not open_trades.empty:
             st.write("**🔴 현재 오픈 포지션**")
             for _, trade in open_trades.iterrows():
                 with st.container(border=True):
-                    is_trailing = False
-                    if trade.get('partial_tp_hit') == 1:
-                        is_trailing = True
-                    
+                    is_trailing = trade.get('partial_tp_hit') == 1 or trade.get('tp1_achieved') == 1
                     trailing_icon = "🛡️ Trailing" if is_trailing else ""
                     
-                    st.markdown(f"**{trade['coin_symbol']} | {trade['action'].upper()} | {trade['leverage']}x {trailing_icon}**")
+                    st.markdown(f"**{trade['coin_symbol']} | {trade['action'].upper()} | {trade.get('leverage', 'N/A')}x {trailing_icon}**")
                     st.text(f"  - 진입: ${trade['entry_price']:,.4f} | 손절: ${trade.get('current_sl_price', 0):,.4f}")
         else:
             st.info("현재 오픈된 포지션이 없습니다.")
@@ -199,14 +219,13 @@ def main():
 
     st.subheader("📋 거래 내역 상세")
     if not filtered_trades.empty:
-        display_columns = [
-            'timestamp', 'coin_symbol', 'action', 'entry_price', 'exit_price', 
-            'profit_loss', 'profit_loss_percentage', 'status', 'exit_reason'
-        ]
+        default_cols = ['timestamp', 'coin_symbol', 'action', 'entry_price', 'status']
+        available_cols = [col for col in default_cols if col in filtered_trades.columns]
         
-        # 표시할 컬럼이 df에 있는지 확인
-        display_columns = [col for col in display_columns if col in filtered_trades.columns]
-        display_trades = filtered_trades[display_columns].copy()
+        optional_cols = ['exit_price', 'profit_loss', 'profit_loss_percentage', 'exit_reason']
+        available_cols.extend([col for col in optional_cols if col in filtered_trades.columns])
+        
+        display_trades = filtered_trades[available_cols].copy()
         
         column_mapping = {
             'timestamp': '시간', 'coin_symbol': '코인', 'action': '방향', 'entry_price': '진입가',
@@ -214,7 +233,6 @@ def main():
             'profit_loss_percentage': '손익률(%)', 'status': '상태', 'exit_reason': '청산 이유'
         }
         display_trades = display_trades.rename(columns=column_mapping)
-
         st.dataframe(display_trades, use_container_width=True, hide_index=True)
 
     st.subheader("📜 실시간 봇 로그")
@@ -228,3 +246,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
