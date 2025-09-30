@@ -1,19 +1,20 @@
 """
-Dual Bollinger Band Strategy Bot (v8.2 - AI Request Resilience)
+Dual Bollinger Band Strategy Bot (v8.3 - Refined Confirmation Timing)
 ----------------------------------------------------------------
 전략:
 - 안정성과 거래 빈도를 모두 잡기 위한 '투트랙' 시스템 동시 운영.
 - 각 트랙의 진입 타임프레임에 맞춰 청산(TP/SL) 타임프레임도 동적으로 변경.
-- [개선] AI 모델 과부하 시, 지능적인 재시도 로직(Exponential Backoff)을 통해 안정성 강화.
+- AI 모델 과부하 시, 지능적인 재시도 로직(Exponential Backoff)을 통해 안정성 강화.
+- [개선] 확증 로직을 신호가 발생한 캔들의 '다음' 캔들을 확인하도록 수정하여 신뢰도 향상.
 
 - Track 1: 안정적인 추세 반전 전략
     - 신호: 1시간봉 BB 터치 + 1시간봉 RSI 과매수/과매도
-    - 확증: 15분봉 캔들 마감 + AI 최종 승인
+    - 확증: '다음' 15분봉 캔들 마감 + AI 최종 승인
     - 청산: '1시간봉' 기준 (초기 SL, 분할 TP, 트레일링 스탑)
 
 - Track 2: 빠른 단기 변동성 전략
     - 신호: 15분봉 BB 터치 + 15분봉 RSI 과매수/과매도
-    - 확증: 5분봉 캔들 마감 + AI 최종 승인
+    - 확증: '다음' 5분봉 캔들 마감 + AI 최종 승인
     - 청산: '15분봉' 기준 (초기 SL, 분할 TP, 트레일링 스탑)
 
 - 공통 손절 원칙:
@@ -54,7 +55,7 @@ STRATEGY_CONFIG = {
     "RSI_PERIOD": 14, "RSI_OVERBOUGHT": 70, "RSI_OVERSOLD": 30,
     "ATR_PERIOD": 14, "ATR_MULTIPLIER": 2.0,
     "TP_BUFFER": 0.01,
-    "MAX_LOSS_PERCENTAGE": 1.0, # 증거금 대비 최대 손실률 (100%)
+    "MAX_LOSS_PERCENTAGE": 1.0, # 증거금 대비 최대 손실률 (50%)
 }
 
 # ===== API 및 DB 설정 =====
@@ -209,24 +210,21 @@ def get_ai_confirmation(coin_symbol, direction, df_1h, df_15m):
                 
         except Exception as e:
             error_msg = str(e)
-            # "overloaded" 또는 "503" 포함 시 재시도
             if "overloaded" in error_msg.lower() or "503" in error_msg:
                 wait_time = (2 ** attempt) + random.uniform(0, 1)
                 print(f"   - AI 모델 과부하 감지. {wait_time:.1f}초 후 재시도... ({attempt + 1}/{max_retries})")
                 time.sleep(wait_time)
                 continue
-            else: # 그 외 다른 오류는 즉시 실패 처리
+            else:
                 final_error_msg = f"AI 분석 중 예상치 못한 오류 발생: {e}"
                 analysis_data['reasoning'] = final_error_msg
                 save_ai_analysis_to_db(analysis_data)
                 return False, final_error_msg
     
-    # 모든 재시도 실패 시
     final_error_msg = f"AI 분석 실패: 모델이 계속 과부하 상태입니다 (최대 재시도 {max_retries}회 초과)."
     analysis_data['reasoning'] = final_error_msg
     save_ai_analysis_to_db(analysis_data)
     return False, final_error_msg
-
 
 def get_top_volume_coins(exchange, limit=15):
     try:
@@ -428,10 +426,10 @@ def manage_open_positions():
         except Exception as e:
             print(f"포지션 관리 오류 ({coin}): {e}")
 
-# ===== 메인 루프 (투트랙 시스템 적용) =====
+# ===== 메인 루프 (확증 타이밍 수정) =====
 def main():
     global fixed_investment_per_trade, position_states
-    print(f"\n=== Dual BB Strategy Bot (v8.2 - AI Request Resilience) Started ===")
+    print(f"\n=== Dual BB Strategy Bot (v8.3 - Refined Confirmation Timing) Started ===")
     setup_database()
 
     tracks = {
@@ -538,7 +536,6 @@ def main():
                     if len(get_all_open_trades_from_db()) + len(pending_confirmation) >= MAX_CONCURRENT_POSITIONS: break
                     if coin in current_open_symbols or coin in pending_confirmation: continue
                     
-                    # 트랙 1 (1h), 트랙 2 (15m) 순서로 스캔
                     for signal_tf, track_info in tracks.items():
                         try:
                             df_base = fetch_and_analyze_data(config['symbol'], signal_tf, STRATEGY_CONFIG)
@@ -572,8 +569,11 @@ def main():
                             if signal:
                                 confirm_tf_str = track_info['confirmation_tf']
                                 confirm_mins = int(confirm_tf_str.replace('m', ''))
-                                minutes_to_next = confirm_mins - (now.minute % confirm_mins)
-                                confirm_time = now.replace(second=5, microsecond=0) + timedelta(minutes=minutes_to_next)
+                                
+                                # [수정됨] 다음 캔들을 확인하도록 확증 시간 재계산
+                                minutes_to_current_interval_end = confirm_mins - (now.minute % confirm_mins)
+                                total_minutes_to_wait = minutes_to_current_interval_end + confirm_mins
+                                confirm_time = now.replace(second=5, microsecond=0) + timedelta(minutes=total_minutes_to_wait)
 
                                 signal['confirmation_timestamp'] = confirm_time
                                 signal['investment_amount'] = fixed_investment_per_trade
@@ -581,7 +581,6 @@ def main():
                                 pending_confirmation[coin] = signal
                                 print(f"     ㄴ [{track_info['name']}] 확증 대기열 추가 (예정 시각: {confirm_time.strftime('%H:%M:%S')})")
                                 
-                                # 신호가 발견되면 다음 코인으로 넘어감 (1h 신호 우선)
                                 break 
 
                         except Exception as e:
