@@ -52,7 +52,7 @@ STRATEGY_CONFIG = {
     "RSI_PERIOD": 14, "RSI_OVERBOUGHT": 70, "RSI_OVERSOLD": 30,
     "ATR_PERIOD": 14, "ATR_MULTIPLIER": 2.0,
     "TP_BUFFER": 0.01,
-    "MAX_LOSS_PERCENTAGE": 0.50, # 증거금 대비 최대 손실률 (50%)
+    "MAX_LOSS_PERCENTAGE": 1.0, # 증거금 대비 최대 손실률 (100%)
 }
 
 # ===== API 및 DB 설정 =====
@@ -573,4 +573,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
