@@ -1,9 +1,10 @@
 """
-Dual Bollinger Band Strategy Bot (v8.1 - Dynamic Exit Timeframe)
+Dual Bollinger Band Strategy Bot (v8.2 - AI Request Resilience)
 ----------------------------------------------------------------
 전략:
 - 안정성과 거래 빈도를 모두 잡기 위한 '투트랙' 시스템 동시 운영.
 - 각 트랙의 진입 타임프레임에 맞춰 청산(TP/SL) 타임프레임도 동적으로 변경.
+- [개선] AI 모델 과부하 시, 지능적인 재시도 로직(Exponential Backoff)을 통해 안정성 강화.
 
 - Track 1: 안정적인 추세 반전 전략
     - 신호: 1시간봉 BB 터치 + 1시간봉 RSI 과매수/과매도
@@ -30,6 +31,7 @@ from dotenv import load_dotenv
 from datetime import datetime, timedelta
 import pandas_ta as ta
 import google.generativeai as genai
+import random
 
 # .env 파일 로드
 load_dotenv()
@@ -175,35 +177,56 @@ def fetch_and_analyze_data(symbol, timeframe, cfg, calculate_bb=False, calculate
     except Exception as e:
         return None
 
-# ===== AI 및 거래량 함수 =====
+# ===== AI 및 거래량 함수 (재시도 로직 추가) =====
 def get_ai_confirmation(coin_symbol, direction, df_1h, df_15m):
     analysis_data = {'coin_symbol': coin_symbol, 'direction': direction, 'ai_decision': '보류', 'reasoning': ''}
-    try:
-        model = genai.GenerativeModel('gemini-2.5-flash')
-        current_price = df_15m.iloc[-1]['close']
-        cols_1h = [col for col in ['open', 'high', 'low', 'close', 'volume', f'RSI_{STRATEGY_CONFIG["RSI_PERIOD"]}', 'MACD_12_26_9', 'MACDh_12_26_9', 'MACDs_12_26_9'] if col in df_1h.columns]
-        cols_15m = [col for col in ['open', 'high', 'low', 'close', 'volume', 'MACD_12_26_9', 'MACDh_12_26_9', 'MACDs_12_26_9'] if col in df_15m.columns]
-        recent_1h_data = df_1h[cols_1h].tail(5).to_string()
-        recent_15m_data = df_15m[cols_15m].tail(10).to_string()
-        latest_15m_macd = df_15m.iloc[-1]
-        macd_info = f"- 15분봉 MACD: {latest_15m_macd.get('MACD_12_26_9', 'N/A'):.4f}\n- 15분봉 MACD 시그널: {latest_15m_macd.get('MACDs_12_26_9', 'N/A'):.4f}\n- 15분봉 MACD 히스토그램: {latest_15m_macd.get('MACDh_12_26_9', 'N/A'):.4f}"
-        prompt = f"""당신은 변동성이 큰 암호화폐 선물 시장의 단기 트레이딩을 전문으로 하는 AI 분석가입니다. 당신의 임무는 기술적 분석 신호의 함정 가능성을 판단하여 자산을 보호하는 것입니다.\n\n[분석 요청]\n- 코인: {coin_symbol}\n- 포지션 방향: {direction}\n- 현재 가격: ${current_price:.4f}\n\n[상황]\n기술적 지표(BB, RSI)를 기반으로 한 단기 과매수/과매도 반전 신호가 감지되었습니다. 이후 더 짧은 타임프레임에서 기술적 반전 캔들이 확인되어 1차 진입 조건이 충족되었습니다. 이제 최종 진입 여부를 결정하기 위해 당신의 종합적인 분석이 필요합니다.\n\n[분석 데이터]\n- 최신 15분봉 MACD 지표:\n{macd_info}\n\n- 최근 1시간봉 데이터:\n{recent_1h_data}\n\n- 최근 15분봉 데이터:\n{recent_15m_data}\n\n[지시사항]\n위 데이터를 바탕으로 지금 {direction} 포지션에 진입하는 것이 타당한지 최종 판단을 내려주세요. 특히 최근 가격 움직임, 거래량 변화, 캔들 패턴, 그리고 **MACD 지표(시그널선 교차, 히스토그램의 추세)를 종합적으로 고려하여** 이것이 진짜 반전 신호인지, 아니면 단기적인 속임수(Fakeout)일 가능성이 높은지 분석해주세요.\n\n답변은 반드시 다음 형식 중 하나로 시작해야 합니다.\n"결론: [진입 동의]" 또는 "결론: [진입 보류]"\n\n그 뒤에 구체적인 분석 이유를 2~3줄로 요약하여 설명해주세요."""
-        response = model.generate_content(prompt)
-        analysis = response.text
-        analysis_data['reasoning'] = analysis
-        if "결론: [진입 동의]" in analysis:
-            analysis_data['ai_decision'] = '동의'
-            save_ai_analysis_to_db(analysis_data)
-            return True, analysis
-        else:
-            analysis_data['ai_decision'] = '보류'
-            save_ai_analysis_to_db(analysis_data)
-            return False, analysis
-    except Exception as e:
-        error_msg = f"AI 분석 중 오류 발생: {e}"
-        analysis_data['reasoning'] = error_msg
-        save_ai_analysis_to_db(analysis_data)
-        return False, error_msg
+    max_retries = 3
+    
+    for attempt in range(max_retries):
+        try:
+            model = genai.GenerativeModel('gemini-2.5-flash')
+            current_price = df_15m.iloc[-1]['close']
+            cols_1h = [col for col in ['open', 'high', 'low', 'close', 'volume', f'RSI_{STRATEGY_CONFIG["RSI_PERIOD"]}', 'MACD_12_26_9', 'MACDh_12_26_9', 'MACDs_12_26_9'] if col in df_1h.columns]
+            cols_15m = [col for col in ['open', 'high', 'low', 'close', 'volume', 'MACD_12_26_9', 'MACDh_12_26_9', 'MACDs_12_26_9'] if col in df_15m.columns]
+            recent_1h_data = df_1h[cols_1h].tail(5).to_string()
+            recent_15m_data = df_15m[cols_15m].tail(10).to_string()
+            latest_15m_macd = df_15m.iloc[-1]
+            macd_info = f"- 15분봉 MACD: {latest_15m_macd.get('MACD_12_26_9', 'N/A'):.4f}\n- 15분봉 MACD 시그널: {latest_15m_macd.get('MACDs_12_26_9', 'N/A'):.4f}\n- 15분봉 MACD 히스토그램: {latest_15m_macd.get('MACDh_12_26_9', 'N/A'):.4f}"
+            prompt = f"""당신은 변동성이 큰 암호화폐 선물 시장의 단기 트레이딩을 전문으로 하는 AI 분석가입니다. 당신의 임무는 기술적 분석 신호의 함정 가능성을 판단하여 자산을 보호하는 것입니다.\n\n[분석 요청]\n- 코인: {coin_symbol}\n- 포지션 방향: {direction}\n- 현재 가격: ${current_price:.4f}\n\n[상황]\n기술적 지표(BB, RSI)를 기반으로 한 단기 과매수/과매도 반전 신호가 감지되었습니다. 이후 더 짧은 타임프레임에서 기술적 반전 캔들이 확인되어 1차 진입 조건이 충족되었습니다. 이제 최종 진입 여부를 결정하기 위해 당신의 종합적인 분석이 필요합니다.\n\n[분석 데이터]\n- 최신 15분봉 MACD 지표:\n{macd_info}\n\n- 최근 1시간봉 데이터:\n{recent_1h_data}\n\n- 최근 15분봉 데이터:\n{recent_15m_data}\n\n[지시사항]\n위 데이터를 바탕으로 지금 {direction} 포지션에 진입하는 것이 타당한지 최종 판단을 내려주세요. 특히 최근 가격 움직임, 거래량 변화, 캔들 패턴, 그리고 **MACD 지표(시그널선 교차, 히스토그램의 추세)를 종합적으로 고려하여** 이것이 진짜 반전 신호인지, 아니면 단기적인 속임수(Fakeout)일 가능성이 높은지 분석해주세요.\n\n답변은 반드시 다음 형식 중 하나로 시작해야 합니다.\n"결론: [진입 동의]" 또는 "결론: [진입 보류]"\n\n그 뒤에 구체적인 분석 이유를 2~3줄로 요약하여 설명해주세요."""
+            
+            response = model.generate_content(prompt)
+            analysis = response.text
+            analysis_data['reasoning'] = analysis
+            
+            if "결론: [진입 동의]" in analysis:
+                analysis_data['ai_decision'] = '동의'
+                save_ai_analysis_to_db(analysis_data)
+                return True, analysis
+            else:
+                analysis_data['ai_decision'] = '보류'
+                save_ai_analysis_to_db(analysis_data)
+                return False, analysis
+                
+        except Exception as e:
+            error_msg = str(e)
+            # "overloaded" 또는 "503" 포함 시 재시도
+            if "overloaded" in error_msg.lower() or "503" in error_msg:
+                wait_time = (2 ** attempt) + random.uniform(0, 1)
+                print(f"   - AI 모델 과부하 감지. {wait_time:.1f}초 후 재시도... ({attempt + 1}/{max_retries})")
+                time.sleep(wait_time)
+                continue
+            else: # 그 외 다른 오류는 즉시 실패 처리
+                final_error_msg = f"AI 분석 중 예상치 못한 오류 발생: {e}"
+                analysis_data['reasoning'] = final_error_msg
+                save_ai_analysis_to_db(analysis_data)
+                return False, final_error_msg
+    
+    # 모든 재시도 실패 시
+    final_error_msg = f"AI 분석 실패: 모델이 계속 과부하 상태입니다 (최대 재시도 {max_retries}회 초과)."
+    analysis_data['reasoning'] = final_error_msg
+    save_ai_analysis_to_db(analysis_data)
+    return False, final_error_msg
+
 
 def get_top_volume_coins(exchange, limit=15):
     try:
@@ -269,7 +292,6 @@ def execute_trade(coin_name, signal, base_investment, multiplier):
     trade_id = None
     
     try:
-        # [수정] 진입 트랙에 따라 ATR 계산 타임프레임 동적 변경
         track_name = signal.get('track', {}).get('name', 'Track 1 (1h)')
         atr_tf = '15m' if track_name == 'Track 2 (15m)' else '1h'
 
@@ -331,7 +353,7 @@ def execute_trade(coin_name, signal, base_investment, multiplier):
             print(f"   - 불완전한 거래 기록(ID: {trade_id})이 DB에서 삭제되었습니다.")
         return False
 
-# ===== 포지션 관리 함수 (동적 타임프레임 적용) =====
+# ===== 포지션 관리 함수 =====
 def manage_open_positions():
     global position_states
     open_trades_db = get_all_open_trades_from_db()
@@ -342,9 +364,8 @@ def manage_open_positions():
         coin = trade['coin_symbol']; symbol = f"{coin}/USDT"; trade_id = trade['id']
         state = position_states.get(coin, {})
         action = trade['action']
-        track_name = trade.get('entry_track', 'Track 1 (1h)') # DB에 기록된 트랙 정보 사용
+        track_name = trade.get('entry_track', 'Track 1 (1h)')
 
-        # [수정] 트랙에 따라 청산 기준 타임프레임 결정
         exit_tf = '15m' if track_name == 'Track 2 (15m)' else '1h'
 
         try:
@@ -410,7 +431,7 @@ def manage_open_positions():
 # ===== 메인 루프 (투트랙 시스템 적용) =====
 def main():
     global fixed_investment_per_trade, position_states
-    print(f"\n=== Dual BB Strategy Bot (v8.1 - Dynamic Exit Timeframe) Started ===")
+    print(f"\n=== Dual BB Strategy Bot (v8.2 - AI Request Resilience) Started ===")
     setup_database()
 
     tracks = {
@@ -573,5 +594,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
