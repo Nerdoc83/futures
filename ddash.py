@@ -1,5 +1,5 @@
 """
-멀티코인 데이트레이딩 봇 대시보드 - Streamlit (v3.0 - Two-Track Compatible)
+멀티코인 데이트레이딩 봇 대시보드 - Streamlit (v3.2 - Robust Filtering)
 실행 방법: streamlit run dash.py
 """
 
@@ -27,7 +27,7 @@ st.set_page_config(
 DB_FILE = 'multi_coin_daytrading.db'
 
 
-# ===== 데이터 로드 함수 (최신 DB 스키마 호환 및 손익 재계산) =====
+# ===== 데이터 로드 함수 (데이터 처리 안정성 강화) =====
 @st.cache_data(ttl=30)
 def load_data():
     """거래 및 AI 분석 데이터를 DB에서 로드하고 정확한 값을 계산"""
@@ -56,23 +56,24 @@ def load_data():
             trades_df['exit_timestamp'] = pd.to_datetime(trades_df['exit_timestamp'], errors='coerce')
             trades_df['leverage'] = trades_df['leverage'].replace(0, 1)
             
-            # [핵심 수정] 종료된 거래에 대해 손익을 직접 재계산하여 봇의 기록 오류를 보정
             closed_trades_mask = trades_df['status'] == 'CLOSED'
-            # exit_price가 유효한(숫자이고 0이 아닌) 경우에만 재계산
             valid_exit_price_mask = pd.to_numeric(trades_df['exit_price'], errors='coerce').notna() & (trades_df['exit_price'] != 0)
-            
             recalc_mask = closed_trades_mask & valid_exit_price_mask
 
-            trades_df.loc[recalc_mask, 'profit_loss'] = np.where(
-                trades_df.loc[recalc_mask, 'action'] == 'long',
-                (trades_df['exit_price'] - trades_df['entry_price']) * trades_df['amount'],
-                (trades_df['entry_price'] - trades_df['exit_price']) * trades_df['amount']
-            )
+            if recalc_mask.any():
+                action_is_long = trades_df.loc[recalc_mask, 'action'] == 'long'
+                
+                profit_loss_values = np.where(
+                    action_is_long,
+                    (trades_df.loc[recalc_mask, 'exit_price'] - trades_df.loc[recalc_mask, 'entry_price']) * trades_df.loc[recalc_mask, 'amount'],
+                    (trades_df.loc[recalc_mask, 'entry_price'] - trades_df.loc[recalc_mask, 'exit_price']) * trades_df.loc[recalc_mask, 'amount']
+                )
+                trades_df.loc[recalc_mask, 'profit_loss'] = profit_loss_values
 
             trades_df['investment_amount'] = (trades_df['entry_price'] * trades_df['amount']) / trades_df['leverage']
             trades_df['profit_loss_percentage'] = np.where(
                 trades_df['investment_amount'] > 0,
-                (trades_df['profit_loss'] / trades_df['investment_amount']) * 100,
+                (trades_df['profit_loss'].fillna(0) / trades_df['investment_amount']) * 100,
                 0
             )
         
@@ -140,11 +141,11 @@ def main():
         st.warning("📊 거래 데이터가 없습니다. 봇이 아직 거래를 기록하지 않았을 수 있습니다.")
     
     st.sidebar.header("📊 필터 설정")
+    # [핵심 수정] 필터링 로직을 안정적으로 변경
     if not trades_df.empty:
         unique_coins = sorted(trades_df['coin_symbol'].unique())
         coin_filter = st.sidebar.multiselect("코인 선택", options=unique_coins, default=unique_coins)
         
-        # entry_track 컬럼이 있으면 필터에 추가
         if 'entry_track' in trades_df.columns:
             unique_tracks = sorted(trades_df['entry_track'].dropna().unique())
             track_filter = st.sidebar.multiselect("전략 트랙 선택", options=unique_tracks, default=unique_tracks)
@@ -156,22 +157,26 @@ def main():
         status_filter = st.sidebar.multiselect("거래 상태", options=['OPEN', 'CLOSED'], default=['OPEN', 'CLOSED'])
         action_filter = st.sidebar.multiselect("거래 방향", options=['long', 'short'], default=['long', 'short'])
         
+        # 1. 모든 데이터로 시작
+        filtered_trades = trades_df
+
+        # 2. 날짜 필터 적용 (값이 유효할 때만)
         if len(date_range) == 2:
             start_date, end_date = date_range
-            
-            # 필터링 로직
-            filtered_trades = trades_df[
-                (trades_df['coin_symbol'].isin(coin_filter)) & 
-                (trades_df['timestamp'].dt.date >= start_date) & 
-                (trades_df['timestamp'].dt.date <= end_date) & 
-                (trades_df['status'].isin(status_filter)) & 
-                (trades_df['action'].isin(action_filter))
+            filtered_trades = filtered_trades[
+                (filtered_trades['timestamp'].dt.date >= start_date) & 
+                (filtered_trades['timestamp'].dt.date <= end_date)
             ]
-            if 'entry_track' in filtered_trades.columns and track_filter:
-                filtered_trades = filtered_trades[filtered_trades['entry_track'].isin(track_filter)]
 
-        else:
-            filtered_trades = pd.DataFrame()
+        # 3. 나머지 필터들 적용
+        filtered_trades = filtered_trades[
+            (filtered_trades['coin_symbol'].isin(coin_filter)) &
+            (filtered_trades['status'].isin(status_filter)) &
+            (filtered_trades['action'].isin(action_filter))
+        ]
+        if 'entry_track' in filtered_trades.columns and track_filter:
+            filtered_trades = filtered_trades[filtered_trades['entry_track'].isin(track_filter)]
+
     else:
         filtered_trades = pd.DataFrame()
 
