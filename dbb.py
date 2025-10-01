@@ -1,12 +1,13 @@
 """
-Dual Bollinger Band Strategy Bot (v8.4 - Accurate P&L Tracking)
+Dual Bollinger Band Strategy Bot (v8.5 - Robust State Management)
 ----------------------------------------------------------------
 전략:
 - 안정성과 거래 빈도를 모두 잡기 위한 '투트랙' 시스템 동시 운영.
 - 각 트랙의 진입 타임프레임에 맞춰 청산(TP/SL) 타임프레임도 동적으로 변경.
 - AI 모델 과부하 시, 지능적인 재시도 로직(Exponential Backoff)을 통해 안정성 강화.
 - 확증 로직을 신호가 발생한 캔들의 '다음' 캔들을 확인하도록 수정하여 신뢰도 향상.
-- [개선] 포지션 동기화 시, 바이낸스 거래 내역을 직접 조회하여 '봇에 의해 종료된 거래'의 손익을 정확하게 기록.
+- 거래소 API의 일시적인 오류로 비정상적인 잔고가 조회될 경우, 거래를 중단하는 안전장치 추가.
+- [개선] 포지션 상태와 관계없이 투자금 재설정 로직이 안정적으로 작동하도록 수정.
 
 - Track 1: 안정적인 추세 반전 전략
     - 신호: 1시간봉 BB 터치 + 1시간봉 RSI 과매수/과매도
@@ -17,9 +18,6 @@ Dual Bollinger Band Strategy Bot (v8.4 - Accurate P&L Tracking)
     - 신호: 15분봉 BB 터치 + 15분봉 RSI 과매수/과매도
     - 확증: '다음' 5분봉 캔들 마감 + AI 최종 승인
     - 청산: '15분봉' 기준 (초기 SL, 분할 TP, 트레일링 스탑)
-
-- 공통 손절 원칙:
-    - 각 타임프레임의 ATR 기반 동적 손절과 최대 손실률(50%) 기반 절대 손절 중 더 타이트한 조건을 적용.
 ----------------------------------------------------------------
 """
 
@@ -48,7 +46,7 @@ except Exception as e:
 # ===== 동시 포지션 제한 설정 =====
 MAX_CONCURRENT_POSITIONS = 5
 
-# ===== 전략 설정 (최대 손실률 100%로 조정) =====
+# ===== 전략 설정 =====
 STRATEGY_CONFIG = {
     "MARGIN_SIZE": 0.20, "LEVERAGE": 10,
     "BB1_WINDOW": 20, "BB1_STD_DEV": 2.0,
@@ -56,7 +54,8 @@ STRATEGY_CONFIG = {
     "RSI_PERIOD": 14, "RSI_OVERBOUGHT": 70, "RSI_OVERSOLD": 30,
     "ATR_PERIOD": 14, "ATR_MULTIPLIER": 2.0,
     "TP_BUFFER": 0.01,
-    "MAX_LOSS_PERCENTAGE": 1.0, # 증거금 대비 최대 손실률 (100%)
+    "MAX_LOSS_PERCENTAGE": 0.50,
+    "MIN_CAPITAL_THRESHOLD": 1.0, 
 }
 
 # ===== API 및 DB 설정 =====
@@ -179,7 +178,7 @@ def fetch_and_analyze_data(symbol, timeframe, cfg, calculate_bb=False, calculate
     except Exception as e:
         return None
 
-# ===== AI 및 거래량 함수 (재시도 로직 추가) =====
+# ===== AI 및 거래량 함수 =====
 def get_ai_confirmation(coin_symbol, direction, df_1h, df_15m):
     analysis_data = {'coin_symbol': coin_symbol, 'direction': direction, 'ai_decision': '보류', 'reasoning': ''}
     max_retries = 3
@@ -427,10 +426,10 @@ def manage_open_positions():
         except Exception as e:
             print(f"포지션 관리 오류 ({coin}): {e}")
 
-# ===== 메인 루프 (거래 내역 조회 로직 추가) =====
+# ===== 메인 루프 (투자금 재설정 로직 수정) =====
 def main():
     global fixed_investment_per_trade, position_states
-    print(f"\n=== Dual BB Strategy Bot (v8.4 - Accurate P&L Tracking) Started ===")
+    print(f"\n=== Dual BB Strategy Bot (v8.5 - Robust State Management) Started ===")
     setup_database()
 
     tracks = {
@@ -443,62 +442,32 @@ def main():
             now = datetime.now()
             print(f"\n\n\n[{now.strftime('%Y-%m-%d %H:%M:%S')}] --- 새로운 사이클 시작 ---")
             
-            # --- 포지션 동기화 (거래 내역 조회 기능 추가) ---
             api_positions = get_open_positions_from_binance()
             db_trades = get_all_open_trades_from_db()
             api_symbols = {p['coin_symbol'] for p in api_positions}
 
             for trade in db_trades:
                 if trade['coin_symbol'] not in api_symbols:
-                    print(f"   - ⚠️ 포지션 불일치 감지: {trade['coin_symbol']}이(가) DB에 있지만 API에 없습니다. 거래 내역을 확인합니다...")
-                    symbol = f"{trade['coin_symbol']}/USDT"
-                    exit_price = 0
-                    pnl = 0
-                    reason = "외부 요인/수동 종료"
-
-                    try:
-                        # 거래 시작 시간 이후의 거래 내역 조회
-                        since_timestamp = int(datetime.fromisoformat(trade['timestamp']).timestamp() * 1000)
-                        my_trades = exchange.fetchMyTrades(symbol=symbol, since=since_timestamp)
-                        
-                        # 가장 최근 거래부터 확인하여 청산 거래 찾기
-                        for my_trade in reversed(my_trades):
-                            is_closing_trade = (trade['action'] == 'long' and my_trade['side'] == 'sell') or \
-                                               (trade['action'] == 'short' and my_trade['side'] == 'buy')
-                            
-                            if is_closing_trade:
-                                exit_price = my_trade['price']
-                                # PNL 계산 (수수료는 일단 무시하고 간단하게 계산)
-                                if trade['action'] == 'long':
-                                    pnl = (exit_price - trade['entry_price']) * trade['amount']
-                                else:
-                                    pnl = (trade['entry_price'] - exit_price) * trade['amount']
-                                
-                                reason = "봇 손절매 또는 익절 실행됨"
-                                print(f"   - ✅ 거래 내역 확인: {symbol} @ ${exit_price:,.4f}에 청산됨. 손익: ${pnl:,.2f}")
-                                break # 첫 번째 청산 거래를 찾으면 중단
-                    
-                    except Exception as e:
-                        print(f"   - 거래 내역 조회 중 오류 발생: {e}")
-                        reason = "외부 종료 (거래 내역 조회 실패)"
-
-                    close_trade_in_db(trade['id'], exit_price, pnl, reason)
+                    print(f"   - ⚠️ 포지션 불일치 감지: {trade['coin_symbol']} DB에 있지만 API에 없음 (외부/수동 종료 간주).")
+                    close_trade_in_db(trade['id'], 0, 0, "외부 요인에 의해 포지션 종료됨")
             
             open_symbols_db = {t['coin_symbol'] for t in get_all_open_trades_from_db()}
             for coin in list(position_states.keys()):
                 if coin not in open_symbols_db:
                     del position_states[coin]
 
-            # --- 메인 로직 ---
             manage_open_positions()
+
+            # [핵심 수정] 투자금 재설정 조건을 단순화하여 안정성 확보
+            if not api_positions:
+                if fixed_investment_per_trade != 0:
+                    print("   - 모든 포지션이 청산되었습니다. 다음 사이클에서 투자금을 재설정합니다.")
+                    fixed_investment_per_trade = 0
 
             coins_to_scan = get_top_volume_coins(exchange)
             if not coins_to_scan: 
                 print("거래대금 상위 코인 조회 실패. 60초 후 재시도.")
                 time.sleep(60); continue
-            
-            if not api_positions and not pending_confirmation:
-                if fixed_investment_per_trade != 0: fixed_investment_per_trade = 0
 
             # --- 확증 프로세스 ---
             if pending_confirmation:
@@ -550,6 +519,11 @@ def main():
                 try:
                     balance = exchange.fetch_balance()['USDT']
                     total_capital = balance['total']
+                    
+                    if total_capital < STRATEGY_CONFIG["MIN_CAPITAL_THRESHOLD"]:
+                        print(f"⚠️ 경고: 조회된 총 자본금(${total_capital:.2f})이 비정상적으로 낮습니다. 투자금 계산을 건너뜁니다.")
+                        time.sleep(60); continue
+
                     fixed_investment_per_trade = total_capital * STRATEGY_CONFIG['MARGIN_SIZE']
                     print(f"\n포지션당 기본 투자금(증거금) 설정: ${fixed_investment_per_trade:.2f}")
                 except Exception as e:
