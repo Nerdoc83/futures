@@ -1,5 +1,5 @@
 """
-멀티코인 데이트레이딩 봇 대시보드 - Streamlit (v3.2 - Robust Filtering)
+멀티코인 데이트레이딩 봇 대시보드 - Streamlit (v3.3 - Unreliable Data Handling)
 실행 방법: streamlit run dash.py
 """
 
@@ -98,29 +98,36 @@ def read_log_file(log_file='output.log', lines=100):
     except Exception as e:
         return f"로그 파일 읽기 오류: {e}"
 
-# ===== 메트릭 계산 함수 =====
+# ===== 메트릭 계산 함수 (신뢰성 있는 데이터만 사용하도록 수정) =====
 def calculate_performance_metrics(trades_df):
     if trades_df.empty: return {}
     
     trades_df['profit_loss'] = trades_df['profit_loss'].fillna(0)
     
-    closed_trades = trades_df[trades_df['status'] == 'CLOSED'].copy()
+    all_closed_trades = trades_df[trades_df['status'] == 'CLOSED'].copy()
     
+    # [핵심 수정] P&L과 exit_price가 모두 0인 거래는 신뢰할 수 없는 데이터로 간주
+    reliable_closed_trades = all_closed_trades[
+        ~((all_closed_trades['profit_loss'] == 0) & (all_closed_trades['exit_price'] == 0))
+    ]
+    num_unreliable = len(all_closed_trades) - len(reliable_closed_trades)
+
     metrics = {
         'total_trades': len(trades_df),
         'open_trades': len(trades_df[trades_df['status'] == 'OPEN']),
         'win_rate': 0,
         'total_pnl': 0,
-        'profit_factor': 0
+        'profit_factor': 0,
+        'unreliable_trades': num_unreliable
     }
 
-    if not closed_trades.empty:
-        winning_trades = closed_trades[closed_trades['profit_loss'] > 0]
+    if not reliable_closed_trades.empty:
+        winning_trades = reliable_closed_trades[reliable_closed_trades['profit_loss'] > 0]
         total_profit = winning_trades['profit_loss'].sum()
-        total_loss = abs(closed_trades[closed_trades['profit_loss'] <= 0]['profit_loss'].sum())
+        total_loss = abs(reliable_closed_trades[reliable_closed_trades['profit_loss'] <= 0]['profit_loss'].sum())
         
-        metrics['win_rate'] = (len(winning_trades) / len(closed_trades)) * 100 if len(closed_trades) > 0 else 0
-        metrics['total_pnl'] = closed_trades['profit_loss'].sum()
+        metrics['win_rate'] = (len(winning_trades) / len(reliable_closed_trades)) * 100 if len(reliable_closed_trades) > 0 else 0
+        metrics['total_pnl'] = reliable_closed_trades['profit_loss'].sum()
         metrics['profit_factor'] = total_profit / total_loss if total_loss > 0 else float('inf')
 
     return metrics
@@ -128,7 +135,6 @@ def calculate_performance_metrics(trades_df):
 # ===== 메인 대시보드 =====
 def main():
     st.title("🤖 AI-Powered Multi-Coin Trading Dashboard")
-    st.markdown("---")
     
     trades_df, ai_df = load_data()
 
@@ -141,7 +147,6 @@ def main():
         st.warning("📊 거래 데이터가 없습니다. 봇이 아직 거래를 기록하지 않았을 수 있습니다.")
     
     st.sidebar.header("📊 필터 설정")
-    # [핵심 수정] 필터링 로직을 안정적으로 변경
     if not trades_df.empty:
         unique_coins = sorted(trades_df['coin_symbol'].unique())
         coin_filter = st.sidebar.multiselect("코인 선택", options=unique_coins, default=unique_coins)
@@ -157,10 +162,8 @@ def main():
         status_filter = st.sidebar.multiselect("거래 상태", options=['OPEN', 'CLOSED'], default=['OPEN', 'CLOSED'])
         action_filter = st.sidebar.multiselect("거래 방향", options=['long', 'short'], default=['long', 'short'])
         
-        # 1. 모든 데이터로 시작
         filtered_trades = trades_df
 
-        # 2. 날짜 필터 적용 (값이 유효할 때만)
         if len(date_range) == 2:
             start_date, end_date = date_range
             filtered_trades = filtered_trades[
@@ -168,7 +171,6 @@ def main():
                 (filtered_trades['timestamp'].dt.date <= end_date)
             ]
 
-        # 3. 나머지 필터들 적용
         filtered_trades = filtered_trades[
             (filtered_trades['coin_symbol'].isin(coin_filter)) &
             (filtered_trades['status'].isin(status_filter)) &
@@ -176,11 +178,16 @@ def main():
         ]
         if 'entry_track' in filtered_trades.columns and track_filter:
             filtered_trades = filtered_trades[filtered_trades['entry_track'].isin(track_filter)]
-
     else:
         filtered_trades = pd.DataFrame()
 
     metrics = calculate_performance_metrics(filtered_trades)
+    
+    # [핵심 수정] 신뢰할 수 없는 데이터에 대한 경고 메시지 표시
+    if metrics.get('unreliable_trades', 0) > 0:
+        st.warning(f"⚠️ {metrics['unreliable_trades']}건의 종료된 거래는 손익 데이터가 없어 (수동 종료 추정) 통계 계산에서 제외되었습니다.")
+
+    st.markdown("---")
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("총 거래 수", f"{metrics.get('total_trades', 0)} (진행중: {metrics.get('open_trades', 0)})")
     col2.metric("승률", f"{metrics.get('win_rate', 0):.1f}%")
@@ -195,13 +202,19 @@ def main():
     with col_left:
         st.subheader("📈 누적 손익 추이")
         if not filtered_trades.empty and 'status' in filtered_trades.columns:
-            closed_trades = filtered_trades[filtered_trades['status'] == 'CLOSED'].sort_values('exit_timestamp')
-            if not closed_trades.empty and 'profit_loss' in closed_trades.columns and not closed_trades['exit_timestamp'].isnull().all():
-                closed_trades['cumulative_pnl'] = closed_trades['profit_loss'].cumsum()
-                fig = px.area(closed_trades, x='exit_timestamp', y='cumulative_pnl', labels={'cumulative_pnl': '누적 손익 (USDT)', 'exit_timestamp': '시간'})
+            all_closed = filtered_trades[filtered_trades['status'] == 'CLOSED'].sort_values('exit_timestamp')
+            
+            # [핵심 수정] 신뢰할 수 있는 데이터만으로 그래프 생성
+            reliable_for_graph = all_closed[
+                ~((all_closed['profit_loss'] == 0) & (all_closed['exit_price'] == 0))
+            ]
+
+            if not reliable_for_graph.empty and 'profit_loss' in reliable_for_graph.columns and not reliable_for_graph['exit_timestamp'].isnull().all():
+                reliable_for_graph['cumulative_pnl'] = reliable_for_graph['profit_loss'].cumsum()
+                fig = px.area(reliable_for_graph, x='exit_timestamp', y='cumulative_pnl', labels={'cumulative_pnl': '누적 손익 (USDT)', 'exit_timestamp': '시간'})
                 st.plotly_chart(fig, use_container_width=True)
             else:
-                st.info("표시할 완료된 거래가 없습니다.")
+                st.info("표시할 수익 데이터를 가진 완료된 거래가 없습니다.")
     
     with col_right:
         st.subheader("📊 실시간 상태")
