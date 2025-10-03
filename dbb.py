@@ -1,32 +1,25 @@
 """
-Dual Bollinger Band Strategy Bot (v8.6 - Critical Fixes Applied)
+Dual Bollinger Band Strategy Bot (v9.0 - Single Track Focus)
 ----------------------------------------------------------------
 전략:
-- 안정성과 거래 빈도를 모두 잡기 위한 '투트랙' 시스템 동시 운영.
-- 각 트랙의 진입 타임프레임에 맞춰 청산(TP/SL) 타임프레임도 동적으로 변경.
-- AI 모델 과부하 시, 지능적인 재시도 로직(Exponential Backoff)을 통해 안정성 강화.
-- 확증 로직을 신호가 발생한 캔들의 '다음' 캔들을 확인하도록 수정하여 신뢰도 향상.
-- 거래소 API의 일시적인 오류로 비정상적인 잔고가 조회될 경우, 거래를 중단하는 안전장치 추가.
-- [v8.6 개선사항]
+- Track 1 (1시간봉) 전략만 사용하여 안정적인 추세 반전 포착
+- AI 모델 과부하 시, 지능적인 재시도 로직(Exponential Backoff)을 통해 안정성 강화
+- 확증 로직을 신호가 발생한 캔들의 '다음' 캔들을 확인하도록 수정하여 신뢰도 향상
+- 거래소 API의 일시적인 오류로 비정상적인 잔고가 조회될 경우, 거래를 중단하는 안전장치 추가
+- [v9.0 변경사항]
+  * Track 2 (15분봉) 전략 제거
+  * Track 1 (1시간봉) 전략만 사용
+  * 최대 손실률 80%로 상향 조정
   * 손절 주문 실패 시 포지션 즉시 청산
   * DB-API 포지션 동기화 강화
   * 최소 주문 수량 검증 추가
   * 레버리지 설정 중복 방지
   * 트레일링 스탑 역전 방지
-  * 투자금 재설정 로직 즉시 적용
-  * 동일 코인 양방향 포지션 방지
-  * AI 재시도 총 대기시간 제한
-  * 확증 캔들 타임스탬프 검증
 
 - Track 1: 안정적인 추세 반전 전략
     - 신호: 1시간봉 BB 터치 + 1시간봉 RSI 과매수/과매도
     - 확증: '다음' 15분봉 캔들 마감 + AI 최종 승인
     - 청산: '1시간봉' 기준 (초기 SL, 분할 TP, 트레일링 스탑)
-
-- Track 2: 빠른 단기 변동성 전략
-    - 신호: 15분봉 BB 터치 + 15분봉 RSI 과매수/과매도
-    - 확증: '다음' 5분봉 캔들 마감 + AI 최종 승인
-    - 청산: '15분봉' 기준 (초기 SL, 분할 TP, 트레일링 스탑)
 ----------------------------------------------------------------
 """
 
@@ -57,15 +50,24 @@ MAX_CONCURRENT_POSITIONS = 5
 
 # ===== 전략 설정 =====
 STRATEGY_CONFIG = {
-    "MARGIN_SIZE": 0.20, "LEVERAGE": 10,
-    "BB1_WINDOW": 20, "BB1_STD_DEV": 2.0,
-    "BB2_WINDOW": 4, "BB2_STD_DEV": 4.0,
-    "RSI_PERIOD": 14, "RSI_OVERBOUGHT": 70, "RSI_OVERSOLD": 30,
-    "ATR_PERIOD": 14, "ATR_MULTIPLIER": 2.0,
+    "MARGIN_SIZE": 0.20, 
+    "LEVERAGE": 10,
+    "BB1_WINDOW": 20, 
+    "BB1_STD_DEV": 2.0,
+    "BB2_WINDOW": 4, 
+    "BB2_STD_DEV": 4.0,
+    "RSI_PERIOD": 14, 
+    "RSI_OVERBOUGHT": 70, 
+    "RSI_OVERSOLD": 30,
+    "ATR_PERIOD": 14, 
+    "ATR_MULTIPLIER": 2.0,
     "TP_BUFFER": 0.01,
-    "MAX_LOSS_PERCENTAGE": 0.50,
+    "MAX_LOSS_PERCENTAGE": 0.80,  # 80%로 상향
     "MIN_CAPITAL_THRESHOLD": 1.0, 
-    "AI_MAX_TOTAL_WAIT_SECONDS": 15,  # AI 재시도 총 대기시간 제한
+    "AI_MAX_TOTAL_WAIT_SECONDS": 15,
+    "SIGNAL_TIMEFRAME": "1h",      # 신호 감지 타임프레임
+    "CONFIRMATION_TIMEFRAME": "15m", # 확증 타임프레임
+    "EXIT_TIMEFRAME": "1h"          # 청산 관리 타임프레임
 }
 
 # ===== API 및 DB 설정 =====
@@ -225,7 +227,6 @@ def get_ai_confirmation(coin_symbol, direction, df_1h, df_15m):
             if "overloaded" in error_msg.lower() or "503" in error_msg:
                 wait_time = min((2 ** attempt) + random.uniform(0, 1), max_total_wait - total_wait_time)
                 
-                # 총 대기시간 초과 시 포기
                 if total_wait_time + wait_time > max_total_wait:
                     final_error_msg = f"AI 분석 실패: 총 대기시간 초과 ({total_wait_time:.1f}초). 타이밍을 놓칠 수 있어 진입을 보류합니다."
                     analysis_data['reasoning'] = final_error_msg
@@ -265,7 +266,7 @@ def get_open_positions_from_binance():
             "coin_symbol": pos['symbol'].split('/')[0],
             "action": 'long' if float(pos['info']['positionAmt']) > 0 else 'short',
             "entry_price": float(pos.get('entryPrice', 0)),
-            "amount": abs(float(pos.get('contracts', 0))),  # 절댓값 사용
+            "amount": abs(float(pos.get('contracts', 0))),
             "leverage": int(pos['info'].get('leverage', 0)),
             "pnl": float(pos.get('unrealizedPnl', 0))
         } for pos in positions if float(pos['info'].get('positionAmt', 0)) != 0]
@@ -275,7 +276,7 @@ def get_open_positions_from_binance():
 
 # ===== 신호 감지 및 거래 실행 함수 =====
 def check_for_initial_signal(df_signal, cfg):
-    """마감된 캔들 데이터로 신호 체크 (실시간 가격 덮어쓰기 제거)"""
+    """마감된 캔들 데이터로 신호 체크"""
     if df_signal is None or len(df_signal) < 1: return None, "데이터 부족"
     
     last_row = df_signal.iloc[-1]
@@ -309,7 +310,6 @@ def check_for_initial_signal(df_signal, cfg):
 def set_leverage_safe(symbol, leverage):
     """레버리지 설정 (중복 오류 방지)"""
     try:
-        # 현재 레버리지 확인 시도
         try:
             positions = exchange.fetch_positions([symbol])
             for pos in positions:
@@ -319,7 +319,7 @@ def set_leverage_safe(symbol, leverage):
                         print(f"   - 레버리지 이미 {leverage}x로 설정되어 있음")
                         return True
         except:
-            pass  # 조회 실패 시 설정 시도
+            pass
         
         exchange.set_leverage(leverage, symbol)
         print(f"   - 레버리지 {leverage}x 설정 완료")
@@ -335,18 +335,18 @@ def set_leverage_safe(symbol, leverage):
 
 def execute_trade(coin_name, signal, base_investment, multiplier):
     global position_states
-    symbol = f"{coin_name}/USDT"; cfg = STRATEGY_CONFIG; leverage = cfg['LEVERAGE']
+    symbol = f"{coin_name}/USDT"
+    cfg = STRATEGY_CONFIG
+    leverage = cfg['LEVERAGE']
     final_investment = base_investment * multiplier
     trade_id = None
     order = None
     
     try:
-        track_name = signal.get('track', {}).get('name', 'Track 1 (1h)')
-        atr_tf = '15m' if track_name == 'Track 2 (15m)' else '1h'
-
-        df_for_atr = fetch_and_analyze_data(symbol, atr_tf, cfg, calculate_atr=True)
+        # ATR 데이터 조회 (1시간봉 기준)
+        df_for_atr = fetch_and_analyze_data(symbol, cfg['EXIT_TIMEFRAME'], cfg, calculate_atr=True)
         if df_for_atr is None or df_for_atr.empty:
-            print(f"❌ {coin_name}의 {atr_tf} ATR 데이터 조회 실패. 거래를 취소합니다.")
+            print(f"❌ {coin_name}의 ATR 데이터 조회 실패. 거래를 취소합니다.")
             return False
         
         # 시장 정보 조회 (최소 주문 수량)
@@ -380,11 +380,15 @@ def execute_trade(coin_name, signal, base_investment, multiplier):
         # 진입 주문 실행
         order = exchange.create_market_order(symbol, order_side, amount)
         entry_price = float(order['price']) if order.get('price') else current_price
-        # 참고: 시장가 주문이므로 슬리피지가 발생할 수 있음. entry_price는 평균 체결가
 
         trade_data_preliminary = {
-            'coin_symbol': coin_name, 'action': signal['direction'], 'entry_price': entry_price,
-            'amount': amount, 'leverage': leverage, 'current_sl_price': None, 'entry_track': track_name
+            'coin_symbol': coin_name, 
+            'action': signal['direction'], 
+            'entry_price': entry_price,
+            'amount': amount, 
+            'leverage': leverage, 
+            'current_sl_price': None, 
+            'entry_track': 'Track 1 (1h)'
         }
         trade_id = save_trade_to_db(trade_data_preliminary)
         print(f"✅ 포지션 진입 및 DB 기록 성공 (ID: {trade_id}): {coin_name} @ ${entry_price:,.4f}")
@@ -401,10 +405,10 @@ def execute_trade(coin_name, signal, base_investment, multiplier):
 
             if signal['direction'] == 'long':
                 final_sl_price = max(sl_price_atr, sl_price_max_loss)
-                sl_reason = f"{atr_tf} ATR" if final_sl_price == sl_price_atr else "최대손실"
+                sl_reason = "ATR" if final_sl_price == sl_price_atr else "최대손실(80%)"
             else:
                 final_sl_price = min(sl_price_atr, sl_price_max_loss)
-                sl_reason = f"{atr_tf} ATR" if final_sl_price == sl_price_atr else "최대손실"
+                sl_reason = "ATR" if final_sl_price == sl_price_atr else "최대손실(80%)"
             
             stop_loss_order = exchange.create_order(symbol, 'STOP_MARKET', 'sell' if signal['direction'] == 'long' else 'buy', amount, None, {'stopPrice': final_sl_price, 'reduceOnly': True})
             
@@ -413,7 +417,7 @@ def execute_trade(coin_name, signal, base_investment, multiplier):
             print(f"   - 손절매({sl_reason} 기반) 설정 완료: ${final_sl_price:,.4f}")
 
         except Exception as sl_error:
-            # 손절 설정 실패 시 포지션 즉시 청산 (중요!)
+            # 손절 설정 실패 시 포지션 즉시 청산
             print(f"🚨🚨🚨 중요: {coin_name} 손절 주문 설정 실패! 즉시 포지션을 청산합니다! 🚨🚨🚨")
             print(f"   - 오류: {sl_error}")
             
@@ -437,7 +441,6 @@ def execute_trade(coin_name, signal, base_investment, multiplier):
     except Exception as e:
         print(f"❌ 거래 실행 중 치명적 오류 (진입 주문 실패): {e}")
         
-        # 주문은 됐지만 이후 처리 실패한 경우 청산 시도
         if order and trade_id:
             try:
                 print(f"   - 불완전 포지션 감지. 청산 시도 중...")
@@ -461,15 +464,14 @@ def manage_open_positions():
 
     print("\n--- 오픈 포지션 관리 ---")
     for trade in open_trades_db:
-        coin = trade['coin_symbol']; symbol = f"{coin}/USDT"; trade_id = trade['id']
+        coin = trade['coin_symbol']
+        symbol = f"{coin}/USDT"
+        trade_id = trade['id']
         state = position_states.get(coin, {})
         action = trade['action']
-        track_name = trade.get('entry_track', 'Track 1 (1h)')
-
-        exit_tf = '15m' if track_name == 'Track 2 (15m)' else '1h'
 
         try:
-            df_exit = fetch_and_analyze_data(symbol, exit_tf, STRATEGY_CONFIG, calculate_bb=True)
+            df_exit = fetch_and_analyze_data(symbol, STRATEGY_CONFIG['EXIT_TIMEFRAME'], STRATEGY_CONFIG, calculate_bb=True)
             if df_exit is None or len(df_exit) < 4: continue
             
             current_price = exchange.fetch_ticker(symbol)['last']
@@ -479,12 +481,12 @@ def manage_open_positions():
                 middle_band = last_candle['bb1_middle']
                 target = middle_band * (1 - STRATEGY_CONFIG['TP_BUFFER']) if action == 'long' else middle_band * (1 + STRATEGY_CONFIG['TP_BUFFER'])
                 
-                print(f"-> {coin}({action}) [{exit_tf}] | 현재가: ${current_price:,.4f} | 1차 익절 목표: ${target:,.4f}")
+                print(f"-> {coin}({action}) | 현재가: ${current_price:,.4f} | 1차 익절 목표: ${target:,.4f}")
 
                 if (action == 'long' and current_price >= target) or \
                    (action == 'short' and current_price <= target):
                     
-                    reason = f"1차 익절 ({exit_tf} BB 중앙선 근접)"
+                    reason = "1차 익절 (BB 중앙선 근접)"
                     print(f"   🚨 {reason} 실행 - {coin} @ ${current_price:,.4f}")
                     
                     if state.get('sl_order_id'):
@@ -525,20 +527,20 @@ def manage_open_positions():
                     continue
             else:
                 current_sl_price = trade['current_sl_price']
-                print(f"-> {coin}({action}) [{exit_tf}] | 현재가: ${current_price:,.4f} | 트레일링 스탑 관리 중... | 현재 SL: ${current_sl_price:,.4f}")
+                print(f"-> {coin}({action}) | 현재가: ${current_price:,.4f} | 트레일링 스탑 관리 중... | 현재 SL: ${current_sl_price:,.4f}")
 
                 new_sl_candidate = df_exit.iloc[-4:-1]['low'].min() if action == 'long' else df_exit.iloc[-4:-1]['high'].max()
                 
-                # 트레일링 스탑 역전 방지 (현재가보다 불리하지 않게)
+                # 트레일링 스탑 역전 방지
                 if action == 'long':
-                    new_sl_candidate = max(new_sl_candidate, current_price * 0.98)  # 현재가의 98% 이하로는 안 내려가게
+                    new_sl_candidate = max(new_sl_candidate, current_price * 0.98)
                     should_update = new_sl_candidate > current_sl_price
                 else:
-                    new_sl_candidate = min(new_sl_candidate, current_price * 1.02)  # 현재가의 102% 이상으로는 안 올라가게
+                    new_sl_candidate = min(new_sl_candidate, current_price * 1.02)
                     should_update = new_sl_candidate < current_sl_price
                 
                 if should_update:
-                    print(f"   📈 트레일링 스탑 조정 ({exit_tf} 기준): {coin} ${current_sl_price:,.4f} -> ${new_sl_candidate:,.4f}")
+                    print(f"   📈 트레일링 스탑 조정: {coin} ${current_sl_price:,.4f} -> ${new_sl_candidate:,.4f}")
                     try: 
                         if state.get('sl_order_id'):
                             exchange.cancel_order(state.get('sl_order_id'), symbol)
@@ -556,17 +558,10 @@ def manage_open_positions():
 # ===== 메인 루프 =====
 def main():
     global fixed_investment_per_trade, position_states
-    print(f"\n=== Dual BB Strategy Bot (v8.6 - Critical Fixes Applied) Started ===")
+    print(f"\n=== Dual BB Strategy Bot (v9.0 - Single Track Focus) Started ===")
+    print(f"전략: Track 1 (1시간봉) 전용")
+    print(f"최대 손실률: {STRATEGY_CONFIG['MAX_LOSS_PERCENTAGE']*100}%")
     setup_database()
-
-    tracks = {
-        '1h': {'confirmation_tf': '15m', 'name': 'Track 1 (1h)'},
-        '15m': {'confirmation_tf': '5m', 'name': 'Track 2 (15m)'}
-    }
-
-    # 참고: 이 봇은 분당 많은 API 요청을 발생시킬 수 있습니다.
-    # 바이낸스 Rate Limit: 1200 requests/minute (weight 기준)
-    # 필요시 time.sleep() 조정 권장
 
     while True:
         try:
@@ -583,10 +578,9 @@ def main():
                 coin_sym = trade['coin_symbol']
                 if coin_sym not in api_symbols:
                     print(f"   - ⚠️ 포지션 불일치 감지: {coin_sym} DB에 있지만 API에 없음 (손절 체결 또는 외부 청산 간주).")
-                    # 실제 청산된 경우이므로 평균 청산가 추정 (정확한 청산가는 알 수 없음)
                     close_trade_in_db(trade['id'], trade.get('current_sl_price', trade['entry_price']), 0, "포지션 청산됨 (손절 또는 외부 요인)")
                 else:
-                    # 방향 불일치 체크 (같은 코인에 반대 방향 포지션이 생긴 경우)
+                    # 방향 불일치 체크
                     api_action = api_positions_dict[coin_sym]['action']
                     if trade['action'] != api_action:
                         print(f"   - ⚠️ 방향 불일치: {coin_sym} DB({trade['action']}) vs API({api_action}). DB 기록 종료")
@@ -599,7 +593,7 @@ def main():
 
             manage_open_positions()
 
-            # 투자금 재설정 로직 (즉시 적용)
+            # 투자금 재설정
             if not api_positions and fixed_investment_per_trade != 0:
                 print("   - 모든 포지션이 청산되었습니다. 투자금을 즉시 재설정합니다.")
                 fixed_investment_per_trade = 0
@@ -615,9 +609,8 @@ def main():
             confirmed_coins = []
             for coin, data in list(pending_confirmation.items()):
                 if now >= data['confirmation_timestamp']:
-                    track_info = data['track']
-                    confirmation_tf = track_info['confirmation_tf']
-                    log_prefix = f"-> [{track_info['name']}] {coin} ({data['direction']})"
+                    confirmation_tf = STRATEGY_CONFIG['CONFIRMATION_TIMEFRAME']
+                    log_prefix = f"-> [Track 1] {coin} ({data['direction']})"
                     symbol = f"{coin}/USDT"
 
                     df_confirm = fetch_and_analyze_data(symbol, confirmation_tf, STRATEGY_CONFIG, calculate_macd=True)
@@ -629,7 +622,6 @@ def main():
                     confirm_tf_minutes = int(confirmation_tf.replace('m', ''))
                     expected_timestamp = int(expected_candle_time.timestamp() * 1000)
                     
-                    # 최신 캔들이 예상 시간과 일치하는지 확인
                     latest_candle_time = df_confirm.iloc[-1]['timestamp']
                     time_diff_minutes = abs(latest_candle_time - expected_timestamp) / 1000 / 60
                     
@@ -638,7 +630,7 @@ def main():
                         confirmed_coins.append(coin)
                         continue
                     
-                    last_candle = df_confirm.iloc[-2]  # 완성된 캔들 확인
+                    last_candle = df_confirm.iloc[-2]
                     is_confirmed = (data['direction'] == 'long' and last_candle['close'] > last_candle['open']) or \
                                    (data['direction'] == 'short' and last_candle['close'] < last_candle['open'])
                     
@@ -668,7 +660,7 @@ def main():
             for coin in confirmed_coins:
                 if coin in pending_confirmation: del pending_confirmation[coin]
             
-            # --- 투자금 설정 (개선: 즉시 설정) ---
+            # --- 투자금 설정 ---
             if fixed_investment_per_trade == 0:
                 try:
                     balance = exchange.fetch_balance()['USDT']
@@ -684,75 +676,66 @@ def main():
                     print(f"잔고 조회 오류: {e}")
                     time.sleep(60); continue
             
-            # --- 신규 진입 탐색 (투트랙) ---
+            # --- 신규 진입 탐색 (Track 1만 사용) ---
             open_pos_count = len(get_all_open_trades_from_db())
             occupied_slots = open_pos_count + len(pending_confirmation)
 
             if occupied_slots < MAX_CONCURRENT_POSITIONS:
-                print(f"\n--- 신규 진입 탐색 (투트랙 시스템) ---")
+                print(f"\n--- 신규 진입 탐색 (Track 1: 1시간봉 전략) ---")
                 current_open_symbols = {t['coin_symbol'] for t in get_all_open_trades_from_db()}
-                # 동일 코인 양방향 포지션 방지를 위해 방향도 추적
                 current_positions_with_direction = {(t['coin_symbol'], t['action']) for t in get_all_open_trades_from_db()}
 
                 for coin, config in coins_to_scan.items():
                     if len(get_all_open_trades_from_db()) + len(pending_confirmation) >= MAX_CONCURRENT_POSITIONS: break
                     if coin in pending_confirmation: continue
                     
-                    for signal_tf, track_info in tracks.items():
-                        try:
-                            df_signal = fetch_and_analyze_data(config['symbol'], signal_tf, STRATEGY_CONFIG, calculate_bb=True, calculate_rsi=True)
-                            if df_signal is None or len(df_signal) < 2: continue
+                    try:
+                        signal_tf = STRATEGY_CONFIG['SIGNAL_TIMEFRAME']
+                        df_signal = fetch_and_analyze_data(config['symbol'], signal_tf, STRATEGY_CONFIG, calculate_bb=True, calculate_rsi=True)
+                        if df_signal is None or len(df_signal) < 2: continue
+                        
+                        signal, reason = check_for_initial_signal(df_signal, STRATEGY_CONFIG)
+                        print(f"-> [{signal_tf}] {coin} 스캔 중... ({reason})")
+
+                        if signal:
+                            # 동일 코인 중복 포지션 방지
+                            if (coin, signal['direction']) in current_positions_with_direction:
+                                print(f"     ㄴ 이미 {signal['direction']} 포지션 보유 중. 건너뜀")
+                                continue
                             
-                            # 실시간 가격 덮어쓰기 제거 - 마감된 캔들로만 신호 체크
-                            signal, reason = check_for_initial_signal(df_signal, STRATEGY_CONFIG)
-                            print(f"-> [{signal_tf}] {coin} 스캔 중... ({reason})")
+                            opposite_direction = 'short' if signal['direction'] == 'long' else 'long'
+                            if (coin, opposite_direction) in current_positions_with_direction:
+                                print(f"     ㄴ 반대 방향({opposite_direction}) 포지션 보유 중. 헷징 방지를 위해 건너뜀")
+                                continue
+                            
+                            confirm_tf_str = STRATEGY_CONFIG['CONFIRMATION_TIMEFRAME']
+                            confirm_mins = int(confirm_tf_str.replace('m', ''))
+                            
+                            # 확증 타임스탬프 계산
+                            current_minute = now.minute
+                            intervals_passed = current_minute // confirm_mins
+                            next_interval_start = (intervals_passed + 1) * confirm_mins
+                            
+                            if next_interval_start >= 60:
+                                confirm_time = now.replace(minute=0, second=5, microsecond=0) + timedelta(hours=1)
+                            else:
+                                confirm_time = now.replace(minute=next_interval_start, second=5, microsecond=0)
+                            
+                            confirm_time = confirm_time + timedelta(minutes=confirm_mins)
 
-                            if signal:
-                                # 동일 코인에 반대 방향 포지션이 있는지 확인
-                                if (coin, signal['direction']) in current_positions_with_direction:
-                                    print(f"     ㄴ 이미 {signal['direction']} 포지션 보유 중. 건너뜀")
-                                    continue
-                                
-                                # 같은 코인 반대 방향 확인
-                                opposite_direction = 'short' if signal['direction'] == 'long' else 'long'
-                                if (coin, opposite_direction) in current_positions_with_direction:
-                                    print(f"     ㄴ 반대 방향({opposite_direction}) 포지션 보유 중. 헷징 방지를 위해 건너뜀")
-                                    continue
-                                
-                                confirm_tf_str = track_info['confirmation_tf']
-                                confirm_mins = int(confirm_tf_str.replace('m', ''))
-                                
-                                # 확증 타임스탬프 계산 개선
-                                current_minute = now.minute
-                                current_second = now.second
-                                
-                                # 현재 confirm_tf 간격의 시작 시간 계산
-                                intervals_passed = current_minute // confirm_mins
-                                next_interval_start = (intervals_passed + 1) * confirm_mins
-                                
-                                if next_interval_start >= 60:
-                                    confirm_time = now.replace(minute=0, second=5, microsecond=0) + timedelta(hours=1)
-                                else:
-                                    confirm_time = now.replace(minute=next_interval_start, second=5, microsecond=0)
-                                
-                                # 다음 캔들 확인을 위해 한 간격 더 추가
-                                confirm_time = confirm_time + timedelta(minutes=confirm_mins)
+                            signal['confirmation_timestamp'] = confirm_time
+                            signal['investment_amount'] = fixed_investment_per_trade
+                            pending_confirmation[coin] = signal
+                            print(f"     ㄴ [Track 1] 확증 대기열 추가 (예정 시각: {confirm_time.strftime('%H:%M:%S')})")
 
-                                signal['confirmation_timestamp'] = confirm_time
-                                signal['investment_amount'] = fixed_investment_per_trade
-                                signal['track'] = track_info
-                                pending_confirmation[coin] = signal
-                                print(f"     ㄴ [{track_info['name']}] 확증 대기열 추가 (예정 시각: {confirm_time.strftime('%H:%M:%S')})")
-                                
-                                break 
-
-                        except Exception as e:
-                            print(f"   - 스캔 중 오류 발생 ({coin}, {signal_tf}): {e}")
+                    except Exception as e:
+                        print(f"   - 스캔 중 오류 발생 ({coin}): {e}")
 
             print(f"\n--- 사이클 완료. 60초 후 다시 시작합니다. ---")
             time.sleep(60)
         except Exception as e:
-            print(f"메인 루프 심각한 오류: {e}"); time.sleep(60)
+            print(f"메인 루프 심각한 오류: {e}")
+            time.sleep(60)
 
 if __name__ == "__main__":
     main()
