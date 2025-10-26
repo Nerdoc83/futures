@@ -990,30 +990,27 @@ def get_learned_patterns(min_occurrences: int = 3) -> List[Dict]:
     return patterns
 
 def get_dynamic_confidence_threshold() -> int:
-    """🆕 적응형 Confidence 기준 (학습 단계에 따라 자동 조정)"""
+    """🆕 적응형 Confidence 기준 (거래 횟수에 따라 자동 조정)"""
     
     strategies = get_strategy_performance()
     
-    # 초기: 데이터 없음
+    # 초기: 적극 학습
     if not strategies:
-        print("   📊 [학습 모드] Confidence 65 (초기 데이터 수집 단계)")
-        return 65
+        print("   📊 [적극 학습] Confidence 60 (초기)")
+        return 60
     
-    # 가장 데이터 적은 전략 기준 (병목 전략)
+    # 가장 데이터 적은 전략 기준
     min_trades = min([s['total_trades'] for s in strategies])
     
-    if min_trades < 10:
-        print(f"   📊 [학습 모드] Confidence 65 (최소 거래: {min_trades}/10)")
-        return 65
-    elif min_trades < 30:
-        print(f"   📊 [균형 모드] Confidence 70 (최소 거래: {min_trades}/30)")
-        return 70
+    if min_trades < 20:
+        print(f"   📊 [학습] Confidence 60 ({min_trades}/20)")
+        return 60
     elif min_trades < 50:
-        print(f"   📊 [안정화 모드] Confidence 75 (최소 거래: {min_trades}/50)")
-        return 75
+        print(f"   📊 [성장] Confidence 70 ({min_trades}/50)")
+        return 70
     else:
-        print(f"   📊 [최적화 모드] Confidence 80 (최소 거래: {min_trades}+)")
-        return 80
+        print(f"   📊 [안정] Confidence 75 ({min_trades}+)")
+        return 75  # 최대 75
 
 
 def log_risk_adjustment(adjustment_type: str, previous_value: float, new_value: float, reason: str, consecutive_losses: int = 0, current_drawdown: float = 0):
@@ -1725,7 +1722,10 @@ def ai_comprehensive_analysis(coin_data: Dict, market_data: Dict, performance_hi
 □ 지지/저항선이 명확한가?
 □ 거래량이 충분한가? (MFI > 40, OBV 상승)
 
-**위 체크리스트 중 6개 미만 충족 → 거래 금지**
+**충족 기준 (현재 Confidence: {min_confidence}%)**
+- Confidence 60~65 (학습): 4개 이상 충족 → 진입 고려
+- Confidence 70~75 (성장): 5개 이상 충족 → 진입 고려
+- 위 조건 + Risk/Reward ≥ 1:2 필수
 
 【분석 대상】
 코인: {coin_data['coin']}
@@ -1856,15 +1856,14 @@ SHORT 포지션은 **SCALPING 또는 DAY_TRADING만** 허용:
    - 단기/중기/장기 추세가 모두 일치할 때 진입
 
 4. **Confidence 기준 적용 (현재 기준: {min_confidence})**
-   - **{min_confidence} 이상: 진입 고려 (Risk/Reward 1:3 이상 확보 시)**
+   - **{min_confidence} 이상: 진입 고려 (체크리스트 4개 이상 + R/R ≥ 1:2)**
    - {min_confidence-10}~{min_confidence-1}: 보류 (더 좋은 기회 대기)
    - {min_confidence-10} 미만: 절대 진입 금지
    
-   ℹ️ **적응형 Confidence 시스템 안내:**
-   - 학습 모드 (초기): Confidence 65 → 빠른 데이터 수집
-   - 균형 모드 (중기): Confidence 70 → 학습 + 수익 균형
-   - 안정화 모드: Confidence 75 → 안정적 운영
-   - 최적화 모드 (완성): Confidence 80 → 높은 승률
+   ℹ️ **학습 모드에서는 적극적으로 진입하세요:**
+   - 초기 (60%): 데이터 수집이 목적 → 합리적 신호면 진입
+   - 성장 (70%): 학습하며 수익도 추구
+   - 안정 (75%): 엄격한 선별
 
 5. **변동성 리스크 관리**
    - 고변동성(ATR/가격 > 5%) → 레버리지 ↓, 투자금액 ↓
@@ -2833,16 +2832,20 @@ def main():
                             performance_history = get_recent_performance(7)
                             print(f"   🤖 AI 분석 중...")
                             decision = ai_comprehensive_analysis(coin_data, market_data, performance_history)
-                            print(f"   신뢰도: {decision.get('confidence', 0)}%")
+                            
+                            # 동적 Confidence 기준
+                            min_confidence = get_dynamic_confidence_threshold()
+                            
+                            print(f"   신뢰도: {decision.get('confidence', 0)}% (기준: {min_confidence}%)")
                             print(f"   판단: {decision.get('reasoning', 'N/A')}")
                             
-                            if decision.get('trade') and decision.get('confidence', 0) >= 80:
+                            if decision.get('trade') and decision.get('confidence', 0) >= min_confidence:
                                 print(f"\n   ✅ AI 승인")
                                 if execute_live_trade(coin_data, decision, available_balance):
                                     open_positions_count += 1
                                     available_balance = get_available_balance()
                             else:
-                                print(f"   ⏭️ 보류")
+                                print(f"   ⏭️ 보류 (Confidence: {decision.get('confidence', 0)}% < {min_confidence}%)")
                             
                             time.sleep(2)
                         except Exception as e:
