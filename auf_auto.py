@@ -990,27 +990,8 @@ def get_learned_patterns(min_occurrences: int = 3) -> List[Dict]:
     return patterns
 
 def get_dynamic_confidence_threshold() -> int:
-    """🆕 적응형 Confidence 기준 (거래 횟수에 따라 자동 조정)"""
-    
-    strategies = get_strategy_performance()
-    
-    # 초기: 적극 학습
-    if not strategies:
-        print("   📊 [적극 학습] Confidence 60 (초기)")
-        return 60
-    
-    # 가장 데이터 적은 전략 기준
-    min_trades = min([s['total_trades'] for s in strategies])
-    
-    if min_trades < 20:
-        print(f"   📊 [학습] Confidence 60 ({min_trades}/20)")
-        return 60
-    elif min_trades < 50:
-        print(f"   📊 [성장] Confidence 70 ({min_trades}/50)")
-        return 70
-    else:
-        print(f"   📊 [안정] Confidence 75 ({min_trades}+)")
-        return 75  # 최대 75
+    """Confidence 기준 - 70% 고정"""
+    return 70
 
 
 def log_risk_adjustment(adjustment_type: str, previous_value: float, new_value: float, reason: str, consecutive_losses: int = 0, current_drawdown: float = 0):
@@ -1670,17 +1651,6 @@ def ai_comprehensive_analysis(coin_data: Dict, market_data: Dict, performance_hi
         risk_adjustment_summary += f"연속 손실: {consecutive_losses}회\n"
         risk_adjustment_summary += f"현재 드로다운: ${current_drawdown:.2f}\n"
         
-        if consecutive_losses >= 3:
-            risk_adjustment_summary += "⚠️ **연속 손실 중 - 포지션 크기를 50%로 축소하거나 거래 중단 권장**\n"
-        elif consecutive_losses >= 2:
-            risk_adjustment_summary += "⚠️ 연속 손실 2회 - 더 신중한 진입 필요\n"
-        
-        if current_drawdown > 100:
-            risk_adjustment_summary += f"⚠️ **드로다운 ${current_drawdown:.2f} - 리스크 줄이세요**\n"
-        
-        # 🆕 적응형 Confidence 기준 조회
-        min_confidence = get_dynamic_confidence_threshold()
-        
         # 시장 데이터 요약 (상세 버전)
         market_summary = "【타임프레임별 상세 분석】\n"
         for tf, data in market_data.items():
@@ -1706,7 +1676,7 @@ def ai_comprehensive_analysis(coin_data: Dict, market_data: Dict, performance_hi
 ✅ 단순 수익률이 아닌 **위험 대비 수익 (Risk/Reward Ratio) 최대화**
 ✅ Risk/Reward < 1:2 (리스크 1%, 리워드 2% 미만) → 절대 진입 금지
 ✅ Risk/Reward ≥ 1:3 (리스크 1%, 리워드 3% 이상) → 우선 고려
-✅ 불확실성 높은 거래 회피 (Confidence < {min_confidence}% → 거부)
+✅ 불확실성 높은 거래 회피 (Confidence < 70% → 거부)
 ✅ 손실 -5% 초과 가능성이 보이면 즉시 거부
 ✅ Sharpe Ratio 개념: 변동성 대비 안정적 수익 추구
 ✅ 높은 레버리지 + 낮은 확신 = 절대 금지
@@ -1722,10 +1692,7 @@ def ai_comprehensive_analysis(coin_data: Dict, market_data: Dict, performance_hi
 □ 지지/저항선이 명확한가?
 □ 거래량이 충분한가? (MFI > 40, OBV 상승)
 
-**충족 기준 (현재 Confidence: {min_confidence}%)**
-- Confidence 60~65 (학습): 4개 이상 충족 → 진입 고려
-- Confidence 70~75 (성장): 5개 이상 충족 → 진입 고려
-- 위 조건 + Risk/Reward ≥ 1:2 필수
+**5개 이상 충족 + Risk/Reward ≥ 1:2 → 진입 고려**
 
 【분석 대상】
 코인: {coin_data['coin']}
@@ -1855,15 +1822,9 @@ SHORT 포지션은 **SCALPING 또는 DAY_TRADING만** 허용:
    - 3개 미만 타임프레임 일치 → 진입 회피
    - 단기/중기/장기 추세가 모두 일치할 때 진입
 
-4. **Confidence 기준 적용 (현재 기준: {min_confidence})**
-   - **{min_confidence} 이상: 진입 고려 (체크리스트 4개 이상 + R/R ≥ 1:2)**
-   - {min_confidence-10}~{min_confidence-1}: 보류 (더 좋은 기회 대기)
-   - {min_confidence-10} 미만: 절대 진입 금지
-   
-   ℹ️ **학습 모드에서는 적극적으로 진입하세요:**
-   - 초기 (60%): 데이터 수집이 목적 → 합리적 신호면 진입
-   - 성장 (70%): 학습하며 수익도 추구
-   - 안정 (75%): 엄격한 선별
+4. **Confidence 기준: 70% 이상만 진입**
+   - 70 이상: 진입 고려
+   - 70 미만: 거래 금지
 
 5. **변동성 리스크 관리**
    - 고변동성(ATR/가격 > 5%) → 레버리지 ↓, 투자금액 ↓
@@ -1878,7 +1839,7 @@ SHORT 포지션은 **SCALPING 또는 DAY_TRADING만** 허용:
 
 8. **레버리지 보수적 운용**
    - 높은 확신(90+) + 강한 추세 → 높은 레버리지 가능
-   - 중간 확신({min_confidence}) → 중간 레버리지 (5~7x)
+   - 중간 확신(70%) → 중간 레버리지 (5~7x)
    - 낮은 확신 → 거래 금지
 
 **핵심: 불확실한 거래는 절대 하지 않는다. 확실한 Risk/Reward만 공략한다. LONG과 SHORT는 동등한 기회다.**
@@ -1904,13 +1865,13 @@ SHORT 포지션은 **SCALPING 또는 DAY_TRADING만** 허용:
   "timeframe_analysis": "타임프레임 종합 (100자)",
   "indicator_confluence": "일치하는 지표들 (예: RSI+MACD+Stochastic 모두 과매수)",
   "holding_time_estimate": "예상 보유 시간 (예: 30분, 4시간, 3일)",
-  "checklist_passed": 6~8 (체크리스트 통과 개수)
+  "checklist_passed": 5~8 (체크리스트 통과 개수)
 }}
 
 중요: 
 - **risk_reward_ratio가 1:2 미만이면 trade: false 필수**
 - **risk_adjusted_score < 80이면 trade: false 필수**
-- **checklist_passed < 6이면 trade: false 필수**
+- **checklist_passed < 5이면 trade: false 필수**
 - trading_style에 따라 sl_percentage와 tp_percentage를 적절히 설정
 - 스캘핑: SL 0.5~1.5%, TP 1~3%
 - 데이트레이딩: SL 1.5~3%, TP 3~8%  
@@ -1950,8 +1911,8 @@ SHORT 포지션은 **SCALPING 또는 DAY_TRADING만** 허용:
                 
                 # 체크리스트 통과 개수 < 6이면 거부
                 checklist_passed = decision.get('checklist_passed', 0)
-                if checklist_passed < 6:
-                    print(f"   ❌ 체크리스트 미달: {checklist_passed}/8 (최소 6개 필요)")
+                if checklist_passed < 5:
+                    print(f"   ❌ 체크리스트 미달: {checklist_passed}/8 (최소 5개 필요)")
                     return {"trade": False, "reasoning": f"안전 체크리스트 미달 ({checklist_passed}/8)", "confidence": 0}
                 
                 required_keys = ['direction', 'leverage', 'investment_percentage', 'sl_percentage', 'tp_percentage', 'confidence']
@@ -2833,19 +2794,18 @@ def main():
                             print(f"   🤖 AI 분석 중...")
                             decision = ai_comprehensive_analysis(coin_data, market_data, performance_history)
                             
-                            # 동적 Confidence 기준
-                            min_confidence = get_dynamic_confidence_threshold()
-                            
-                            print(f"   신뢰도: {decision.get('confidence', 0)}% (기준: {min_confidence}%)")
+                            print(f"   신뢰도: {decision.get('confidence', 0)}%")
                             print(f"   판단: {decision.get('reasoning', 'N/A')}")
                             
-                            if decision.get('trade') and decision.get('confidence', 0) >= min_confidence:
+                            # 70% 이상만 거래
+                            if decision.get('trade') and decision.get('confidence', 0) >= 70:
                                 print(f"\n   ✅ AI 승인")
                                 if execute_live_trade(coin_data, decision, available_balance):
                                     open_positions_count += 1
                                     available_balance = get_available_balance()
                             else:
-                                print(f"   ⏭️ 보류 (Confidence: {decision.get('confidence', 0)}% < {min_confidence}%)")
+                                conf = decision.get('confidence', 0)
+                                print(f"   ⏭️ 보류 (Confidence: {conf}%)")
                             
                             time.sleep(2)
                         except Exception as e:
