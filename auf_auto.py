@@ -2482,7 +2482,15 @@ def ai_performance_review():
     print(f"\n{'='*70}")
     print(f"📊 AI 성과 리뷰 (최근 7일) - Risk-Adjusted Analysis")
     print(f"{'='*70}")
-    print(f"   총 거래: {performance['total_trades']}회")
+    
+    # 현재 오픈 포지션도 확인
+    open_trades = get_all_open_trades()
+    open_count = len(open_trades)
+    
+    if open_count > 0:
+        print(f"   ℹ️ 현재 오픈 포지션: {open_count}개 (아래 통계에서 제외)")
+    
+    print(f"   총 거래: {performance['total_trades']}회 (청산 완료)")
     print(f"   승률: {performance['win_rate']:.1f}%")
     print(f"   총 손익: ${performance['total_pnl']:+,.2f}")
     print(f"   평균 수익: ${performance['avg_win']:+,.2f}")
@@ -2494,7 +2502,15 @@ def ai_performance_review():
     print(f"   📈 Risk-Adjusted Performance")
     print(f"{'─'*70}")
     
-    if performance['avg_loss'] != 0:
+    # 🔥 Risk-Adjusted Metrics
+    print(f"\n{'─'*70}")
+    print(f"   📈 Risk-Adjusted Performance")
+    print(f"{'─'*70}")
+    
+    if performance['total_trades'] < 3:
+        print(f"   📊 충분한 데이터 수집 중... (현재 {performance['total_trades']}회)")
+        print(f"   📈 3회 이상 거래 후 Risk/Reward 분석을 제공합니다")
+    elif performance['avg_loss'] != 0:
         avg_risk_reward = abs(performance['avg_win'] / performance['avg_loss'])
         print(f"   평균 Risk/Reward: 1:{avg_risk_reward:.2f}")
         
@@ -2505,6 +2521,8 @@ def ai_performance_review():
             print(f"   ✅ Risk/Reward 우수! 현재 전략 유지")
         else:
             print(f"   📊 Risk/Reward 양호 (개선 여지 있음)")
+    else:
+        print(f"   📊 Risk/Reward 분석 불가 (손실 거래 없음 또는 데이터 부족)")
     
     if performance['total_pnl'] != 0 and performance['total_trades'] > 5:
         # Sharpe Ratio 근사값 (간단 버전)
@@ -2520,21 +2538,33 @@ def ai_performance_review():
                 print(f"   ⚠️ 변동성이 너무 큼 (레버리지 ↓ or 진입 신중)")
             else:
                 print(f"   📊 안정적인 성과")
+    elif performance['total_trades'] <= 5:
+        print(f"   📊 Sharpe Ratio: 5회 이상 거래 후 분석 가능")
     
     # 💡 AI 피드백
     print(f"\n{'─'*70}")
     print(f"   💡 AI 피드백")
     print(f"{'─'*70}")
     
-    if performance['win_rate'] < 50:
-        print(f"   ⚠️ 승률 낮음: Confidence 80+ 거래만 진입하세요")
-    elif performance['win_rate'] > 70:
-        print(f"   ✅ 승률 우수: 현재 선별 기준 유지")
-    
-    if performance['total_pnl'] < 0:
-        print(f"   ⚠️ 손실 중: 리스크 낮추고 더 확실한 기회만 공략")
-    elif performance['total_pnl'] > 100:
-        print(f"   ✅ 수익 실현 중: 현재 전략 계속 유지")
+    # 거래 횟수가 적으면 통계적 의미 없음
+    if performance['total_trades'] < 3:
+        print(f"   📊 샘플 부족: 거래 {performance['total_trades']}회로는 성과 평가가 어렵습니다")
+        print(f"   📈 더 많은 거래 후 피드백을 제공하겠습니다")
+    else:
+        # 충분한 샘플이 있을 때만 피드백
+        if performance['win_rate'] < 40:
+            print(f"   ⚠️ 승률 낮음 ({performance['win_rate']:.1f}%): Confidence 85+ 거래만 진입하세요")
+        elif performance['win_rate'] > 70:
+            print(f"   ✅ 승률 우수 ({performance['win_rate']:.1f}%): 현재 선별 기준 유지")
+        elif performance['win_rate'] < 50:
+            print(f"   📊 승률 보통 ({performance['win_rate']:.1f}%): 신중한 진입 필요")
+        
+        if performance['total_pnl'] < -50:
+            print(f"   ⚠️ 손실 누적: 리스크 낮추고 더 확실한 기회만 공략")
+        elif performance['total_pnl'] > 100:
+            print(f"   ✅ 수익 실현 중: 현재 전략 계속 유지")
+        elif performance['total_pnl'] < 0:
+            print(f"   📊 소폭 손실: 전략 점검 후 계속 진행")
     
     print(f"{'='*70}")
 
