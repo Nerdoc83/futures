@@ -1044,25 +1044,77 @@ def save_ai_decision(decision_data: Dict):
     conn.close()
 
 def get_recent_performance(days: int = 7) -> Dict:
-    """최근 성과 조회"""
+    """최근 성과 조회 (강화된 디버깅 버전)"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     
+    # 🔍 디버깅: 전체 거래 현황 먼저 확인
+    c.execute("SELECT COUNT(*) FROM trades WHERE status = 'CLOSED'")
+    total_closed = c.fetchone()[0]
+    
+    print(f"   🔍 [디버그] 전체 청산 거래: {total_closed}개")
+    
+    if total_closed == 0:
+        conn.close()
+        return {
+            'total_trades': 0,
+            'winning_trades': 0,
+            'losing_trades': 0,
+            'win_rate': 0,
+            'total_pnl': 0,
+            'avg_win': 0,
+            'avg_loss': 0
+        }
+    
+    # 🔍 디버깅: 실제 PnL 값들 확인
+    c.execute("""
+        SELECT coin_symbol, pnl, binance_pnl, close_timestamp 
+        FROM trades 
+        WHERE status = 'CLOSED' 
+        ORDER BY close_timestamp DESC 
+        LIMIT 10
+    """)
+    
+    recent_trades = c.fetchall()
+    print(f"   🔍 [디버그] 최근 청산 거래:")
+    for trade in recent_trades:
+        coin, pnl, binance_pnl, close_time = trade
+        actual_pnl = binance_pnl if binance_pnl is not None and binance_pnl != 0 else pnl
+        print(f"   ├─ {coin}: PnL=${actual_pnl}, Binance=${binance_pnl}, DB=${pnl}, 시간={close_time}")
+    
+    # 🆕 개선된 쿼리: binance_pnl 우선, pnl을 fallback으로 사용
     c.execute('''
         SELECT 
             COUNT(*) as total_trades,
-            SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as winning_trades,
-            SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END) as losing_trades,
-            COALESCE(SUM(pnl), 0) as total_pnl,
-            COALESCE(AVG(CASE WHEN pnl > 0 THEN pnl END), 0) as avg_win,
-            COALESCE(AVG(CASE WHEN pnl < 0 THEN pnl END), 0) as avg_loss
+            SUM(CASE 
+                WHEN COALESCE(binance_pnl, pnl, 0) > 0 THEN 1 
+                ELSE 0 
+            END) as winning_trades,
+            SUM(CASE 
+                WHEN COALESCE(binance_pnl, pnl, 0) < 0 THEN 1 
+                ELSE 0 
+            END) as losing_trades,
+            COALESCE(SUM(COALESCE(binance_pnl, pnl, 0)), 0) as total_pnl,
+            COALESCE(AVG(CASE 
+                WHEN COALESCE(binance_pnl, pnl, 0) > 0 
+                THEN COALESCE(binance_pnl, pnl, 0) 
+            END), 0) as avg_win,
+            COALESCE(AVG(CASE 
+                WHEN COALESCE(binance_pnl, pnl, 0) < 0 
+                THEN COALESCE(binance_pnl, pnl, 0) 
+            END), 0) as avg_loss
         FROM trades
         WHERE status = 'CLOSED'
-        AND close_timestamp >= datetime('now', '-' || ? || ' days')
-    ''', (days,))
+        AND (
+            close_timestamp >= datetime('now', '-' || ? || ' days')
+            OR close_timestamp >= date('now', '-' || ? || ' days')
+        )
+    ''', (days, days))
     
     row = c.fetchone()
     conn.close()
+    
+    print(f"   🔍 [디버그] 쿼리 결과: {row}")
     
     if not row or row[0] == 0:
         return {
@@ -1075,15 +1127,19 @@ def get_recent_performance(days: int = 7) -> Dict:
             'avg_loss': 0
         }
     
-    return {
+    result = {
         'total_trades': row[0],
         'winning_trades': row[1],
         'losing_trades': row[2],
         'win_rate': (row[1] / row[0] * 100) if row[0] > 0 else 0,
-        'total_pnl': row[3],
-        'avg_win': row[4],
-        'avg_loss': abs(row[5]) if row[5] else 0  # 절댓값으로 표시
+        'total_pnl': float(row[3]) if row[3] else 0,
+        'avg_win': float(row[4]) if row[4] else 0,
+        'avg_loss': abs(float(row[5])) if row[5] else 0  # 절댓값으로 표시
     }
+    
+    print(f"   🔍 [디버그] 최종 결과: {result}")
+    
+    return result
 
 def get_consecutive_losses() -> int:
     """최근 연속 손실 횟수 조회"""
@@ -2480,6 +2536,39 @@ def manage_live_positions():
 
 def ai_performance_review():
     """AI 성과 리뷰 - Risk-Adjusted Returns 분석"""
+    
+    print(f"\n{'🔍'*10} 성과 리뷰 디버깅 {'🔍'*10}")
+    
+    # 🔍 DB 테이블 구조 확인
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        
+        # 테이블 존재 확인
+        c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='trades'")
+        if not c.fetchone():
+            print("   ❌ trades 테이블이 존재하지 않습니다!")
+            conn.close()
+            return
+        
+        # 컬럼 정보 확인
+        c.execute("PRAGMA table_info(trades)")
+        columns = c.fetchall()
+        print(f"   📊 trades 테이블 컬럼: {[col[1] for col in columns]}")
+        
+        # 전체 레코드 수 확인
+        c.execute("SELECT COUNT(*) FROM trades")
+        total_count = c.fetchone()[0]
+        print(f"   📊 전체 거래 레코드: {total_count}개")
+        
+        # 상태별 분포 확인
+        c.execute("SELECT status, COUNT(*) FROM trades GROUP BY status")
+        status_dist = c.fetchall()
+        print(f"   📊 상태별 분포: {dict(status_dist)}")
+        
+        conn.close()
+    except Exception as e:
+        print(f"   ❌ DB 디버깅 오류: {e}")
     
     performance = get_recent_performance(7)
     
