@@ -1081,7 +1081,7 @@ def get_recent_performance(days: int = 7) -> Dict:
         'win_rate': (row[1] / row[0] * 100) if row[0] > 0 else 0,
         'total_pnl': row[3],
         'avg_win': row[4],
-        'avg_loss': row[5]
+        'avg_loss': abs(row[5]) if row[5] else 0  # 절댓값으로 표시
     }
 
 def get_consecutive_losses() -> int:
@@ -1252,7 +1252,7 @@ def get_recent_performance(days: int = 7) -> Dict:
         'win_rate': (row[1] / row[0] * 100) if row[0] > 0 else 0,
         'total_pnl': row[3],
         'avg_win': row[4],
-        'avg_loss': row[5]
+        'avg_loss': abs(row[5]) if row[5] else 0  # 절댓값으로 표시
     }
 
 # ===== 시장 데이터 수집 =====
@@ -2486,7 +2486,7 @@ def ai_performance_review():
     print(f"   승률: {performance['win_rate']:.1f}%")
     print(f"   총 손익: ${performance['total_pnl']:+,.2f}")
     print(f"   평균 수익: ${performance['avg_win']:+,.2f}")
-    print(f"   평균 손실: ${performance['avg_loss']:+,.2f}")
+    print(f"   평균 손실: ${-performance['avg_loss']:+,.2f}")  # 음수로 표시하여 명확히
     print(f"   현재 잔고: ${current_balance:,.2f}")
     
     # 🔥 Risk-Adjusted Metrics
@@ -2584,7 +2584,7 @@ def display_dashboard():
         losing_trades = len(closed_trades) - winning_trades
         win_rate = (winning_trades / len(closed_trades) * 100) if closed_trades else 0
         avg_win = sum(t['pnl'] for t in closed_trades if t.get('pnl', 0) > 0) / winning_trades if winning_trades > 0 else 0
-        avg_loss = sum(t['pnl'] for t in closed_trades if t.get('pnl', 0) < 0) / losing_trades if losing_trades > 0 else 0
+        avg_loss = abs(sum(t['pnl'] for t in closed_trades if t.get('pnl', 0) < 0) / losing_trades) if losing_trades > 0 else 0
         
         print(f"\n{'─'*70}")
         print(f"   📊 거래 통계")
