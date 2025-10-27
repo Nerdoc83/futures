@@ -54,27 +54,12 @@ AI_MODEL_CONFIG = {
     "provider": "deepseek",  # 🔧 여기서 변경: "gemini" (무료) 또는 "deepseek" (유료, 정확)
     "models": {
         "gemini": "gemini-2.0-flash-exp",  # 무료, 빠름
-        "openai": "gpt-4o",
-        "qwen": "qwen-max",
-        "claude": "claude-3-5-sonnet-20241022",
         "deepseek": "deepseek-chat"  # DeepSeek V3 (최신, 추천)
     },
     "rate_limit": {
         "gemini": {
             "requests_per_minute": 15,
             "delay_between_requests": 4.5
-        },
-        "openai": {
-            "requests_per_minute": 60,
-            "delay_between_requests": 1.0
-        },
-        "qwen": {
-            "requests_per_minute": 60,
-            "delay_between_requests": 1.0
-        },
-        "claude": {
-            "requests_per_minute": 50,
-            "delay_between_requests": 1.2
         },
         "deepseek": {
             "requests_per_minute": 60,
@@ -97,23 +82,6 @@ def initialize_ai():
             genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
             print(f"✅ Gemini AI ({AI_MODEL_CONFIG['models']['gemini']}) 설정 완료")
             return True
-        elif provider == "openai":
-            import openai
-            openai.api_key = os.getenv("OPENAI_API_KEY")
-            ai_client = openai
-            print(f"✅ OpenAI ({AI_MODEL_CONFIG['models']['openai']}) 설정 완료")
-            return True
-        elif provider == "qwen":
-            import dashscope
-            dashscope.api_key = os.getenv("QWEN_API_KEY")
-            ai_client = dashscope
-            print(f"✅ Qwen AI ({AI_MODEL_CONFIG['models']['qwen']}) 설정 완료")
-            return True
-        elif provider == "claude":
-            import anthropic
-            ai_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-            print(f"✅ Claude AI ({AI_MODEL_CONFIG['models']['claude']}) 설정 완료")
-            return True
         elif provider == "deepseek":
             from openai import OpenAI
             ai_client = OpenAI(
@@ -130,7 +98,7 @@ def initialize_ai():
         return False
 
 if not initialize_ai():
-    print("\n사용 가능한 AI 제공자: gemini, openai, qwen, claude, deepseek")
+    print("\n사용 가능한 AI 제공자: gemini, deepseek")
     exit(1)
 
 # ===== 실거래 설정 =====
@@ -1504,44 +1472,6 @@ def call_ai_model(prompt: str, temperature: float = 0.7) -> str:
                 )
                 last_api_call_time = time.time()
                 return response.text
-            elif provider == "openai":
-                response = ai_client.chat.completions.create(
-                    model=model_name,
-                    messages=[
-                        {"role": "system", "content": "당신은 암호화폐 트레이딩 전문가 AI입니다."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=temperature,
-                    max_tokens=2000
-                )
-                last_api_call_time = time.time()
-                return response.choices[0].message.content
-            elif provider == "qwen":
-                from dashscope import Generation
-                response = Generation.call(
-                    model=model_name,
-                    messages=[
-                        {"role": "system", "content": "당신은 암호화폐 트레이딩 전문가 AI입니다."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    result_format='message',
-                    temperature=temperature
-                )
-                if response.status_code == 200:
-                    last_api_call_time = time.time()
-                    return response.output.choices[0].message.content
-                else:
-                    raise Exception(f"Qwen API 오류: {response.message}")
-            elif provider == "claude":
-                response = ai_client.messages.create(
-                    model=model_name,
-                    max_tokens=2000,
-                    temperature=temperature,
-                    system="당신은 암호화폐 트레이딩 전문가 AI입니다.",
-                    messages=[{"role": "user", "content": prompt}]
-                )
-                last_api_call_time = time.time()
-                return response.content[0].text
             elif provider == "deepseek":
                 response = ai_client.chat.completions.create(
                     model=model_name,
