@@ -262,13 +262,14 @@ def calculate_metrics(trades_df):
     
     # 미실현 손익 (오픈 포지션)
     if not open_trades.empty:
-        metrics['unrealized_pnl'] = open_trades['pnl'].sum()
+        unrealized_pnl = open_trades['pnl'].fillna(0).sum()
+        metrics['unrealized_pnl'] = float(unrealized_pnl) if unrealized_pnl is not None else 0
     
     # 실현 손익 (청산된 거래)
     if not closed_trades.empty:
         # 바이낸스 실제 PnL 우선 사용, 없으면 계산된 PnL 사용
-        actual_pnl = closed_trades['binance_pnl'].fillna(closed_trades['pnl'])
-        metrics['realized_pnl'] = actual_pnl.sum()
+        actual_pnl = closed_trades['binance_pnl'].fillna(closed_trades['pnl']).fillna(0)
+        metrics['realized_pnl'] = float(actual_pnl.sum()) if actual_pnl.sum() is not None else 0
         
         # 승률 계산
         wins = actual_pnl > 0
@@ -572,6 +573,10 @@ def main():
                 for idx, trade in recent_trades.iterrows():
                     with st.container():
                         profit_loss = trade.get('binance_pnl', trade.get('pnl', 0))
+                        # None 값 처리
+                        if profit_loss is None:
+                            profit_loss = 0
+                        profit_loss = float(profit_loss) if profit_loss != 0 else 0
                         color = "profit" if profit_loss > 0 else "loss"
                         
                         st.markdown(f"""
@@ -592,7 +597,11 @@ def main():
                 # 코인별 성과
                 st.subheader("🪙 코인별 성과")
                 if not trades_df.empty:
-                    coin_performance = trades_df.groupby('coin_symbol').agg({
+                    # pnl 컬럼에서 None 값 처리
+                    trades_clean = trades_df.copy()
+                    trades_clean['pnl'] = trades_clean['pnl'].fillna(0)
+                    
+                    coin_performance = trades_clean.groupby('coin_symbol').agg({
                         'pnl': 'sum',
                         'action': 'count'
                     }).round(2)
@@ -627,10 +636,17 @@ def main():
                     
                     with col3:
                         pnl = pos.get('pnl', 0)
+                        # None 값 처리
+                        if pnl is None:
+                            pnl = 0
+                        pnl = float(pnl) if pnl != 0 else 0
                         pnl_color = "normal" if pnl >= 0 else "inverse"
                         st.metric("미실현 손익", f"${pnl:,.2f}", delta_color=pnl_color)
                         
                         investment = pos.get('investment_amount', 0)
+                        if investment is None:
+                            investment = 0
+                        investment = float(investment) if investment != 0 else 0
                         if investment > 0:
                             roi = (pnl / investment * 100)
                             st.metric("수익률", f"{roi:,.2f}%")
@@ -648,7 +664,7 @@ def main():
             st.info("청산된 거래가 없어 성과 분석을 표시할 수 없습니다.")
         else:
             closed_df = trades_df[trades_df['status'] == 'CLOSED'].copy()
-            closed_df['actual_pnl'] = closed_df['binance_pnl'].fillna(closed_df['pnl'])
+            closed_df['actual_pnl'] = closed_df['binance_pnl'].fillna(closed_df['pnl']).fillna(0)
             
             col1, col2 = st.columns(2)
             
@@ -726,7 +742,9 @@ def main():
                 st.metric("Expectancy", f"${expectancy:.2f}")
             
             with col4:
-                total_invested = closed_df['investment_amount'].sum()
+                # investment_amount 컬럼에서 None 값 처리
+                investment_amounts = closed_df['investment_amount'].fillna(0)
+                total_invested = float(investment_amounts.sum()) if investment_amounts.sum() is not None else 0
                 roi = (metrics['realized_pnl'] / total_invested * 100) if total_invested > 0 else 0
                 st.metric("ROI", f"{roi:.2f}%")
                 st.metric("총 투자금", f"${total_invested:,.2f}")
