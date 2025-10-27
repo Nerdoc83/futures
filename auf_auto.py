@@ -109,9 +109,10 @@ LIVE_TRADING_CONFIG = {
     "PERFORMANCE_REVIEW_INTERVAL": 600,  # AI 성과 리뷰 (10분)
     "POSITION_CHECK_INTERVAL": 120,  # 포지션 관리 체크 간격 (2분)
     
-    # 🔧 자금 관리 설정
-    "MAX_POSITION_SIZE_PCT": 20,  # 가용 자금의 최대 20% (5개 포지션이므로)
+    # 🔧 자금 관리 설정 (동적 균등 분할)
+    "MAX_POSITION_SIZE_PCT": 20,  # 안전장치: 가용 자금의 최대 20%
     "MIN_POSITION_SIZE_PCT": 3,   # 최소 3% (너무 작은 포지션 방지)
+    "DYNAMIC_EQUAL_SPLIT": True,  # 동적 균등 분할 활성화
     "VOLATILITY_BASED_SIZING": True,  # 변동성 기반 포지션 크기 조절
     "HIGH_VOLATILITY_THRESHOLD": 5.0,  # 5% 이상이면 고변동성
     "LOW_VOLATILITY_MULTIPLIER": 1.5,  # 저변동성 = 1.5배 투자
@@ -1997,14 +1998,28 @@ JSON 형식:
 # ===== 포지션 사이징 =====
 
 def calculate_position_size(available_balance: float, ai_percentage: float, volatility: float, open_positions: int, trading_style: str = 'DAY_TRADING') -> float:
-    """🆕 Kelly Criterion 기반 스마트 포지션 사이징"""
+    """🆕 동적 균등 분할 기반 스마트 포지션 사이징"""
     config = LIVE_TRADING_CONFIG
+    max_positions = config['MAX_CONCURRENT_POSITIONS']
     
-    # 🆕 1. Kelly Criterion 기반 최적 비율 계산
+    print(f"   💰 가용 잔고: ${available_balance:,.2f}")
+    print(f"   📊 현재 포지션: {open_positions}/{max_positions}")
+    
+    # 🆕 핵심: 동적 균등 분할 방식
+    remaining_positions = max_positions - open_positions
+    if remaining_positions <= 0:
+        print(f"   ❌ 포지션 풀 - 더 이상 진입 불가")
+        return 0
+    
+    # 가용 잔고를 남은 포지션 수로 균등 분할
+    equal_split_amount = available_balance / remaining_positions
+    print(f"   📊 균등 분할: ${available_balance:,.2f} ÷ {remaining_positions} = ${equal_split_amount:,.2f}")
+    
+    # 🆕 1. Kelly Criterion 기반 조정 (선택적)
     strategy_perf = get_strategy_performance(trading_style)
     
     if strategy_perf and strategy_perf['total_trades'] >= 5:
-        # 충분한 데이터가 있으면 Kelly Criterion 사용
+        # 충분한 데이터가 있으면 Kelly Criterion으로 조정
         win_rate = strategy_perf['win_rate']
         avg_win = abs(strategy_perf['avg_win'])
         avg_loss = abs(strategy_perf['avg_loss'])
@@ -2013,15 +2028,18 @@ def calculate_position_size(available_balance: float, ai_percentage: float, vola
         
         print(f"   📊 Kelly Criterion: {kelly_pct:.1f}% (승률:{win_rate:.1f}%, R/R:{avg_win/avg_loss if avg_loss > 0 else 0:.2f})")
         
-        # AI 제안과 Kelly 중 보수적인 값 선택
-        base_percentage = min(ai_percentage, kelly_pct)
-        print(f"   💡 AI:{ai_percentage:.1f}% vs Kelly:{kelly_pct:.1f}% → 선택:{base_percentage:.1f}%")
+        # Kelly가 50% 이하면 보수적으로 조정
+        if kelly_pct < 50:
+            kelly_multiplier = kelly_pct / 100  # 0.3 = 30%
+            equal_split_amount *= kelly_multiplier
+            print(f"   💡 Kelly 조정: {kelly_multiplier:.2f}x → ${equal_split_amount:,.2f}")
     else:
-        # 데이터 부족 시 AI 제안 사용
-        base_percentage = ai_percentage
-        print(f"   💡 데이터 부족 → AI 제안 {base_percentage:.1f}% 사용")
+        # 데이터 부족 시 AI 신뢰도로 조정
+        confidence_multiplier = ai_percentage / 100
+        equal_split_amount *= confidence_multiplier
+        print(f"   💡 신뢰도 조정: {ai_percentage:.1f}% → ${equal_split_amount:,.2f}")
     
-    base_investment = available_balance * (base_percentage / 100)
+    base_investment = equal_split_amount
     
     # 🆕 2. 연속 손실 페널티
     consecutive_losses = get_consecutive_losses()
@@ -2033,8 +2051,8 @@ def calculate_position_size(available_balance: float, ai_percentage: float, vola
         # 리스크 조정 로그
         log_risk_adjustment(
             adjustment_type='POSITION_SIZE',
-            previous_value=base_percentage,
-            new_value=base_percentage * penalty,
+            previous_value=equal_split_amount,
+            new_value=base_investment,
             reason=f"연속 손실 {consecutive_losses}회",
             consecutive_losses=consecutive_losses,
             current_drawdown=get_current_drawdown()
@@ -2055,7 +2073,7 @@ def calculate_position_size(available_balance: float, ai_percentage: float, vola
         base_investment *= penalty
         print(f"   ⚠️ 드로다운 ${current_drawdown:.2f} → {penalty}x 투자")
     
-    # 4. 최대/최소 제한 적용
+    # 4. 최대/최소 제한 적용 (안전장치)
     max_investment = available_balance * (config['MAX_POSITION_SIZE_PCT'] / 100)
     min_investment = available_balance * (config['MIN_POSITION_SIZE_PCT'] / 100)
     
@@ -2075,20 +2093,12 @@ def calculate_position_size(available_balance: float, ai_percentage: float, vola
             investment *= multiplier
             print(f"   📈 저변동성 ({volatility:.1f}%) → {multiplier}x 투자")
     
-    # 6. 포지션 수에 따른 조정 (포지션 많을수록 보수적으로)
-    max_positions = config['MAX_CONCURRENT_POSITIONS']
-    if open_positions >= max_positions * 0.8:  # 80% 이상 차면
-        investment *= 0.7  # 30% 감소
-        print(f"   ⚠️ 포지션 많음 ({open_positions}/{max_positions}) → 0.7x 투자")
-    
-    # 7. 최종 제한 재확인
-    investment = min(investment, max_investment)
-    investment = max(investment, min_investment)
-    
-    # 8. 가용 잔고 초과 방지
+    # 6. 가용 잔고 초과 방지
     if investment > available_balance * 0.95:  # 95% 이상 사용 방지
         investment = available_balance * 0.95
         print(f"   ⚠️ 가용 잔고 부족 → ${investment:.2f}로 조정")
+    
+    print(f"   ✅ 최종 투자금: ${investment:,.2f}")
     
     return investment
 
@@ -2641,7 +2651,7 @@ def main():
     print(f"  ✅ AI: {provider.upper()} ({model_name})")
     print(f"  ✅ 마진 모드: {LIVE_TRADING_CONFIG['MARGIN_MODE'].upper()}")
     print(f"  ✅ 최대 포지션: {LIVE_TRADING_CONFIG['MAX_CONCURRENT_POSITIONS']}개")
-    print(f"  ✅ 포지션당 최대: 가용자금의 {LIVE_TRADING_CONFIG['MAX_POSITION_SIZE_PCT']}%")
+    print(f"  ✅ 포지션당 투자: 동적 균등 분할 (남은 포지션 수로 나눔)")
     if LIVE_TRADING_CONFIG['VOLATILITY_BASED_SIZING']:
         print(f"  ✅ 변동성 기반 사이징: ON")
     print(f"  ✅ Risk/Reward 최소: 1:2")
