@@ -642,11 +642,8 @@ def main():
         with col1:
             st.info("💡 자동 새로고침은 서버 부하를 유발할 수 있습니다. 필요시에만 활성화하세요.")
         with col2:
-            if st.button("🔄 수동 새로고침", use_container_width=True):
+            if st.button("🔄 수동 새로고침", use_container_width=True, key="manual_refresh_btn"):
                 st.rerun()
-        
-        if st.button("🔄 수동 새로고침", use_container_width=True):
-            st.rerun()
         
         st.markdown("---")
         
