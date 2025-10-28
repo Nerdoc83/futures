@@ -1,6 +1,6 @@
 """
 AI Trading Dashboard - Streamlit
-실시간 거래 모니터링 대시보드
+실시간 거래 모니터링 대시보드 (DB 전용)
 """
 
 import warnings
@@ -24,27 +24,9 @@ try:
 except ImportError:
     psutil = None
 
-import ccxt
 from dotenv import load_dotenv
 
 load_dotenv()
-
-# 바이낸스 거래소 초기화
-try:
-    exchange = ccxt.binance({
-        'apiKey': os.getenv('BINANCE_API_KEY'),
-        'secret': os.getenv('BINANCE_SECRET_KEY'),
-        'enableRateLimit': True,
-        'options': {
-            'defaultType': 'future',
-            'adjustForTimeDifference': True
-        }
-    })
-    BINANCE_AVAILABLE = True
-except Exception as e:
-    print(f"바이낸스 API 초기화 실패: {e}")
-    exchange = None
-    BINANCE_AVAILABLE = False
 
 # 페이지 설정
 st.set_page_config(
@@ -125,6 +107,7 @@ def get_db_connection():
         st.error(f"DB 연결 오류: {e}")
         return None
 
+@st.cache_data(ttl=30)  # 30초간 캐시 (거래 데이터는 자주 변경)
 def load_trades():
     """거래 데이터 로드"""
     conn = get_db_connection()
@@ -155,135 +138,59 @@ def load_trades():
             conn.close()
         return pd.DataFrame()
 
+@st.cache_data(ttl=30)  # 30초간 캐시
 def load_open_positions():
-    """오픈 포지션 로드 (DB + 바이낸스 실제 포지션)"""
-    # DB에서 봇이 잡은 포지션
+    """오픈 포지션 로드 (DB 전용 - 바이낸스 API 미사용)"""
     conn = get_db_connection()
     if not conn:
-        db_positions = pd.DataFrame()
-    else:
-        try:
-            # 테이블 존재 확인
-            c = conn.cursor()
-            c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='trades'")
-            if not c.fetchone():
-                db_positions = pd.DataFrame()
-            else:
-                # 안전한 쿼리 (exit_price 사용)
-                db_positions = pd.read_sql_query("""
-                    SELECT * FROM trades 
-                    WHERE exit_price IS NULL OR exit_price = 0
-                    ORDER BY timestamp DESC
-                """, conn)
-                
-                if not db_positions.empty:
-                    db_positions['timestamp'] = pd.to_datetime(db_positions['timestamp'])
-            
+        return pd.DataFrame()
+    
+    try:
+        # 테이블 존재 확인
+        c = conn.cursor()
+        c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='trades'")
+        if not c.fetchone():
             conn.close()
-        except Exception as e:
-            st.error(f"DB 포지션 로드 오류: {e}")
-            db_positions = pd.DataFrame()
-            if conn:
-                conn.close()
-    
-    # 바이낸스 실제 포지션
-    if BINANCE_AVAILABLE and exchange:
-        try:
-            positions = exchange.fetch_positions()
-            real_positions = []
-            
-            for pos in positions:
-                contracts = pos.get('contracts', 0)
-                if contracts is None:
-                    contracts = 0
-                contracts = float(contracts)
-                
-                if contracts != 0:
-                    symbol = pos['symbol'].replace('/USDT:USDT', '')
-                    entry_price = pos.get('entryPrice', 0)
-                    mark_price = pos.get('markPrice', 0)
-                    unrealized_pnl = pos.get('unrealizedPnl', 0)
-                    notional = pos.get('notional', 0)
-                    initial_margin = pos.get('initialMargin', 0)
-                    
-                    # 실제 레버리지 계산
-                    # 방법 1: notional / initialMargin
-                    if initial_margin and initial_margin != 0:
-                        actual_leverage = abs(float(notional) / float(initial_margin))
-                    else:
-                        # 방법 2: API에서 제공하는 레버리지 사용
-                        actual_leverage = float(pos.get('leverage', 1))
-                    
-                    # 투자금 계산 (증거금)
-                    if initial_margin:
-                        investment_amount = float(initial_margin)
-                    else:
-                        investment_amount = abs(float(notional) / actual_leverage) if actual_leverage else abs(float(notional))
-                    
-                    real_positions.append({
-                        'coin_symbol': symbol,
-                        'action': pos['side'],
-                        'entry_price': float(entry_price) if entry_price is not None else 0,
-                        'current_price': float(mark_price) if mark_price is not None else 0,
-                        'amount': contracts,
-                        'leverage': round(actual_leverage, 1),  # 실제 계산된 레버리지
-                        'unrealized_pnl': float(unrealized_pnl) if unrealized_pnl is not None else 0,
-                        'notional': abs(float(notional)) if notional is not None else 0,
-                        'investment_amount': investment_amount,
-                        'sl_price': None,
-                        'tp_price': None,
-                        'trading_style': 'MANUAL',
-                        'holding_time_estimate': 'Unknown',
-                        'timestamp': None,
-                        'ai_reasoning': '수동 진입 포지션',
-                        'source': 'BINANCE'
-                    })
-            
-            if real_positions:
-                real_df = pd.DataFrame(real_positions)
-                
-                # DB 포지션과 병합
-                if not db_positions.empty:
-                    # 바이낸스 포지션을 딕셔너리로 변환 (심볼을 키로)
-                    binance_dict = {row['coin_symbol']: row for _, row in real_df.iterrows()}
-                    
-                    # DB 포지션에 바이낸스 데이터 추가
-                    db_positions['source'] = 'BOT'
-                    db_positions['current_price'] = db_positions['coin_symbol'].apply(
-                        lambda x: binance_dict[x]['current_price'] if x in binance_dict else None
-                    )
-                    db_positions['unrealized_pnl'] = db_positions['coin_symbol'].apply(
-                        lambda x: binance_dict[x]['unrealized_pnl'] if x in binance_dict else None
-                    )
-                    db_positions['notional'] = db_positions['coin_symbol'].apply(
-                        lambda x: binance_dict[x]['notional'] if x in binance_dict else None
-                    )
-                    
-                    # DB에 없는 바이낸스 포지션만 추가 (수동 포지션)
-                    db_coins = set(db_positions['coin_symbol'])
-                    manual_positions = real_df[~real_df['coin_symbol'].isin(db_coins)]
-                    
-                    # 병합 (빈 데이터프레임 처리)
-                    if not manual_positions.empty:
-                        manual_positions['source'] = 'MANUAL'
-                        combined = pd.concat([db_positions, manual_positions], ignore_index=True)
-                    else:
-                        combined = db_positions
-                    return combined
-                else:
-                    # DB 포지션 없으면 바이낸스만
-                    return real_df
-        except Exception as e:
-            st.warning(f"바이낸스 포지션 조회 오류: {e}")
-    
-    # 바이낸스 조회 실패 시 DB만 반환
-    if not db_positions.empty:
-        db_positions['source'] = 'BOT'
-        db_positions['current_price'] = None
-        db_positions['unrealized_pnl'] = None
-        db_positions['notional'] = None
-    return db_positions
+            return pd.DataFrame()
+        
+        # DB에서 오픈 포지션 조회
+        db_positions = pd.read_sql_query("""
+            SELECT 
+                coin_symbol,
+                action,
+                entry_price,
+                amount,
+                leverage,
+                investment_amount,
+                sl_price,
+                tp_price,
+                trading_style,
+                holding_time_estimate,
+                timestamp,
+                ai_reasoning,
+                status
+            FROM trades 
+            WHERE status = 'OPEN'
+            ORDER BY timestamp DESC
+        """, conn)
+        
+        conn.close()
+        
+        if not db_positions.empty:
+            db_positions['timestamp'] = pd.to_datetime(db_positions['timestamp'])
+            db_positions['source'] = db_positions['trading_style'].apply(
+                lambda x: 'MANUAL' if x == 'MANUAL' else 'BOT'
+            )
+        
+        return db_positions
+        
+    except Exception as e:
+        st.error(f"DB 포지션 로드 오류: {e}")
+        if conn:
+            conn.close()
+        return pd.DataFrame()
 
+@st.cache_data(ttl=60)  # 60초간 캐시
 def load_ai_decisions():
     """AI 결정 로드"""
     conn = get_db_connection()
@@ -307,21 +214,43 @@ def load_ai_decisions():
         st.error(f"AI 결정 로드 오류: {e}")
         return pd.DataFrame()
 
-def get_binance_account_info():
-    """바이낸스 계정 정보 조회"""
-    if not BINANCE_AVAILABLE or not exchange:
-        return None
-    
+def get_account_info_from_db():
+    """DB 기반 계정 정보 조회 (바이낸스 API 미사용)"""
     try:
-        balance = exchange.fetch_balance()
-        usdt_info = balance.get('USDT', {})
+        conn = get_db_connection()
+        if not conn:
+            return None
+        
+        c = conn.cursor()
+        
+        # 총 투자금 (오픈 포지션)
+        c.execute("""
+            SELECT COALESCE(SUM(investment_amount), 0) as total_invested
+            FROM trades
+            WHERE status = 'OPEN'
+        """)
+        total_invested = c.fetchone()[0]
+        
+        # 실현 손익 (청산된 포지션)
+        c.execute("""
+            SELECT 
+                COALESCE(SUM(COALESCE(binance_pnl, pnl)), 0) as realized_pnl
+            FROM trades
+            WHERE status = 'CLOSED'
+        """)
+        realized_pnl = c.fetchone()[0]
+        
+        conn.close()
         
         return {
-            'total_balance': usdt_info.get('total', 0),
-            'available_balance': usdt_info.get('free', 0),
-            'used_balance': usdt_info.get('used', 0),
-            'unrealized_pnl': balance.get('info', {}).get('totalUnrealizedProfit', 0)
+            'total_invested': total_invested,
+            'realized_pnl': realized_pnl,
+            'source': 'DB'
         }
+        
+    except Exception as e:
+        st.error(f"DB 정보 조회 오류: {e}")
+        return None
     except Exception as e:
         st.warning(f"계정 정보 조회 오류: {e}")
         return None
@@ -707,7 +636,14 @@ def main():
         st.markdown("---")
         
         st.header("🔄 새로고침")
-        auto_refresh = st.checkbox("자동 새로고침 (10초)", value=False)
+        auto_refresh = st.checkbox("자동 새로고침 (60초)", value=False)
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.info("💡 자동 새로고침은 서버 부하를 유발할 수 있습니다. 필요시에만 활성화하세요.")
+        with col2:
+            if st.button("🔄 수동 새로고침", use_container_width=True):
+                st.rerun()
         
         if st.button("🔄 수동 새로고침", use_container_width=True):
             st.rerun()
@@ -723,37 +659,21 @@ def main():
     trades_df = load_trades()
     open_positions_df = load_open_positions()
     
-    # 바이낸스 실제 데이터 로드
-    use_binance_data = st.sidebar.checkbox("바이낸스 실제 데이터 사용", value=True, 
-                                           help="체크 시 바이낸스 API에서 실제 거래 내역과 손익을 가져옵니다")
+    # DB 데이터만 사용 (바이낸스 API 미사용)
+    st.sidebar.info("📊 데이터 소스: DB (바이낸스 API 미사용)")
     
-    if use_binance_data and BINANCE_AVAILABLE:
-        with st.spinner("바이낸스 데이터 로딩 중..."):
-            # 계정 정보
-            account_info = get_binance_account_info()
-            
-            # 거래 내역
-            binance_trades_df = get_binance_trade_history(days=30)
-            
-            # 수익 내역
-            binance_income_df = get_binance_income_history(days=30)
-            
-            # 메트릭 계산
-            metrics = calculate_binance_metrics(binance_income_df, binance_trades_df, open_positions_df)
-            
-            # 계정 정보 표시
-            if account_info:
-                st.sidebar.markdown("---")
-                st.sidebar.subheader("💰 바이낸스 계정")
-                st.sidebar.metric("총 잔고", f"${account_info['total_balance']:,.2f}")
-                st.sidebar.metric("가용 잔고", f"${account_info['available_balance']:,.2f}")
-                st.sidebar.metric("사용 중", f"${account_info['used_balance']:,.2f}")
-    else:
-        # DB 데이터 사용
-        metrics = calculate_db_metrics(trades_df)
-        binance_trades_df = pd.DataFrame()
-        binance_income_df = pd.DataFrame()
-        account_info = None
+    # DB 기반 계정 정보
+    account_info = get_account_info_from_db()
+    
+    # 메트릭 계산
+    metrics = calculate_db_metrics(trades_df)
+    
+    # 계정 정보 표시
+    if account_info:
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("💰 계정 요약")
+        st.sidebar.metric("투자 중", f"${account_info['total_invested']:,.2f}")
+        st.sidebar.metric("실현 손익", f"${account_info['realized_pnl']:,.2f}")
     
     # 상단 메트릭
     col1, col2, col3, col4, col5 = st.columns(5)
@@ -1049,52 +969,59 @@ def main():
     with tab3:
         st.header("📈 성과 분석")
         
-        # 데이터 소스 표시
-        if use_binance_data and BINANCE_AVAILABLE:
-            st.info("📊 바이낸스 실제 데이터로 분석 중 (최근 30일)")
+        # DB 기반 데이터 분석
+        st.info("📊 DB 데이터로 분석 중")
+        
+        if not trades_df.empty:
+            closed_trades = trades_df[trades_df['status'] == 'CLOSED'].copy()
             
-            if not binance_income_df.empty:
+            if not closed_trades.empty:
+                # PnL 컬럼 준비
+                closed_trades['pnl_value'] = closed_trades.apply(
+                    lambda x: x['binance_pnl'] if pd.notna(x.get('binance_pnl')) and x.get('binance_pnl') != 0 else x.get('pnl', 0),
+                    axis=1
+                )
+                
                 col1, col2 = st.columns(2)
                 
                 with col1:
                     # PnL 분포
                     st.subheader("💰 손익 분포")
                     fig_pnl = px.histogram(
-                        binance_income_df,
-                        x='income',
+                        closed_trades,
+                        x='pnl_value',
                         nbins=20,
-                        title='거래별 손익 분포 (실제 데이터)',
-                        labels={'income': '손익 (USDT)', 'count': '거래 수'}
+                        title='거래별 손익 분포',
+                        labels={'pnl_value': '손익 (USDT)', 'count': '거래 수'}
                     )
                     fig_pnl.add_vline(x=0, line_dash="dash", line_color="gray")
                     st.plotly_chart(fig_pnl, use_container_width=True)
                     
                     # 코인별 성과
                     st.subheader("🪙 코인별 성과")
-                    if 'symbol' in binance_income_df.columns:
-                        coin_stats = binance_income_df.groupby('symbol').agg({
-                            'income': ['sum', 'mean', 'count']
-                        }).round(2)
-                        coin_stats.columns = ['총 손익', '평균 손익', '거래 수']
-                        coin_stats = coin_stats.sort_values('총 손익', ascending=False)
-                        st.dataframe(coin_stats.head(10), use_container_width=True)
+                    coin_stats = closed_trades.groupby('coin_symbol').agg({
+                        'pnl_value': ['sum', 'mean', 'count']
+                    }).round(2)
+                    coin_stats.columns = ['총 손익', '평균 손익', '거래 수']
+                    coin_stats = coin_stats.sort_values('총 손익', ascending=False)
+                    st.dataframe(coin_stats.head(10), use_container_width=True)
                 
                 with col2:
                     # 누적 손익
                     st.subheader("📈 누적 손익")
-                    income_sorted = binance_income_df.sort_values('timestamp')
-                    income_sorted['cumulative_pnl'] = income_sorted['income'].cumsum()
+                    trades_sorted = closed_trades.sort_values('close_timestamp')
+                    trades_sorted['cumulative_pnl'] = trades_sorted['pnl_value'].cumsum()
                     
                     fig_cum = go.Figure()
                     fig_cum.add_trace(go.Scatter(
-                        x=income_sorted['timestamp'],
-                        y=income_sorted['cumulative_pnl'],
+                        x=trades_sorted['close_timestamp'],
+                        y=trades_sorted['cumulative_pnl'],
                         mode='lines+markers',
                         name='누적 손익',
                         line=dict(color='blue', width=2)
                     ))
                     fig_cum.update_layout(
-                        title='시간별 누적 손익 (실제 데이터)',
+                        title='시간별 누적 손익',
                         xaxis_title='시간',
                         yaxis_title='누적 손익 (USDT)',
                         hovermode='x unified'
@@ -1103,17 +1030,17 @@ def main():
                     
                     # 일별 손익
                     st.subheader("📅 일별 손익")
-                    daily_pnl = binance_income_df.copy()
-                    daily_pnl['date'] = daily_pnl['timestamp'].dt.date
-                    daily_stats = daily_pnl.groupby('date')['income'].sum().reset_index()
+                    daily_pnl = closed_trades.copy()
+                    daily_pnl['date'] = pd.to_datetime(daily_pnl['close_timestamp']).dt.date
+                    daily_stats = daily_pnl.groupby('date')['pnl_value'].sum().reset_index()
                     
                     fig_daily = px.bar(
                         daily_stats,
                         x='date',
-                        y='income',
+                        y='pnl_value',
                         title='일별 실현 손익',
-                        labels={'income': '손익 (USDT)', 'date': '날짜'},
-                        color='income',
+                        labels={'pnl_value': '손익 (USDT)', 'date': '날짜'},
+                        color='pnl_value',
                         color_continuous_scale=['red', 'gray', 'green']
                     )
                     st.plotly_chart(fig_daily, use_container_width=True)
@@ -1333,9 +1260,9 @@ def main():
                         mime="text/plain"
                     )
     
-    # 자동 새로고침
+    # 자동 새로고침 (60초 간격)
     if auto_refresh:
-        time.sleep(10)
+        time.sleep(60)
         st.rerun()
 
 if __name__ == "__main__":
