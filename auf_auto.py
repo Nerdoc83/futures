@@ -107,7 +107,7 @@ LIVE_TRADING_CONFIG = {
     "MIN_CAPITAL_THRESHOLD": 100.0,  # 최소 잔고 (USDT)
     "AI_ANALYSIS_INTERVAL": 60,  # 신규 진입 분석 (1분마다)
     "PERFORMANCE_REVIEW_INTERVAL": 600,  # AI 성과 리뷰 (10분)
-    "POSITION_CHECK_INTERVAL": 120,  # 포지션 관리 체크 간격 (2분)
+    "POSITION_CHECK_INTERVAL": 3600,  # 🔧 1시간마다 AI 중간평가 (조기 청산 판단)
     
     # 🔧 자금 관리 설정 (동적 균등 분할)
     "MAX_POSITION_SIZE_PCT": 20,  # 안전장치: 가용 자금의 최대 20%
@@ -376,6 +376,360 @@ def close_position(symbol: str, side: str, amount: float) -> Dict:
         
         raise
 
+def get_binance_income_history(days: int = 7) -> List[Dict]:
+    """바이낸스 선물 수익 내역 조회 (봇 시작 이후만)"""
+    try:
+        # 🆕 봇 시작 시점 확인 (DB 첫 거래 시점)
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute("SELECT MIN(timestamp) FROM trades")
+        first_trade = c.fetchone()[0]
+        conn.close()
+        
+        if first_trade:
+            # 첫 거래 시점부터 조회
+            start_time = int(datetime.strptime(first_trade, '%Y-%m-%d %H:%M:%S').timestamp() * 1000)
+            print(f"   🔍 봇 시작 이후 수익 내역 조회 중... (첫 거래: {first_trade})")
+        else:
+            # DB에 거래가 없으면 최근 N일
+            end_time = int(time.time() * 1000)
+            start_time = end_time - (days * 24 * 60 * 60 * 1000)
+            print(f"   🔍 바이낸스 수익 내역 조회 중... (최근 {days}일)")
+        
+        end_time = int(time.time() * 1000)  # 현재 시간 (밀리초)
+        
+        # 🆕 여러 방법으로 바이낸스 API 호출 시도
+        income_data = None
+        
+        try:
+            # 방법 1: fapiPrivate_get_income 시도
+            print(f"   📊 방법 1: fapiPrivate_get_income 시도...")
+            income_data = exchange.fapiPrivate_get_income({
+                'startTime': start_time,
+                'endTime': end_time,
+                'limit': 1000
+            })
+        except (AttributeError, Exception) as e1:
+            print(f"   ⚠️ 방법 1 실패: {e1}")
+            
+            try:
+                # 방법 2: fapiPrivateGetIncome 시도
+                print(f"   📊 방법 2: fapiPrivateGetIncome 시도...")
+                income_data = exchange.fapiPrivateGetIncome({
+                    'startTime': start_time,
+                    'endTime': end_time,
+                    'limit': 1000
+                })
+            except (AttributeError, Exception) as e2:
+                print(f"   ⚠️ 방법 2 실패: {e2}")
+                
+                try:
+                    # 방법 3: private_post 시도
+                    print(f"   📊 방법 3: private_post 시도...")
+                    income_data = exchange.private_post('fapi/v1/income', {
+                        'startTime': start_time,
+                        'endTime': end_time,
+                        'limit': 1000
+                    })
+                except (AttributeError, Exception) as e3:
+                    print(f"   ⚠️ 방법 3 실패: {e3}")
+                    print(f"   ❌ 바이낸스 API 모든 방법 실패 - DB 데이터만 사용")
+                    return []
+        
+        # income_data가 성공적으로 조회된 경우
+        if income_data is not None:
+            # 실현 손익만 필터링 (REALIZED_PNL)
+            realized_pnl_data = []
+            for item in income_data:
+                if item.get('incomeType') == 'REALIZED_PNL':
+                    realized_pnl_data.append({
+                        'symbol': item.get('symbol', ''),
+                        'income': float(item.get('income', 0)),
+                        'asset': item.get('asset', 'USDT'),
+                        'time': int(item.get('time', 0)),
+                        'timestamp': datetime.fromtimestamp(int(item.get('time', 0)) / 1000),
+                        'tranId': item.get('tranId', ''),
+                        'tradeId': item.get('tradeId', '')
+                    })
+            
+            print(f"   ✅ 실현 손익 내역: {len(realized_pnl_data)}건 (봇 시작 이후)")
+            return realized_pnl_data
+        
+        return []
+        
+    except Exception as e:
+        print(f"   ❌ 바이낸스 수익 내역 조회 오류: {e}")
+        # 디버깅: 사용 가능한 메서드 확인
+        try:
+            available_methods = [method for method in dir(exchange) if 'income' in method.lower() or 'fapi' in method.lower()]
+            print(f"   🔍 사용 가능한 메서드: {available_methods[:5]}...")
+        except:
+            pass
+        return []
+
+def get_bot_trades_with_binance_pnl(days: int = 7) -> List[Dict]:
+    """DB 봇 거래를 기반으로 바이낸스에서 실제 PnL 매칭"""
+    try:
+        # 1. DB에서 완료된 봇 거래 조회
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        
+        cutoff_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+        
+        c.execute('''
+            SELECT coin_symbol, action, pnl, binance_pnl, entry_price, exit_price,
+                   close_timestamp, confidence_score, ai_reasoning, reasoning, id
+            FROM trades 
+            WHERE status = 'CLOSED' 
+            AND close_timestamp >= ?
+            ORDER BY close_timestamp DESC
+        ''', (cutoff_date,))
+        
+        db_trades = c.fetchall()
+        conn.close()
+        
+        if not db_trades:
+            print(f"   ⚠️ DB에 완료된 봇 거래 없음 (최근 {days}일)")
+            return []
+        
+        print(f"   📊 DB에서 완료된 봇 거래 {len(db_trades)}건 조회")
+        
+        # 2. 바이낸스에서 실제 PnL 데이터 조회 (시간 범위)
+        try:
+            # 첫 거래와 마지막 거래 시간 찾기
+            first_trade_time = min(trade[6] for trade in db_trades if trade[6])  # close_timestamp
+            last_trade_time = max(trade[6] for trade in db_trades if trade[6])
+            
+            start_time = int(datetime.strptime(first_trade_time, '%Y-%m-%d %H:%M:%S').timestamp() * 1000)
+            end_time = int(datetime.strptime(last_trade_time, '%Y-%m-%d %H:%M:%S').timestamp() * 1000) + 86400000  # +1일
+            
+            print(f"   🔍 바이낸스 PnL 조회 중... ({first_trade_time} ~ {last_trade_time})")
+            
+            # 바이낸스 API 호출
+            binance_pnl_data = None
+            try:
+                # 방법 2가 성공했으므로 바로 시도
+                binance_pnl_data = exchange.fapiPrivateGetIncome({
+                    'startTime': start_time,
+                    'endTime': end_time,
+                    'limit': 1000
+                })
+                print(f"   ✅ 바이낸스 PnL 데이터 조회 성공")
+            except Exception as e:
+                print(f"   ⚠️ 바이낸스 PnL 조회 실패: {e}")
+                binance_pnl_data = []
+            
+            # REALIZED_PNL만 필터링
+            realized_pnl_map = {}
+            if binance_pnl_data:
+                for item in binance_pnl_data:
+                    if item.get('incomeType') == 'REALIZED_PNL':
+                        symbol = item.get('symbol', '')
+                        income = float(item.get('income', 0))
+                        time_key = int(item.get('time', 0))
+                        
+                        # 심볼별로 그룹화
+                        if symbol not in realized_pnl_map:
+                            realized_pnl_map[symbol] = []
+                        realized_pnl_map[symbol].append({
+                            'income': income,
+                            'time': time_key,
+                            'timestamp': datetime.fromtimestamp(time_key / 1000)
+                        })
+                
+                print(f"   📊 바이낸스 실현 손익: {len(realized_pnl_map)}개 심볼")
+        
+        except Exception as e:
+            print(f"   ⚠️ 바이낸스 데이터 조회 실패: {e}")
+            realized_pnl_map = {}
+        
+        # 3. DB 거래와 바이낸스 PnL 매칭
+        matched_trades = []
+        
+        for trade in db_trades:
+            coin, action, db_pnl, binance_pnl, entry_price, exit_price, close_time, confidence, ai_reasoning, reasoning, trade_id = trade
+            
+            # 바이낸스 PnL이 이미 있으면 사용
+            if binance_pnl is not None and binance_pnl != 0:
+                actual_pnl = binance_pnl
+                data_source = "DB저장"
+            else:
+                # 바이낸스에서 매칭 시도
+                symbol_binance = f"{coin}USDT"
+                actual_pnl = db_pnl if db_pnl else 0  # 기본값
+                data_source = "DB계산"
+                
+                if symbol_binance in realized_pnl_map and close_time:
+                    try:
+                        close_dt = datetime.strptime(close_time, '%Y-%m-%d %H:%M:%S')
+                        
+                        # 청산 시간 ±30분 내의 바이낸스 PnL 찾기
+                        for binance_item in realized_pnl_map[symbol_binance]:
+                            time_diff = abs((binance_item['timestamp'] - close_dt).total_seconds())
+                            if time_diff <= 1800:  # 30분 이내
+                                actual_pnl = binance_item['income']
+                                data_source = "바이낸스매칭"
+                                break
+                    except:
+                        pass
+            
+            if close_time:
+                try:
+                    timestamp_dt = datetime.strptime(close_time, '%Y-%m-%d %H:%M:%S')
+                    
+                    matched_trades.append({
+                        'symbol': f"{coin}USDT",
+                        'income': float(actual_pnl),
+                        'asset': 'USDT',
+                        'time': int(timestamp_dt.timestamp() * 1000),
+                        'timestamp': timestamp_dt,
+                        'tranId': f"bot_trade_{trade_id}",
+                        'tradeId': f"bot_trade_{trade_id}",
+                        'action': action,
+                        'confidence': confidence if confidence else 50,
+                        'ai_reasoning': ai_reasoning or 'N/A',
+                        'reasoning': reasoning or 'N/A',
+                        'data_source': data_source
+                    })
+                except:
+                    continue
+        
+        # 데이터 소스 요약 출력
+        source_count = {}
+        for trade in matched_trades:
+            source = trade['data_source']
+            source_count[source] = source_count.get(source, 0) + 1
+        
+        print(f"   ✅ PnL 매칭 완료: {len(matched_trades)}건")
+        for source, count in source_count.items():
+            print(f"   ├─ {source}: {count}건")
+        
+        return matched_trades
+        
+    except Exception as e:
+        print(f"   ❌ DB-바이낸스 PnL 매칭 오류: {e}")
+        return []
+
+def calculate_binance_performance(days: int = 7) -> Dict:
+    """봇 거래 성과 계산 (DB-바이낸스 PnL 매칭)"""
+    
+    # 🆕 DB 거래 기반 바이낸스 PnL 매칭
+    try:
+        income_data = get_bot_trades_with_binance_pnl(days)
+        if income_data:
+            data_source = "DB-바이낸스 매칭"
+        else:
+            # 매칭 실패 시 기존 DB 데이터만 사용
+            print(f"   ⚠️ 바이낸스 매칭 실패, DB 데이터만 사용")
+            income_data = []
+            # DB에서 직접 조회
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            cutoff_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+            c.execute('''
+                SELECT coin_symbol, pnl, close_timestamp FROM trades 
+                WHERE status = 'CLOSED' AND close_timestamp >= ?
+            ''', (cutoff_date,))
+            trades = c.fetchall()
+            conn.close()
+            
+            for coin, pnl, close_time in trades:
+                if pnl and close_time:
+                    try:
+                        timestamp_dt = datetime.strptime(close_time, '%Y-%m-%d %H:%M:%S')
+                        income_data.append({
+                            'symbol': f"{coin}USDT",
+                            'income': float(pnl),
+                            'timestamp': timestamp_dt
+                        })
+                    except:
+                        continue
+            data_source = "DB 전용"
+    except:
+        income_data = []
+        data_source = "N/A"
+    
+    if not income_data:
+        return {
+            'total_trades': 0,
+            'winning_trades': 0,
+            'losing_trades': 0,
+            'win_rate': 0,
+            'total_pnl': 0,
+            'avg_win': 0,
+            'avg_loss': 0,
+            'income_data': [],
+            'data_source': data_source
+        }
+    
+    # 손익 분석
+    total_pnl = sum(item['income'] for item in income_data)
+    winning_trades = [item for item in income_data if item['income'] > 0]
+    losing_trades = [item for item in income_data if item['income'] < 0]
+    
+    total_trades = len(income_data)
+    win_count = len(winning_trades)
+    loss_count = len(losing_trades)
+    
+    win_rate = (win_count / total_trades * 100) if total_trades > 0 else 0
+    avg_win = sum(item['income'] for item in winning_trades) / win_count if win_count > 0 else 0
+    avg_loss = sum(item['income'] for item in losing_trades) / loss_count if loss_count > 0 else 0
+    
+    print(f"   📊 {data_source} 성과 분석:")
+    print(f"   ├─ 총 거래: {total_trades}건")
+    print(f"   ├─ 수익 거래: {win_count}건 (평균: ${avg_win:,.2f})")
+    print(f"   ├─ 손실 거래: {loss_count}건 (평균: ${avg_loss:,.2f})")
+    print(f"   ├─ 승률: {win_rate:.1f}%")
+    print(f"   └─ 총 손익: ${total_pnl:,.2f}")
+    
+    return {
+        'total_trades': total_trades,
+        'winning_trades': win_count,
+        'losing_trades': loss_count,
+        'win_rate': win_rate,
+        'total_pnl': total_pnl,
+        'avg_win': avg_win,
+        'avg_loss': abs(avg_loss),  # 절댓값으로 표시
+        'income_data': income_data,
+        'data_source': data_source
+    }
+    """포지션의 실현/미실현 손익 조회"""
+    try:
+        positions = exchange.fetch_positions([symbol])
+        for pos in positions:
+            contracts = pos.get('contracts', 0)
+            if contracts is None:
+                contracts = 0
+            contracts = float(contracts)
+            
+            if pos['symbol'] == symbol and contracts != 0:
+                unrealized_pnl = pos.get('unrealizedPnl', 0)
+                realized_pnl = pos.get('realizedPnl', 0)
+                percentage = pos.get('percentage', 0)
+                
+                return {
+                    'unrealizedPnl': float(unrealized_pnl) if unrealized_pnl is not None else 0,
+                    'realizedPnl': float(realized_pnl) if realized_pnl is not None else 0,
+                    'percentage': float(percentage) if percentage is not None else 0
+                }
+        
+        # 포지션이 없으면 거래 히스토리에서 조회
+        trades = exchange.fetch_my_trades(symbol, limit=10)
+        if trades:
+            latest_trade = trades[-1]
+            realized_pnl = latest_trade.get('realizedPnl', 0)
+            
+            return {
+                'unrealizedPnl': 0,
+                'realizedPnl': float(realized_pnl) if realized_pnl is not None else 0,
+                'percentage': 0
+            }
+        
+        return {'unrealizedPnl': 0, 'realizedPnl': 0, 'percentage': 0}
+    except Exception as e:
+        print(f"   ⚠️ PnL 조회 오류: {e}")
+        return {'unrealizedPnl': 0, 'realizedPnl': 0, 'percentage': 0}
+
 def get_position_pnl(symbol: str) -> Dict:
     """포지션의 실현/미실현 손익 조회"""
     try:
@@ -498,6 +852,122 @@ def cancel_all_orders(symbol: str) -> int:
         print(f"⚠️ 주문 취소 오류: {e}")
         return 0
 
+def sync_db_with_binance():
+    """🆕 DB 포지션을 바이낸스 실제 포지션과 동기화"""
+    try:
+        # 1. DB 오픈 포지션 조회
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute('''
+            SELECT id, coin_symbol, entry_price, amount, leverage, investment_amount, timestamp, action
+            FROM trades
+            WHERE status = 'OPEN'
+        ''')
+        db_positions = c.fetchall()
+        
+        if not db_positions:
+            conn.close()
+            return 0
+        
+        # 2. 바이낸스 실제 포지션 조회
+        live_positions = get_open_positions()
+        binance_coins = {pos['symbol'].split('/')[0] for pos in live_positions}
+        
+        # 3. DB에만 있고 바이낸스에 없는 포지션 찾기
+        synced_count = 0
+        for db_pos in db_positions:
+            trade_id, coin, entry_price, amount, leverage, investment, timestamp, action = db_pos
+            
+            if coin not in binance_coins:
+                # 바이낸스에 없음 → DB에서 청산 처리
+                print(f"   🔄 동기화: {coin} 포지션이 바이낸스에 없음 → DB 청산 처리")
+                
+                # 🆕 현재가 조회
+                try:
+                    symbol = f"{coin}/USDT:USDT"
+                    ticker = exchange.fetch_ticker(symbol)
+                    current_price = ticker['last']
+                except:
+                    current_price = entry_price  # 조회 실패 시 진입가 사용
+                
+                # 🆕 바이낸스에서 실제 PnL 조회 시도
+                actual_pnl = 0
+                binance_pnl = None
+                
+                try:
+                    # 최근 거래 내역에서 이 코인의 실현 손익 조회
+                    symbol_binance = f"{coin}USDT"
+                    
+                    # 진입 시간 이후의 PnL 조회
+                    if timestamp:
+                        start_time = int(datetime.fromisoformat(timestamp).timestamp() * 1000)
+                        end_time = int(datetime.now().timestamp() * 1000)
+                        
+                        income_data = exchange.fapiPrivateGetIncome({
+                            'symbol': symbol_binance,
+                            'incomeType': 'REALIZED_PNL',
+                            'startTime': start_time,
+                            'endTime': end_time,
+                            'limit': 10
+                        })
+                        
+                        # 가장 최근 실현 손익 사용
+                        if income_data:
+                            for item in reversed(income_data):  # 최신 순서
+                                pnl_value = float(item.get('income', 0))
+                                if pnl_value != 0:
+                                    binance_pnl = pnl_value
+                                    actual_pnl = pnl_value
+                                    print(f"     📊 바이낸스 실제 PnL: ${binance_pnl:+,.2f}")
+                                    break
+                except Exception as e:
+                    print(f"     ⚠️ 바이낸스 PnL 조회 실패: {e}")
+                
+                # PnL 계산 (바이낸스 조회 실패 시 대략적 계산)
+                if actual_pnl == 0:
+                    if action == 'long':
+                        price_change = (current_price - entry_price) / entry_price
+                    else:  # short
+                        price_change = (entry_price - current_price) / entry_price
+                    
+                    actual_pnl = investment * price_change * leverage
+                    print(f"     📊 계산된 PnL: ${actual_pnl:+,.2f} (대략)")
+                
+                pnl_pct = (actual_pnl / investment * 100) if investment > 0 else 0
+                
+                # DB 업데이트
+                c.execute('''
+                    UPDATE trades
+                    SET status = 'CLOSED',
+                        exit_price = ?,
+                        pnl = ?,
+                        pnl_percentage = ?,
+                        binance_pnl = ?,
+                        close_timestamp = CURRENT_TIMESTAMP,
+                        ai_reasoning = COALESCE(ai_reasoning, '') || ' [자동동기화: 바이낸스 포지션 없음]'
+                    WHERE id = ?
+                ''', (current_price, actual_pnl, pnl_pct, binance_pnl, trade_id))
+                
+                synced_count += 1
+                print(f"     ✅ {coin} DB 청산 완료 (청산가: ${current_price:,.2f}, PnL: ${actual_pnl:+,.2f})")
+        
+        conn.commit()
+        conn.close()
+        
+        if synced_count > 0:
+            print(f"   ✅ DB 동기화 완료: {synced_count}개 포지션 청산 처리")
+        
+        return synced_count
+        
+    except Exception as e:
+        print(f"   ❌ DB 동기화 오류: {e}")
+        import traceback
+        traceback.print_exc()
+        if conn:
+            conn.close()
+        return 0
+
+
 def cleanup_orphaned_orders():
     """🆕 포지션 없는 TP/SL 주문 정리 - 심볼별 조회"""
     try:
@@ -597,7 +1067,10 @@ def setup_database():
             market_conditions TEXT,
             binance_order_id TEXT,
             binance_pnl REAL,
-            binance_close_price REAL
+            binance_close_price REAL,
+            confidence_score INTEGER,
+            reasoning TEXT,
+            pattern_description TEXT
         )
     ''')
     
@@ -1721,29 +2194,63 @@ def ai_comprehensive_analysis(coin_data: Dict, market_data: Dict, performance_hi
 【트레이딩 스타일 선택 - 매우 중요】
 타임프레임 분석을 바탕으로 아래 중 하나를 선택하세요:
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔥 **트레이딩 스타일 선택 가이드 - 타임프레임 매칭 필수**
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+⚠️ **중요**: 트레이딩 스타일은 **현재 시장 신호에 가장 적합한 것**을 선택하세요!
+- 스캘핑/데이/스윙 모두 활성화되어 있습니다
+- 단기 신호 → SCALPING, 중기 신호 → DAY_TRADING, 장기 신호 → SWING_TRADING
+- 타점이 오면 반드시 진입하되, **타임프레임과 스타일이 반드시 매칭되어야 함**
+
 1. SCALPING (스캘핑) - 초단타
-   - 조건: 1m, 5m, 15m 타임프레임에서 강한 신호
+   ✅ **주 분석 타임프레임: 5m, 15m** (1m~15m 범위)
+   ❌ **1h, 4h, 1d 타임프레임을 주 분석으로 사용 금지** (스캘핑에는 너무 긴 시간)
    - 목표 수익: 1~3%
    - 손절: 0.5~1.5%
    - 보유 시간: 수분~1시간
    - 레버리지: 높음 (7~10x)
-   - 예: 단기 RSI 과매도 + 볼린저밴드 하단 터치 + 거래량 급증
+   - 시그널 예: 5m/15m 급등/급락, 단기 과매수/과매도, 초단기 모멘텀
+   - 타임프레임 검증: 5m과 15m이 일치하면 진입
+   - 예: "5m과 15m 모두 RSI 과매도 + 볼린저밴드 하단 터치" ✅
+   - 잘못된 예: "1h과 4h 기준으로 스캘핑 진입" ❌
 
 2. DAY_TRADING (데이트레이딩) - 단기
-   - 조건: 15m, 1h, 4h 타임프레임에서 일치
+   ✅ **주 분석 타임프레임: 15m, 1h, 4h** (15m~4h 범위)
+   ❌ **5m 타임프레임 사용 금지** (너무 짧아 노이즈 많음)
+   ❌ **1d, 1w 타임프레임 사용 금지** (데이트레이딩에는 너무 긴 시간)
    - 목표 수익: 3~8%
    - 손절: 1.5~3%
-   - 보유 시간: 수시간~1일
+   - 보유 시간: 수시간~1일 (4~12시간 목표)
    - 레버리지: 중간 (5~7x)
-   - 예: 중단기 추세 형성 + ADX 상승 + 골든크로스
+   - 시그널 예: 1h/4h 추세 전환, 중기 모멘텀, 당일 변동성 트레이딩
+   - 타임프레임 검증: 15m, 1h, 4h 중 최소 2개 이상 일치하면 진입
+   - 예: "1h과 4h 추세 일치, 15m 진입 신호, ADX 상승" ✅
+   - 잘못된 예: "5m 기준으로 데이트레이딩" ❌ (너무 짧음)
+   - 잘못된 예: "1d 기준으로 데이트레이딩" ❌ (너무 김)
 
 3. SWING_TRADING (스윙) - 중장기
-   - 조건: 4h, 1d, 1w 타임프레임에서 강한 추세
+   ✅ **주 분석 타임프레임: 4h, 1d, 1w** (4h~1w 범위)
+   ❌ **5m, 15m, 1h 타임프레임 사용 금지** (스윙에는 너무 짧은 시간)
    - 목표 수익: 8~20%
    - 손절: 3~5%
    - 보유 시간: 수일~수주
    - 레버리지: 낮음 (3~5x)
-   - 예: 장기 추세 전환 + 주봉 패턴 + 거시적 모멘텀
+   - 시그널 예: 4h/1d/1w 장기 추세 전환, 주봉 패턴, 거시적 모멘텀
+   - 타임프레임 검증: 4h, 1d, 1w 중 최소 2개 이상 일치하면 진입
+   - 예: "1d와 1w 모두 상승 추세 전환, 4h 골든크로스" ✅
+   - 잘못된 예: "15m과 1h 기준으로 스윙 진입" ❌ (잘못된 매칭)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚠️ **트레이딩 스타일 결정 방법**
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. 현재 가장 강한 신호가 나타나는 타임프레임 그룹을 확인
+2. 5m/15m에서 신호 → SCALPING 선택
+3. 15m/1h/4h에서 신호 → DAY_TRADING 선택
+4. 4h/1d/1w에서 신호 → SWING_TRADING 선택
+5. 타점이 오면 반드시 진입하되, 타임프레임이 매칭되는 스타일을 선택!
+6. 손절/익절 범위도 반드시 트레이딩 스타일에 맞게 설정
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 🚨 **SHORT 포지션 전용 규칙 - 매우 중요!**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1810,8 +2317,23 @@ SHORT 포지션은 **SCALPING 또는 DAY_TRADING만** 허용:
    - 단기/중기/장기 추세가 모두 일치할 때 진입
 
 4. **Confidence 기준: 70% 이상만 진입**
-   - 70 이상: 진입 고려
-   - 70 미만: 거래 금지
+   - 70-75%: 진입 허용 (투자비율 50-60%)
+   - 75-80%: 적극 진입 (투자비율 60-70%)
+   - 80-85%: 강력 진입 (투자비율 70-80%)  
+   - 85-90%: 매우 강력 (투자비율 80-90%)
+   - 90-95%: 최고 확신 (투자비율 90-100%)
+   - 95%+: 올인 수준 (투자비율 100%)
+   - 70% 미만: 거래 금지
+
+5. **Investment Percentage = Confidence 완전 연동 (공격적)**
+   - Confidence 70% → Investment 50%
+   - Confidence 75% → Investment 60%
+   - Confidence 80% → Investment 70%
+   - Confidence 85% → Investment 80%
+   - Confidence 90% → Investment 90%
+   - Confidence 95% → Investment 100%
+   - 공식: Investment% = (Confidence - 70) × 2 + 50
+   - 신뢰도가 높을수록 공격적으로 투자하세요!
 
 5. **변동성 리스크 관리**
    - 고변동성(ATR/가격 > 5%) → 레버리지 ↓, 투자금액 ↓
@@ -1842,7 +2364,7 @@ SHORT 포지션은 **SCALPING 또는 DAY_TRADING만** 허용:
   "risk_adjusted_score": 0~100 (Risk/Reward 고려한 점수, 80+ 진입),
   "trading_style": "SCALPING" or "DAY_TRADING" or "SWING_TRADING",
   "leverage": 3~{LIVE_TRADING_CONFIG['MAX_LEVERAGE']},
-  "investment_percentage": 5~20,
+  "investment_percentage": 50~100 (신뢰도 연동: 70%=50%, 80%=70%, 90%=90%, 95%=100%),
   "sl_percentage": 0.5~5 (스타일에 맞게),
   "tp_percentage": 1~20 (스타일에 맞게),
   "confidence": 0~100,
@@ -1859,10 +2381,16 @@ SHORT 포지션은 **SCALPING 또는 DAY_TRADING만** 허용:
 - **risk_reward_ratio가 1:2 미만이면 trade: false 필수**
 - **risk_adjusted_score < 80이면 trade: false 필수**
 - **checklist_passed < 5이면 trade: false 필수**
-- trading_style에 따라 sl_percentage와 tp_percentage를 적절히 설정
-- 스캘핑: SL 0.5~1.5%, TP 1~3%
-- 데이트레이딩: SL 1.5~3%, TP 3~8%  
-- 스윙: SL 3~5%, TP 8~20%
+- **트레이딩 스타일과 타임프레임이 매칭되어야 함:**
+  - SCALPING이면 primary_timeframe이 "5m" 또는 "15m"이어야 함
+  - DAY_TRADING이면 primary_timeframe이 "15m", "1h", "4h" 중 하나여야 함
+  - SWING_TRADING이면 primary_timeframe이 "4h", "1d", "1w" 중 하나여야 함
+  - 매칭 안 되면 trade: false로 거부
+- **trading_style에 따라 sl_percentage와 tp_percentage를 적절히 설정:**
+  - 스캘핑: SL 0.5~1.5%, TP 1~3%
+  - 데이트레이딩: SL 1.5~3%, TP 3~8%  
+  - 스윙: SL 3~5%, TP 8~20%
+  - **범위를 벗어나면 trade: false로 거부**
 - **expected_reward_pct / expected_risk_pct ≥ 2.0 되도록 설정**
 
 주의: JSON 외 다른 텍스트 포함 금지
@@ -1901,6 +2429,54 @@ SHORT 포지션은 **SCALPING 또는 DAY_TRADING만** 허용:
                 if checklist_passed < 5:
                     print(f"   ❌ 체크리스트 미달: {checklist_passed}/8 (최소 5개 필요)")
                     return {"trade": False, "reasoning": f"안전 체크리스트 미달 ({checklist_passed}/8)", "confidence": 0}
+                
+                # 🆕 트레이딩 스타일 & 타임프레임 매칭 검증
+                trading_style = decision.get('trading_style', '')
+                primary_timeframe = decision.get('primary_timeframe', '')
+                sl_pct = decision.get('sl_percentage', 0)
+                tp_pct = decision.get('tp_percentage', 0)
+                
+                # 타임프레임 매칭 검증
+                timeframe_valid = False
+                if trading_style == 'SCALPING':
+                    if primary_timeframe in ['5m', '15m']:
+                        timeframe_valid = True
+                    else:
+                        print(f"   ❌ 타임프레임 불일치: SCALPING인데 {primary_timeframe} 사용 (5m/15m만 허용)")
+                        return {"trade": False, "reasoning": f"SCALPING은 5m/15m 타임프레임만 사용 가능", "confidence": 0}
+                elif trading_style == 'DAY_TRADING':
+                    if primary_timeframe in ['15m', '1h', '4h']:
+                        timeframe_valid = True
+                    else:
+                        print(f"   ❌ 타임프레임 불일치: DAY_TRADING인데 {primary_timeframe} 사용 (15m/1h/4h만 허용)")
+                        return {"trade": False, "reasoning": f"DAY_TRADING은 15m/1h/4h 타임프레임만 사용 가능", "confidence": 0}
+                elif trading_style == 'SWING_TRADING':
+                    if primary_timeframe in ['4h', '1d', '1w']:
+                        timeframe_valid = True
+                    else:
+                        print(f"   ❌ 타임프레임 불일치: SWING_TRADING인데 {primary_timeframe} 사용 (4h/1d/1w만 허용)")
+                        return {"trade": False, "reasoning": f"SWING_TRADING은 4h/1d/1w 타임프레임만 사용 가능", "confidence": 0}
+                
+                # 손절/익절 범위 검증
+                sl_tp_valid = False
+                if trading_style == 'SCALPING':
+                    if 0.5 <= sl_pct <= 1.5 and 1 <= tp_pct <= 3:
+                        sl_tp_valid = True
+                    else:
+                        print(f"   ❌ 손절/익절 범위 초과: SCALPING인데 SL {sl_pct}%, TP {tp_pct}% (SL 0.5-1.5%, TP 1-3% 권장)")
+                        return {"trade": False, "reasoning": f"SCALPING 손절/익절 범위 부적합", "confidence": 0}
+                elif trading_style == 'DAY_TRADING':
+                    if 1.5 <= sl_pct <= 3 and 3 <= tp_pct <= 8:
+                        sl_tp_valid = True
+                    else:
+                        print(f"   ❌ 손절/익절 범위 초과: DAY_TRADING인데 SL {sl_pct}%, TP {tp_pct}% (SL 1.5-3%, TP 3-8% 권장)")
+                        return {"trade": False, "reasoning": f"DAY_TRADING 손절/익절 범위 부적합", "confidence": 0}
+                elif trading_style == 'SWING_TRADING':
+                    if 3 <= sl_pct <= 5 and 8 <= tp_pct <= 20:
+                        sl_tp_valid = True
+                    else:
+                        print(f"   ❌ 손절/익절 범위 초과: SWING_TRADING인데 SL {sl_pct}%, TP {tp_pct}% (SL 3-5%, TP 8-20% 권장)")
+                        return {"trade": False, "reasoning": f"SWING_TRADING 손절/익절 범위 부적합", "confidence": 0}
                 
                 required_keys = ['direction', 'leverage', 'investment_percentage', 'sl_percentage', 'tp_percentage', 'confidence']
                 if all(key in decision for key in required_keys):
@@ -1982,6 +2558,19 @@ def ai_position_management(trade: Dict, market_data: Dict, current_price: float)
 - 추세 반전 신호가 보이면 수익 중이라도 청산
 - 불확실성 증가 시 포지션 축소 or 청산
 
+🚨 **중요: 트레이딩 스타일별 최소 보유 시간 준수**
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚠️ **성급한 청산 금지 - 트레이딩 스타일에 맞는 충분한 시간 보유**
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+**SCALPING**: 최소 30분 보유 (1시간 이내 청산)
+**DAY_TRADING**: 최소 2시간 보유 (4-12시간 목표)  
+**SWING_TRADING**: 최소 12시간 보유 (수일-수주 목표)
+
+**현재 보유 시간이 최소 기준에 못 미치면 청산 금지!**
+- 단, 손실이 -8% 초과하면 최소 시간 무시하고 즉시 청산
+- 단, 설정된 손절가 도달하면 최소 시간 무시하고 즉시 청산
+
 【포지션】
 코인: {trade['coin_symbol']} {action.upper()}
 진입: ${entry_price:,.4f} → 현재: ${current_price:,.4f}
@@ -1990,26 +2579,41 @@ def ai_position_management(trade: Dict, market_data: Dict, current_price: float)
 실제 수익률: {actual_pnl_pct:+.2f}% (투자금 ${investment:,.2f} 대비)
 실제 손익: ${actual_pnl_amount:+,.2f}
 보유 시간: {(datetime.now() - datetime.fromisoformat(trade['timestamp'])).total_seconds() / 3600:.1f}시간
+트레이딩 스타일: {trade.get('trading_style', 'DAY_TRADING')}
 
 {market_summary}
 
 【판단 기준 - Risk-Adjusted Returns 중심】
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ✅ **손실 방지가 수익 추구보다 우선**
+✅ **트레이딩 스타일별 최소 보유 시간 엄격 준수**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-1. **손실 관리 (Stop-Loss)**
-   - 손실 -5% 초과 → 반등 근거 명확해야 유지
-   - 손실 -10% 초과 → 즉시 청산 (손실 확대 방지)
-   - 손실 확대 중 + 반등 신호 없음 → 청산
-
-2. **추세 반전 체크**
-   - 여러 타임프레임에서 추세 반전 신호 확인
-   - MACD 크로스 + RSI 역전 + 지지선 붕괴 → 청산
+1. **최소 보유 시간 체크 (필수)**
+   현재 보유: {(datetime.now() - datetime.fromisoformat(trade['timestamp'])).total_seconds() / 3600:.1f}시간
+   트레이딩 스타일: {trade.get('trading_style', 'DAY_TRADING')}
    
-3. **변동성 급증 대응**
-   - 변동성 큰 코인은 과민 반응 금지
-   - 하지만 ATR 급증 + 추세 반전 → 조기 청산
+   **최소 보유 시간 기준:**
+   - SCALPING: 0.5시간 이상 보유 필요
+   - DAY_TRADING: 2시간 이상 보유 필요  
+   - SWING_TRADING: 12시간 이상 보유 필요
+   
+   **⚠️ 최소 시간 미달 시 청산 금지 (단, 아래 예외 상황 제외)**
+
+2. **예외적 즉시 청산 조건 (최소 시간 무시)**
+   - 손실 -8% 초과 (큰 손실 방지)
+   - 설정된 손절가 정확히 도달
+   - 3개 이상 타임프레임에서 강력한 추세 반전 + 손실 -6% 초과
+
+3. **일반 청산 조건 (최소 시간 충족 후)**
+   - 손실 -5% 초과 + 반등 근거 부족
+   - 여러 타임프레임 추세 반전 + 손실 중
+   - 목표 수익 달성 (익절)
+
+4. **변동성 고려**
+   - 암호화폐 특성상 -4~5% 변동은 정상
+   - 단기 변동에 과민 반응 금지
+   - 추세가 명확하게 반전될 때만 청산
 
 4. **수익 실현 (Take-Profit)**
    - 큰 수익(+15% 이상) → 일부 실현 고려
@@ -2053,7 +2657,7 @@ JSON 형식:
 
 # ===== 포지션 사이징 =====
 
-def calculate_position_size(available_balance: float, ai_percentage: float, volatility: float, open_positions: int, trading_style: str = 'DAY_TRADING') -> float:
+def calculate_position_size(available_balance: float, ai_investment_pct: float, volatility: float, open_positions: int, trading_style: str = 'DAY_TRADING') -> float:
     """🆕 동적 균등 분할 기반 스마트 포지션 사이징"""
     config = LIVE_TRADING_CONFIG
     max_positions = config['MAX_CONCURRENT_POSITIONS']
@@ -2090,10 +2694,10 @@ def calculate_position_size(available_balance: float, ai_percentage: float, vola
             equal_split_amount *= kelly_multiplier
             print(f"   💡 Kelly 조정: {kelly_multiplier:.2f}x → ${equal_split_amount:,.2f}")
     else:
-        # 데이터 부족 시 AI 신뢰도로 조정
-        confidence_multiplier = ai_percentage / 100
-        equal_split_amount *= confidence_multiplier
-        print(f"   💡 신뢰도 조정: {ai_percentage:.1f}% → ${equal_split_amount:,.2f}")
+        # 데이터 부족 시 AI 투자비율 사용 (최소 보장 제거)
+        investment_multiplier = ai_investment_pct / 100
+        equal_split_amount *= investment_multiplier
+        print(f"   💡 AI 투자비율: {ai_investment_pct:.1f}% → ${equal_split_amount:,.2f}")
     
     base_investment = equal_split_amount
     
@@ -2384,6 +2988,19 @@ def manage_live_positions():
                 print(f"   ✅ DB 업데이트 완료 (실현 PnL: ${pnl_info.get('realizedPnl', 0):,.2f})")
             except Exception as e:
                 print(f"   ⚠️ PnL 조회 실패: {e}")
+                # PnL 조회 실패해도 DB 업데이트는 해야 함
+                try:
+                    close_data = {
+                        'close_price': 0,
+                        'pnl': 0,
+                        'pnl_percentage': 0,
+                        'binance_pnl': 0,
+                        'binance_close_price': 0
+                    }
+                    update_trade_close(trade['id'], close_data)
+                    print(f"   ✅ DB 업데이트 완료 (PnL 조회 실패로 0으로 설정)")
+                except Exception as db_error:
+                    print(f"   ❌ DB 업데이트 실패: {db_error}")
             continue
         
         try:
@@ -2459,8 +3076,23 @@ def manage_live_positions():
                     update_trade_close(trade['id'], close_data)
                     
                 except Exception as close_error:
-                    print(f"   ❌ 청산 실패: {close_error}")
+                    print(f"   ❌ 청산 오류: {close_error}")
                     # 청산 실패해도 계속 진행 (다음 포지션 체크)
+                    # 하지만 이미 청산되었을 수도 있으므로 PnL 확인해보기
+                    try:
+                        pnl_info = get_position_pnl(symbol)
+                        if pnl_info.get('realizedPnl', 0) != 0:
+                            close_data = {
+                                'close_price': current_price,
+                                'pnl': pnl_info.get('realizedPnl', 0),
+                                'pnl_percentage': (pnl_info.get('realizedPnl', 0) / trade['investment'] * 100) if trade.get('investment', 0) > 0 else 0,
+                                'binance_pnl': pnl_info.get('realizedPnl', 0),
+                                'binance_close_price': current_price
+                            }
+                            update_trade_close(trade['id'], close_data)
+                            print(f"   ✅ 실제로는 청산 완료됨 (PnL: ${pnl_info.get('realizedPnl', 0):+,.2f})")
+                    except Exception as pnl_error:
+                        print(f"   ⚠️ PnL 확인도 실패: {pnl_error}")
                     continue
                 
                 # 🆕 전략 성과 업데이트
@@ -2534,60 +3166,142 @@ def manage_live_positions():
 
 # ===== 성과 리뷰 =====
 
-def ai_performance_review():
-    """AI 성과 리뷰 - Risk-Adjusted Returns 분석"""
-    
-    print(f"\n{'🔍'*10} 성과 리뷰 디버깅 {'🔍'*10}")
-    
-    # 🔍 DB 테이블 구조 확인
+def analyze_ai_decision_patterns(days: int = 7) -> Dict:
+    """AI 결정 근거 패턴 분석"""
     try:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         
-        # 테이블 존재 확인
-        c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='trades'")
-        if not c.fetchone():
-            print("   ❌ trades 테이블이 존재하지 않습니다!")
-            conn.close()
-            return
+        # 최근 N일 봇 거래의 결정 근거 조회
+        cutoff_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
         
-        # 컬럼 정보 확인
-        c.execute("PRAGMA table_info(trades)")
-        columns = c.fetchall()
-        print(f"   📊 trades 테이블 컬럼: {[col[1] for col in columns]}")
+        c.execute('''
+            SELECT coin_symbol, action, pnl, confidence_score, ai_reasoning, 
+                   reasoning, pattern_description, entry_price, exit_price,
+                   close_timestamp, binance_pnl
+            FROM trades 
+            WHERE status = 'CLOSED' 
+            AND close_timestamp >= ?
+            ORDER BY close_timestamp DESC
+        ''', (cutoff_date,))
         
-        # 전체 레코드 수 확인
-        c.execute("SELECT COUNT(*) FROM trades")
-        total_count = c.fetchone()[0]
-        print(f"   📊 전체 거래 레코드: {total_count}개")
-        
-        # 상태별 분포 확인
-        c.execute("SELECT status, COUNT(*) FROM trades GROUP BY status")
-        status_dist = c.fetchall()
-        print(f"   📊 상태별 분포: {dict(status_dist)}")
-        
+        trades = c.fetchall()
         conn.close()
+        
+        if not trades:
+            return {'total_trades': 0, 'patterns': {}}
+        
+        print(f"   🔍 AI 결정 근거 분석 중... ({len(trades)}건)")
+        
+        # 패턴 분석
+        success_patterns = []
+        failure_patterns = []
+        confidence_analysis = {'high': [], 'medium': [], 'low': []}
+        reasoning_frequency = {}
+        
+        for trade in trades:
+            coin, action, pnl, confidence, ai_reasoning, reasoning, pattern, entry_price, exit_price, close_time, binance_pnl = trade
+            
+            # 실제 PnL 사용 (바이낸스 우선)
+            actual_pnl = binance_pnl if binance_pnl is not None and binance_pnl != 0 else (pnl if pnl else 0)
+            
+            # confidence가 None이면 기본값 50 사용
+            safe_confidence = confidence if confidence is not None else 50
+            
+            trade_data = {
+                'coin': coin,
+                'action': action,
+                'pnl': actual_pnl,
+                'confidence': safe_confidence,
+                'ai_reasoning': ai_reasoning or 'N/A',
+                'reasoning': reasoning or 'N/A',
+                'pattern': pattern or 'N/A',
+                'entry_price': entry_price,
+                'exit_price': exit_price,
+                'timestamp': close_time
+            }
+            
+            # 성공/실패 패턴 분류
+            if actual_pnl > 0:
+                success_patterns.append(trade_data)
+            else:
+                failure_patterns.append(trade_data)
+            
+            # 신뢰도별 분류 (None 체크 추가)
+            if safe_confidence >= 80:
+                confidence_analysis['high'].append(trade_data)
+            elif safe_confidence >= 60:
+                confidence_analysis['medium'].append(trade_data)
+            else:
+                confidence_analysis['low'].append(trade_data)
+            
+            # 추론 빈도 분석
+            if reasoning and reasoning != 'N/A':
+                reasoning_key = reasoning[:50]  # 처음 50자만 사용
+                reasoning_frequency[reasoning_key] = reasoning_frequency.get(reasoning_key, 0) + 1
+        
+        return {
+            'total_trades': len(trades),
+            'success_patterns': success_patterns,
+            'failure_patterns': failure_patterns,
+            'confidence_analysis': confidence_analysis,
+            'reasoning_frequency': reasoning_frequency
+        }
+        
     except Exception as e:
-        print(f"   ❌ DB 디버깅 오류: {e}")
+        print(f"   ❌ AI 결정 근거 분석 오류: {e}")
+        return {'total_trades': 0, 'patterns': {}}
+
+def ai_performance_review():
+    """AI 성과 리뷰 - 결정 근거 기반 분석"""
     
-    performance = get_recent_performance(7)
+    print(f"\n{'🔍'*10} 성과 리뷰 (AI 결정 근거 분석) {'🔍'*10}")
     
-    if performance['total_trades'] == 0:
-        print("\n   ⚠️ 거래 내역 없음")
+    # 🆕 봇 거래 성과 분석 (DB 우선, 바이낸스 보조)
+    try:
+        binance_performance = calculate_binance_performance(7)
+        use_binance_data = binance_performance['total_trades'] > 0
+        data_source = binance_performance.get('data_source', 'Unknown')
+    except Exception as e:
+        print(f"   ⚠️ 성과 데이터 조회 실패: {e}")
+        use_binance_data = False
+        binance_performance = None
+        data_source = 'N/A'
+    
+    # DB 데이터도 참고용으로 조회
+    try:
+        db_performance = get_recent_performance(7)
+    except Exception as e:
+        print(f"   ⚠️ DB 데이터 조회 실패: {e}")
+        db_performance = None
+    
+    # 🆕 성과 데이터 우선순위: DB 봇 거래 > 바이낸스 API > DB 일반
+    if use_binance_data:
+        performance = binance_performance
+        print(f"   ✅ 데이터 소스: {data_source}")
+    elif db_performance and db_performance['total_trades'] > 0:
+        performance = db_performance
+        data_source = "DB 일반 데이터"
+        print(f"   ✅ 데이터 소스: {data_source}")
+    else:
+        print("\n   ⚠️ 사용 가능한 거래 데이터 없음")
         return
     
     current_balance = get_available_balance()
     
     print(f"\n{'='*70}")
-    print(f"📊 AI 성과 리뷰 (최근 7일) - Risk-Adjusted Analysis")
+    print(f"📊 AI 성과 리뷰 (최근 7일) - {data_source}")
     print(f"{'='*70}")
     
     # 현재 오픈 포지션도 확인
-    open_trades = get_all_open_trades()
-    open_count = len(open_trades)
-    
-    if open_count > 0:
-        print(f"   ℹ️ 현재 오픈 포지션: {open_count}개 (아래 통계에서 제외)")
+    try:
+        open_trades = get_all_open_trades()
+        open_count = len(open_trades)
+        
+        if open_count > 0:
+            print(f"   ℹ️ 현재 오픈 포지션: {open_count}개 (아래 통계에서 제외)")
+    except:
+        open_count = 0
     
     print(f"   총 거래: {performance['total_trades']}회 (청산 완료)")
     print(f"   승률: {performance['win_rate']:.1f}%")
@@ -2596,10 +3310,87 @@ def ai_performance_review():
     print(f"   평균 손실: ${-performance['avg_loss']:+,.2f}")  # 음수로 표시하여 명확히
     print(f"   현재 잔고: ${current_balance:,.2f}")
     
-    # 🔥 Risk-Adjusted Metrics
-    print(f"\n{'─'*70}")
-    print(f"   📈 Risk-Adjusted Performance")
-    print(f"{'─'*70}")
+    # 🆕 AI 결정 근거 분석 추가
+    try:
+        decision_analysis = analyze_ai_decision_patterns(7)
+        has_decision_data = decision_analysis['total_trades'] > 0
+    except Exception as e:
+        print(f"   ⚠️ AI 결정 근거 분석 실패: {e}")
+        has_decision_data = False
+        decision_analysis = None
+    
+    # 🆕 바이낸스 데이터가 있는 경우 상세 내역 표시
+    if use_binance_data and binance_performance.get('income_data'):
+        print(f"\n{'─'*70}")
+        print(f"   📋 최근 거래 내역 (바이낸스)")
+        print(f"{'─'*70}")
+        
+        recent_trades = sorted(binance_performance['income_data'], 
+                             key=lambda x: x['timestamp'], reverse=True)[:5]
+        
+        for i, trade in enumerate(recent_trades, 1):
+            symbol = trade['symbol'].replace('USDT', '')
+            income = trade['income']
+            timestamp = trade['timestamp'].strftime('%m-%d %H:%M')
+            status_icon = "✅" if income > 0 else "❌"
+            
+            print(f"   {i}. {status_icon} {symbol}: ${income:+,.2f} ({timestamp})")
+    
+    # 🆕 AI 결정 근거 분석 섹션
+    if has_decision_data and decision_analysis:
+        print(f"\n{'─'*70}")
+        print(f"   🧠 AI 결정 근거 분석")
+        print(f"{'─'*70}")
+        
+        # 신뢰도별 성과 분석
+        conf_analysis = decision_analysis['confidence_analysis']
+        
+        for conf_level, trades in conf_analysis.items():
+            if trades:
+                level_name = {'high': '높음(80+)', 'medium': '중간(60-79)', 'low': '낮음(60미만)'}[conf_level]
+                win_trades = [t for t in trades if t['pnl'] > 0]
+                win_rate = len(win_trades) / len(trades) * 100
+                avg_pnl = sum(t['pnl'] for t in trades) / len(trades)
+                
+                print(f"   📊 신뢰도 {level_name}: {len(trades)}회 | 승률: {win_rate:.1f}% | 평균 PnL: ${avg_pnl:+,.2f}")
+        
+        # 성공 패턴 분석
+        if decision_analysis['success_patterns']:
+            print(f"\n   ✅ 성공 패턴 분석:")
+            success_patterns = decision_analysis['success_patterns']
+            
+            # 신뢰도 평균
+            avg_confidence = sum(p['confidence'] for p in success_patterns) / len(success_patterns)
+            print(f"   ├─ 성공 거래 평균 신뢰도: {avg_confidence:.1f}")
+            
+            # 상위 성공 패턴 표시
+            top_success = sorted(success_patterns, key=lambda x: x['pnl'], reverse=True)[:2]
+            for i, pattern in enumerate(top_success, 1):
+                reasoning = pattern['reasoning'][:40] + "..." if len(pattern['reasoning']) > 40 else pattern['reasoning']
+                print(f"   ├─ 성공 {i}: {pattern['coin']} (신뢰도: {pattern['confidence']}) - {reasoning}")
+        
+        # 실패 패턴 분석
+        if decision_analysis['failure_patterns']:
+            print(f"\n   ❌ 실패 패턴 분석:")
+            failure_patterns = decision_analysis['failure_patterns']
+            
+            # 신뢰도 평균
+            avg_confidence = sum(p['confidence'] for p in failure_patterns) / len(failure_patterns)
+            print(f"   ├─ 실패 거래 평균 신뢰도: {avg_confidence:.1f}")
+            
+            # 주요 실패 패턴 표시
+            worst_failures = sorted(failure_patterns, key=lambda x: x['pnl'])[:2]
+            for i, pattern in enumerate(worst_failures, 1):
+                reasoning = pattern['reasoning'][:40] + "..." if len(pattern['reasoning']) > 40 else pattern['reasoning']
+                print(f"   ├─ 실패 {i}: {pattern['coin']} (신뢰도: {pattern['confidence']}) - {reasoning}")
+        
+        # 자주 사용되는 추론 패턴
+        if decision_analysis['reasoning_frequency']:
+            print(f"\n   🔍 자주 사용된 추론:")
+            sorted_reasoning = sorted(decision_analysis['reasoning_frequency'].items(), 
+                                    key=lambda x: x[1], reverse=True)[:3]
+            for reasoning, count in sorted_reasoning:
+                print(f"   ├─ \"{reasoning}\" ({count}회)")
     
     # 🔥 Risk-Adjusted Metrics
     print(f"\n{'─'*70}")
@@ -2640,9 +3431,9 @@ def ai_performance_review():
     elif performance['total_trades'] <= 5:
         print(f"   📊 Sharpe Ratio: 5회 이상 거래 후 분석 가능")
     
-    # 💡 AI 피드백
+    # 💡 AI 피드백 (결정 근거 기반)
     print(f"\n{'─'*70}")
-    print(f"   💡 AI 피드백")
+    print(f"   💡 AI 피드백 (결정 근거 기반)")
     print(f"{'─'*70}")
     
     # 거래 횟수가 적으면 통계적 의미 없음
@@ -2650,13 +3441,50 @@ def ai_performance_review():
         print(f"   📊 샘플 부족: 거래 {performance['total_trades']}회로는 성과 평가가 어렵습니다")
         print(f"   📈 더 많은 거래 후 피드백을 제공하겠습니다")
     else:
-        # 충분한 샘플이 있을 때만 피드백
+        # 기본 성과 피드백
         if performance['win_rate'] < 40:
             print(f"   ⚠️ 승률 낮음 ({performance['win_rate']:.1f}%): Confidence 85+ 거래만 진입하세요")
         elif performance['win_rate'] > 70:
             print(f"   ✅ 승률 우수 ({performance['win_rate']:.1f}%): 현재 선별 기준 유지")
         elif performance['win_rate'] < 50:
             print(f"   📊 승률 보통 ({performance['win_rate']:.1f}%): 신중한 진입 필요")
+        
+        # 🆕 신뢰도 기반 피드백
+        if has_decision_data and decision_analysis:
+            high_conf_trades = decision_analysis['confidence_analysis']['high']
+            low_conf_trades = decision_analysis['confidence_analysis']['low']
+            
+            if high_conf_trades:
+                high_win_rate = len([t for t in high_conf_trades if t['pnl'] > 0]) / len(high_conf_trades) * 100
+                print(f"   📊 높은 신뢰도(80+) 거래 승률: {high_win_rate:.1f}%")
+                
+                if high_win_rate > 60:
+                    print(f"   ✅ 높은 신뢰도 거래가 효과적! 신뢰도 80+ 위주로 진입하세요")
+                else:
+                    print(f"   ⚠️ 높은 신뢰도에도 성과 부진 → 신호 알고리즘 재검토 필요")
+            
+            if low_conf_trades:
+                low_win_rate = len([t for t in low_conf_trades if t['pnl'] > 0]) / len(low_conf_trades) * 100
+                if low_win_rate < 30:
+                    print(f"   ⚠️ 낮은 신뢰도 거래는 피하세요 (승률: {low_win_rate:.1f}%)")
+            
+            # 🆕 실패 패턴 기반 피드백
+            if decision_analysis['failure_patterns']:
+                failure_reasons = [p['reasoning'] for p in decision_analysis['failure_patterns']]
+                common_failures = {}
+                for reason in failure_reasons:
+                    if 'RSI' in reason:
+                        common_failures['RSI'] = common_failures.get('RSI', 0) + 1
+                    if 'MACD' in reason:
+                        common_failures['MACD'] = common_failures.get('MACD', 0) + 1
+                    if '볼린저' in reason or 'Bollinger' in reason:
+                        common_failures['볼린저밴드'] = common_failures.get('볼린저밴드', 0) + 1
+                
+                if common_failures:
+                    worst_indicator = max(common_failures, key=common_failures.get)
+                    worst_count = common_failures[worst_indicator]
+                    if worst_count >= 2:
+                        print(f"   ⚠️ '{worst_indicator}' 신호 패턴이 자주 실패 ({worst_count}회) → 다른 지표 조합 고려")
         
         if performance['total_pnl'] < -50:
             print(f"   ⚠️ 손실 누적: 리스크 낮추고 더 확실한 기회만 공략")
@@ -2667,37 +3495,85 @@ def ai_performance_review():
     
     print(f"{'='*70}")
 
-# ===== 대시보드 =====
-
 def display_dashboard():
-    """대시보드 표시"""
+    """대시보드 표시 (바이낸스 실제 데이터 우선)"""
     
     current_balance = get_available_balance()
     open_trades = get_all_open_trades()
     live_positions = get_open_positions()
     
-    # 청산된 거래 조회
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''
-        SELECT pnl FROM trades
-        WHERE status = 'CLOSED'
-    ''')
-    closed_trades = [{'pnl': row[0]} for row in c.fetchall()]
-    conn.close()
+    # 🔧 포지션 불일치 체크 및 자동 동기화
+    db_position_count = len(open_trades)
+    binance_position_count = len(live_positions)
     
-    realized_pnl = sum(t['pnl'] for t in closed_trades if t['pnl'])
+    if db_position_count != binance_position_count:
+        print(f"   ⚠️ 포지션 불일치 감지: DB {db_position_count}개, 바이낸스 {binance_position_count}개")
+        
+        # 바이낸스에 없는 DB 포지션 찾기
+        binance_coins = {pos['symbol'].split('/')[0] for pos in live_positions}
+        db_coins = {trade['coin_symbol'] for trade in open_trades}
+        
+        missing_in_binance = db_coins - binance_coins
+        if missing_in_binance:
+            print(f"   🔍 바이낸스에 없는 DB 포지션: {', '.join(missing_in_binance)}")
+            print(f"   🔄 자동 동기화 시작...")
+            
+            # 🆕 자동 동기화 실행
+            synced = sync_db_with_binance()
+            if synced > 0:
+                # 동기화 후 다시 조회
+                open_trades = get_all_open_trades()
+                db_position_count = len(open_trades)
+                print(f"   ✅ 동기화 완료: DB 포지션 {db_position_count}개로 업데이트")
+    
+    # 청산된 거래 조회 (바이낸스 실제 데이터 우선)
+    try:
+        # 바이낸스 실제 수익 데이터 시도
+        binance_performance = calculate_binance_performance(30)  # 30일 데이터
+        if binance_performance['total_trades'] > 0:
+            realized_pnl = binance_performance['total_pnl']
+            closed_trades_count = binance_performance['total_trades']
+            winning_trades = binance_performance['winning_trades']
+            losing_trades = binance_performance['losing_trades']
+            win_rate = binance_performance['win_rate']
+            avg_win = binance_performance['avg_win']
+            avg_loss = -binance_performance['avg_loss']  # 음수로 표시
+            data_source = "바이낸스"
+        else:
+            raise Exception("바이낸스 데이터 없음")
+    except:
+        # DB 데이터 fallback
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute('''
+            SELECT pnl FROM trades
+            WHERE status = 'CLOSED'
+        ''')
+        closed_trades = [{'pnl': row[0] if row[0] else 0} for row in c.fetchall()]
+        conn.close()
+        
+        realized_pnl = sum(t['pnl'] for t in closed_trades)
+        closed_trades_count = len(closed_trades)
+        winning_trades = sum(1 for t in closed_trades if t.get('pnl', 0) > 0)
+        losing_trades = closed_trades_count - winning_trades
+        win_rate = (winning_trades / closed_trades_count * 100) if closed_trades_count > 0 else 0
+        avg_win = sum(t['pnl'] for t in closed_trades if t.get('pnl', 0) > 0) / winning_trades if winning_trades > 0 else 0
+        avg_loss = sum(t['pnl'] for t in closed_trades if t.get('pnl', 0) < 0) / losing_trades if losing_trades > 0 else 0
+        data_source = "DB"
+    
     unrealized_pnl = sum(pos['unrealizedPnl'] for pos in live_positions)
     total_pnl = realized_pnl + unrealized_pnl
     
     print(f"\n{'='*70}")
-    print(f"   💼 계정 현황")
+    print(f"   💼 계정 현황 ({data_source})")
     print(f"{'='*70}")
     print(f"   Available Balance: ${current_balance:,.2f}")
     print(f"   실현 손익: ${realized_pnl:+,.2f}")
     print(f"   미실현 손익: ${unrealized_pnl:+,.2f}")
     print(f"   총 손익: ${total_pnl:+,.2f}")
-    print(f"   오픈 포지션: {len(open_trades)}개")
+    print(f"   오픈 포지션: {binance_position_count}개 (바이낸스 실제)")
+    if db_position_count != binance_position_count:
+        print(f"   ⚠️ DB 기록: {db_position_count}개 (동기화 필요)")
     
     if live_positions:
         print(f"\n{'─'*70}")
@@ -2708,17 +3584,11 @@ def display_dashboard():
             direction = "🟢 LONG" if pos['side'] == 'long' else "🔴 SHORT"
             print(f"   {coin:6s} {direction} | 진입: ${pos['entryPrice']:8,.2f} | 현재: ${pos['markPrice']:8,.2f} | PnL: ${pos['unrealizedPnl']:7,.2f} ({pos['percentage']:+6.2f}%)")
     
-    if closed_trades:
-        winning_trades = sum(1 for t in closed_trades if t.get('pnl', 0) > 0)
-        losing_trades = len(closed_trades) - winning_trades
-        win_rate = (winning_trades / len(closed_trades) * 100) if closed_trades else 0
-        avg_win = sum(t['pnl'] for t in closed_trades if t.get('pnl', 0) > 0) / winning_trades if winning_trades > 0 else 0
-        avg_loss = abs(sum(t['pnl'] for t in closed_trades if t.get('pnl', 0) < 0) / losing_trades) if losing_trades > 0 else 0
-        
+    if closed_trades_count > 0:
         print(f"\n{'─'*70}")
         print(f"   📊 거래 통계")
         print(f"{'─'*70}")
-        print(f"   청산된 거래: {len(closed_trades)}회")
+        print(f"   청산된 거래: {closed_trades_count}회")
         print(f"   ├─ 승리: {winning_trades}회 (평균: ${avg_win:,.2f})")
         print(f"   └─ 손실: {losing_trades}회 (평균: ${avg_loss:,.2f})")
         print(f"   승률: {win_rate:.1f}%")
@@ -2733,7 +3603,7 @@ def main():
     model_name = AI_MODEL_CONFIG["models"][provider]
     
     print(f"\n{'='*80}")
-    print(f"  🔴 AI 실거래 트레이딩 봇 v2.0 - Risk-Adjusted Returns")
+    print(f"  🔴 AI 실거래 트레이딩 봇 v2.0 - AI 결정 근거 분석")
     print(f"{'='*80}")
     print(f"  🎯 OBJECTIVE: MAXIMIZE RISK-ADJUSTED RETURNS")
     print(f"  ⚠️  WARNING: 실제 자금으로 거래합니다!")
@@ -2744,7 +3614,9 @@ def main():
     if LIVE_TRADING_CONFIG['VOLATILITY_BASED_SIZING']:
         print(f"  ✅ 변동성 기반 사이징: ON")
     print(f"  ✅ Risk/Reward 최소: 1:2")
-    print(f"  ✅ Confidence 최소: 80")
+    print(f"  ✅ Confidence 최소: 70 (투자비율 50-100% 연동)")
+    print(f"  🧠 AI 결정 근거 분석: ON")
+    print(f"  📊 DB-바이낸스 PnL 매칭: ON")
     print(f"{'='*80}\n")
     
     # 잔고 확인
@@ -2756,10 +3628,10 @@ def main():
     
     print(f"✅ 가용 잔고: ${available_balance:,.2f}\n")
     
-    # DB 설정 (자동)
+    # DB 설정 (기존 데이터 유지)
     if os.path.exists(DB_FILE):
-        print(f"✅ 기존 DB 파일 사용: {DB_FILE}")
-        setup_database()  # 스키마만 확인
+        print(f"✅ 기존 DB 파일 사용: {DB_FILE} (거래 데이터 누적)")
+        setup_database()  # 스키마만 확인/업데이트
     else:
         print(f"✅ 새 DB 생성: {DB_FILE}")
         setup_database()
@@ -2795,21 +3667,42 @@ def main():
             # 잔고 조회
             available_balance = get_available_balance()
             
-            # 포지션 관리 (2분마다 AI 호출)
-            position_check_interval = LIVE_TRADING_CONFIG.get("POSITION_CHECK_INTERVAL", 120)
-            if current_time - last_position_check_time > position_check_interval:
+            # 🔧 포지션 관리 비활성화 (TP/SL 주문에만 의존)
+            position_check_interval = LIVE_TRADING_CONFIG.get("POSITION_CHECK_INTERVAL", 0)
+            if position_check_interval > 0 and current_time - last_position_check_time > position_check_interval:
                 manage_live_positions()
                 last_position_check_time = current_time
+            elif position_check_interval == 0:
+                # AI 중간평가 완전 비활성화
+                pass
             
+            # 🔧 포지션 수 체크: 바이낸스 실제 포지션 기준
             open_trades = get_all_open_trades()
-            open_positions_count = len(open_trades)
+            live_positions = get_open_positions()
+            
+            # 바이낸스 실제 포지션 수 사용 (DB와 불일치 가능)
+            open_positions_count = len(live_positions)
+            db_positions_count = len(open_trades)
+            
+            # 불일치 시 자동 동기화
+            if db_positions_count != open_positions_count:
+                print(f"   ⚠️ 포지션 불일치: DB {db_positions_count}개, 바이낸스 {open_positions_count}개")
+                print(f"   🔄 자동 동기화 실행...")
+                
+                synced = sync_db_with_binance()
+                if synced > 0:
+                    # 동기화 후 다시 조회
+                    open_trades = get_all_open_trades()
+                    db_positions_count = len(open_trades)
+                    open_positions_count = len(live_positions)
+                    print(f"   ✅ 동기화 완료: DB {db_positions_count}개 = 바이낸스 {open_positions_count}개")
             
             # 성과 리뷰
             if current_time - last_review_time > LIVE_TRADING_CONFIG['PERFORMANCE_REVIEW_INTERVAL']:
                 ai_performance_review()
                 last_review_time = current_time
             
-            # 포지션이 꽉 찼는지 체크
+            # 포지션이 꽉 찼는지 체크 (바이낸스 실제 포지션 기준)
             max_positions = LIVE_TRADING_CONFIG['MAX_CONCURRENT_POSITIONS']
             if open_positions_count >= max_positions:
                 print(f"\n{'='*80}")
