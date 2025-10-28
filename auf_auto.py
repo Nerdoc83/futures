@@ -788,6 +788,13 @@ def get_open_positions() -> List[Dict]:
                 percentage = pos.get('percentage', 0)
                 leverage = pos.get('leverage', 1)
                 notional = pos.get('notional', 0)
+                initial_margin = pos.get('initialMargin', 0)
+                collateral = pos.get('collateral', 0)
+                
+                # 실제 레버리지 계산 (notional / initialMargin)
+                actual_leverage = leverage  # 기본값
+                if initial_margin and float(initial_margin) != 0:
+                    actual_leverage = abs(float(notional) / float(initial_margin))
                 
                 open_positions.append({
                     'symbol': pos['symbol'],
@@ -798,7 +805,10 @@ def get_open_positions() -> List[Dict]:
                     'unrealizedPnl': float(unrealized_pnl) if unrealized_pnl is not None else 0,
                     'percentage': float(percentage) if percentage is not None else 0,
                     'leverage': float(leverage) if leverage is not None else 1,
+                    'actualLeverage': float(actual_leverage),  # 🆕 실제 계산된 레버리지
                     'notional': float(notional) if notional is not None else 0,
+                    'initialMargin': float(initial_margin) if initial_margin is not None else 0,
+                    'collateral': float(collateral) if collateral is not None else 0,
                     'marginMode': pos.get('marginMode', 'isolated')
                 })
         
@@ -965,6 +975,16 @@ def sync_db_with_binance():
                 if pos_info:
                     print(f"   📥 {coin} 포지션을 DB에 추가 중...")
                     
+                    # 실제 레버리지 및 투자금 계산
+                    actual_leverage = pos_info.get('actualLeverage', pos_info.get('leverage', 1))
+                    initial_margin = pos_info.get('initialMargin', 0)
+                    
+                    # 투자금: initialMargin이 있으면 사용, 없으면 notional/leverage로 계산
+                    if initial_margin and initial_margin > 0:
+                        investment_amount = initial_margin
+                    else:
+                        investment_amount = abs(pos_info['notional']) / actual_leverage if actual_leverage > 0 else abs(pos_info['notional'])
+                    
                     # 수동 진입 포지션으로 DB에 추가
                     c.execute('''
                         INSERT INTO trades (
@@ -977,8 +997,8 @@ def sync_db_with_binance():
                         pos_info['side'],
                         pos_info['entryPrice'],
                         pos_info['contracts'],
-                        pos_info.get('leverage', 1),
-                        abs(pos_info['notional']) / pos_info.get('leverage', 1),
+                        round(actual_leverage, 1),  # 실제 레버리지 (소수점 1자리)
+                        investment_amount,
                         None,  # sl_price
                         None,  # tp_price
                         'MANUAL',
@@ -987,7 +1007,10 @@ def sync_db_with_binance():
                     ))
                     
                     synced_count += 1
-                    print(f"     ✅ {coin} DB 추가 완료 (진입가: ${pos_info['entryPrice']:,.2f})")
+                    print(f"     ✅ {coin} DB 추가 완료")
+                    print(f"        진입가: ${pos_info['entryPrice']:,.2f}")
+                    print(f"        레버리지: {actual_leverage:.1f}x")
+                    print(f"        투자금: ${investment_amount:.2f}")
         
         conn.commit()
         conn.close()
