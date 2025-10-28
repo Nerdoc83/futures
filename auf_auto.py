@@ -1182,8 +1182,9 @@ def save_trade_to_db(trade_data: Dict) -> int:
         INSERT INTO trades (
             coin_symbol, action, entry_price, amount, leverage,
             investment_amount, sl_price, tp_price, trading_style,
-            holding_time_estimate, ai_reasoning, market_conditions, binance_order_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            holding_time_estimate, ai_reasoning, market_conditions, binance_order_id,
+            confidence_score
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (
         trade_data['coin_symbol'],
         trade_data['action'],
@@ -1197,7 +1198,8 @@ def save_trade_to_db(trade_data: Dict) -> int:
         trade_data.get('holding_time_estimate', 'Unknown'),
         trade_data['ai_reasoning'],
         trade_data.get('market_conditions', ''),
-        trade_data.get('binance_order_id', '')
+        trade_data.get('binance_order_id', ''),
+        trade_data.get('confidence_score', 0)
     ))
     
     trade_id = c.lastrowid
@@ -2894,7 +2896,8 @@ def execute_live_trade(coin_data: Dict, decision: Dict, available_balance: float
             'holding_time_estimate': decision.get('holding_time_estimate', 'Unknown'),
             'ai_reasoning': decision['reasoning'],
             'market_conditions': json.dumps(decision.get('key_factors', [])),
-            'binance_order_id': order['id']
+            'binance_order_id': order['id'],
+            'confidence_score': decision.get('confidence', 0)  # 🆕 신뢰도 추가
         }
         
         trade_id = save_trade_to_db(trade_data)

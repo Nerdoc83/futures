@@ -3,6 +3,9 @@ AI Trading Dashboard - Streamlit
 실시간 거래 모니터링 대시보드
 """
 
+import warnings
+warnings.filterwarnings('ignore', category=FutureWarning, message='.*DataFrame concatenation.*')
+
 import streamlit as st
 import pandas as pd
 import sqlite3
@@ -260,11 +263,12 @@ def load_open_positions():
                     db_coins = set(db_positions['coin_symbol'])
                     manual_positions = real_df[~real_df['coin_symbol'].isin(db_coins)]
                     
-                    # 병합 (빈 데이터프레임 체크)
-                    if manual_positions.empty:
-                        combined = db_positions
-                    else:
+                    # 병합 (빈 데이터프레임 처리)
+                    if not manual_positions.empty:
+                        manual_positions['source'] = 'MANUAL'
                         combined = pd.concat([db_positions, manual_positions], ignore_index=True)
+                    else:
+                        combined = db_positions
                     return combined
                 else:
                     # DB 포지션 없으면 바이낸스만
