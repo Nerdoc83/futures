@@ -24,12 +24,6 @@ try:
 except ImportError:
     psutil = None
 
-# API 초기화 코드를 제거했으므로, 관련된 라이브러리 임포트 제거 (ccxt, dotenv)
-
-# 바이낸스 API 초기화 제거
-# exchange = None
-# BINANCE_AVAILABLE = False # 이제 항상 False와 동일하게 동작
-
 # 페이지 설정
 st.set_page_config(
     page_title="AI Trading Dashboard (DB Only)",
@@ -91,6 +85,29 @@ st.markdown("""
     .log-success {
         color: #4ec9b0;
     }
+    /* AI 피드백 카드 스타일 */
+    .ai-feedback-card {
+        padding: 15px;
+        border-left: 5px solid #ff4b4b;
+        border-radius: 5px;
+        margin-bottom: 15px;
+        background-color: #1e1e1e;
+        box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
+    }
+    .ai-feedback-card.positive {
+        border-left: 5px solid #00cc00;
+        background-color: #f0fff0; /* Light green background */
+        color: #000;
+    }
+    .ai-feedback-card.negative {
+        border-left: 5px solid #ff4b4b;
+        background-color: #fff0f0; /* Light red background */
+        color: #000;
+    }
+    .ai-feedback-card h4 {
+        margin-top: 0;
+        color: #1f77b4;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -99,7 +116,7 @@ DB_FILE = "live_trading.db"
 LOG_FILE = "trading_bot.log"
 
 # 봇 프로세스 관리
-BOT_SCRIPT = "live_trading.py"
+BOT_SCRIPT = "auf_auto.py" # 봇 스크립트 파일명 업데이트
 
 def get_db_connection():
     """DB 연결"""
@@ -157,7 +174,7 @@ def load_open_positions():
             # 안전한 쿼리 (exit_price가 NULL 또는 0인 경우)
             db_positions = pd.read_sql_query("""
                 SELECT * FROM trades 
-                WHERE exit_price IS NULL OR exit_price = 0
+                WHERE status = 'OPEN'
                 ORDER BY timestamp DESC
             """, conn)
             
@@ -197,30 +214,39 @@ def load_ai_decisions():
     try:
         df = pd.read_sql_query(query, conn)
         conn.close()
+        if not df.empty:
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
         return df
     except Exception as e:
         st.error(f"AI 결정 로드 오류: {e}")
         return pd.DataFrame()
 
-# 바이낸스 계정 정보 조회 함수 제거
-# def get_binance_account_info():
-#     """바이낸스 계정 정보 조회"""
-#     ...
+@st.cache_data(ttl=60) # 60초간 캐시
+def load_performance_reviews():
+    """AI 성과 리뷰 데이터 로드 (새로운 함수)"""
+    conn = get_db_connection()
+    if not conn:
+        return pd.DataFrame()
+    
+    query = """
+        SELECT * FROM performance_reviews
+        ORDER BY timestamp DESC
+        LIMIT 50
+    """
+    
+    try:
+        df = pd.read_sql_query(query, conn)
+        conn.close()
+        if not df.empty:
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+        return df
+    except Exception as e:
+        # 테이블이 없을 경우 에러 메시지 대신 빈 DataFrame 반환
+        if "no such table" in str(e):
+            return pd.DataFrame()
+        st.error(f"AI 성과 리뷰 로드 오류: {e}")
+        return pd.DataFrame()
 
-# 바이낸스 거래 내역 조회 함수 제거
-# def get_binance_trade_history(days=30, limit=1000):
-#     """바이낸스 거래 내역 조회"""
-#     ...
-
-# 바이낸스 수익 내역 조회 함수 제거
-# def get_binance_income_history(days=30):
-#     """바이낸스 수익 내역 조회 (realized PnL)"""
-#     ...
-
-# 바이낸스 실제 데이터로 메트릭 계산 함수 제거
-# def calculate_binance_metrics(income_df, trades_df, open_positions_df):
-#     """바이낸스 실제 데이터로 메트릭 계산"""
-#     ...
 
 def calculate_db_metrics(trades_df):
     """DB 데이터로 성과 지표 계산"""
@@ -250,7 +276,7 @@ def calculate_db_metrics(trades_df):
         closed_trades = len(trades_df[trades_df['status'] == 'CLOSED'])
         closed_df = trades_df[trades_df['status'] == 'CLOSED'].copy()
     else:
-        # status 컬럼이 없으면 exit_price 기준으로 판단
+        # status 컬럼이 없으면 exit_price 기준으로 판단 (임시)
         open_trades = len(trades_df[trades_df['exit_price'].isna() | (trades_df['exit_price'] == 0)])
         closed_trades = len(trades_df[trades_df['exit_price'].notna() & (trades_df['exit_price'] != 0)])
         closed_df = trades_df[trades_df['exit_price'].notna() & (trades_df['exit_price'] != 0)].copy()
@@ -275,7 +301,10 @@ def calculate_db_metrics(trades_df):
         
         realized_pnl = closed_df['actual_pnl'].sum()
         avg_win = closed_df[closed_df['actual_pnl'] > 0]['actual_pnl'].mean() if winning_trades > 0 else 0
+        # avg_loss는 음수값이므로 절대값으로 표시
         avg_loss = closed_df[closed_df['actual_pnl'] < 0]['actual_pnl'].mean() if losing_trades > 0 else 0
+        avg_loss = abs(avg_loss)
+        
         best_trade = closed_df['actual_pnl'].max()
         worst_trade = closed_df['actual_pnl'].min()
         
@@ -310,7 +339,7 @@ def calculate_db_metrics(trades_df):
         'realized_pnl': realized_pnl,
         'unrealized_pnl': unrealized_pnl,
         'avg_win': avg_win,
-        'avg_loss': avg_loss,
+        'avg_loss': avg_loss, # 절대값으로 반환
         'best_trade': best_trade,
         'worst_trade': worst_trade,
         'avg_holding_time': avg_holding_time
@@ -364,12 +393,7 @@ def check_bot_running():
         try:
             if sys.platform == 'win32':
                 # Windows
-                result = subprocess.run(
-                    ['tasklist', '/FI', f'IMAGENAME eq python.exe'],
-                    capture_output=True,
-                    text=True
-                )
-                # 더 정확한 체크를 위해 로그 파일 수정 시간 확인
+                # 로그 파일 수정 시간으로 판단
                 if os.path.exists(LOG_FILE):
                     mtime = os.path.getmtime(LOG_FILE)
                     # 로그가 최근 5분 내에 수정되었으면 실행 중으로 판단
@@ -441,6 +465,61 @@ def stop_bot():
         st.error(f"봇 중지 오류: {e}")
         return False
 
+# ===== 새로운 탭 함수: AI 성과 리뷰 =====
+def display_ai_reviews(reviews_df):
+    """AI 성과 리뷰 탭 표시"""
+    st.header("🧠 AI 성과 리뷰 (Bot DB 기반)")
+
+    if reviews_df.empty:
+        st.info("아직 봇에 저장된 AI 성과 리뷰 데이터가 없습니다.")
+        st.caption("AI 봇이 주기적으로 성과 리뷰를 실행하고 DB에 저장해야 표시됩니다.")
+        return
+
+    # 최신 10개 리뷰만 표시
+    recent_reviews = reviews_df.head(10)
+
+    for idx, row in recent_reviews.iterrows():
+        # PnL 기반 카드 스타일 결정
+        if row['total_pnl'] > 0:
+            card_class = "ai-feedback-card positive"
+            icon = "🌟"
+        elif row['total_pnl'] < 0:
+            card_class = "ai-feedback-card negative"
+            icon = "⚠️"
+        else:
+            card_class = "ai-feedback-card"
+            icon = "💡"
+
+        # HTML 마크다운으로 카드 생성
+        st.markdown(
+            f'<div class="{card_class}">'
+            f'<h4>{icon} {row["timestamp"].strftime("%Y-%m-%d %H:%M:%S")} 리뷰</h4>'
+            '</div>',
+            unsafe_allow_html=True
+        )
+
+        # 리뷰 내용 상세
+        col1, col2, col3, col4 = st.columns(4)
+
+        with col1:
+            st.metric("총 거래", f"{row['total_trades']}회", delta=f"승률: {row['win_rate']:.1f}%")
+        with col2:
+            st.metric("총 손익", f"${row['total_pnl']:,.2f}", delta_color="normal" if row['total_pnl'] >= 0 else "inverse")
+        with col3:
+            st.metric("평균 수익", f"${row['avg_win']:,.2f}", delta=f"승리: {row['winning_trades']}회")
+        with col4:
+            st.metric("평균 손실", f"${row['avg_loss']:,.2f}", delta=f"손실: {row['losing_trades']}회")
+        
+        st.markdown("**🤖 AI 피드백:**")
+        # 줄바꿈이 포함된 텍스트를 Preformatted 텍스트로 표시
+        st.text(row['ai_feedback'])
+        
+        st.markdown("---")
+
+    st.subheader("📝 전체 리뷰 데이터 테이블")
+    st.dataframe(reviews_df, use_container_width=True)
+
+
 # ===== 메인 대시보드 =====
 
 def main():
@@ -453,14 +532,14 @@ def main():
         bot_running = check_bot_running()
         
         if bot_running:
-            st.success("🟢 봇 실행 중")
+            st.success(f"🟢 봇 실행 중 ({BOT_SCRIPT})")
             if st.button("⏹️ 봇 중지", use_container_width=True):
                 if stop_bot():
                     st.success("봇이 중지되었습니다.")
                     time.sleep(1)
                     st.rerun()
         else:
-            st.error("🔴 봇 중지됨")
+            st.error(f"🔴 봇 중지됨 ({BOT_SCRIPT})")
             if st.button("▶️ 봇 시작", use_container_width=True):
                 if start_bot():
                     st.success("봇이 시작되었습니다.")
@@ -479,10 +558,6 @@ def main():
             if st.button("🔄 수동 새로고침", use_container_width=True):
                 st.rerun()
         
-        # 이전에 버튼이 중복되어 있었으므로 하나 제거
-        # if st.button("🔄 수동 새로고침", use_container_width=True):
-        #     st.rerun()
-        
         st.markdown("---")
         
         st.header("📊 표시 옵션")
@@ -490,20 +565,11 @@ def main():
         show_ai_decisions = st.checkbox("AI 결정 표시", value=False)
         log_lines = st.slider("로그 라인 수", 50, 500, 200, 50)
         
-        # 바이낸스 계정 정보 표시 제거
-        # if account_info:
-        #     st.sidebar.markdown("---")
-        #     st.sidebar.subheader("💰 바이낸스 계정")
-        #     st.sidebar.metric("총 잔고", f"${account_info['total_balance']:,.2f}")
-        #     st.sidebar.metric("가용 잔고", f"${account_info['available_balance']:,.2f}")
-        #     st.sidebar.metric("사용 중", f"${account_info['used_balance']:,.2f}")
     
     # 데이터 로드 (DB만 사용)
     trades_df = load_trades()
     open_positions_df = load_open_positions()
-    
-    # 바이낸스 실제 데이터 사용 체크박스 제거
-    # use_binance_data = st.sidebar.checkbox(...)
+    ai_reviews_df = load_performance_reviews() # AI 리뷰 데이터 로드
     
     # DB 데이터 사용으로 통일
     metrics = calculate_db_metrics(trades_df)
@@ -549,12 +615,13 @@ def main():
             delta=f"청산: {metrics['closed_trades']}회"
         )
     
-    # 탭 구성
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    # 탭 구성 (AI 리뷰 탭 추가)
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "📊 오픈 포지션",
         "📜 거래 내역",
         "📈 성과 분석",
         "🤖 AI 결정",
+        "🧠 AI 성과 리뷰", # 새 탭
         "📋 실시간 로그"
     ])
     
@@ -568,18 +635,11 @@ def main():
             # DB 기반이므로 모든 포지션은 'BOT' 소스로 간주
             bot_positions = open_positions_df
             
-            # 수동 포지션 관련 UI 제거
-            # if not manual_positions.empty: ...
-            # st.markdown("---")
-            
             if not bot_positions.empty:
                 st.subheader(f"🤖 봇 포지션 ({len(bot_positions)}개)")
                 for idx, row in bot_positions.iterrows():
                     side_emoji = "🟢" if row['action'] == 'long' else "🔴"
                     style_emoji = {"SCALPING": "⚡", "DAY_TRADING": "📊", "SWING_TRADING": "📈"}.get(row['trading_style'], "📊")
-                    
-                    # DB만 사용하므로 현재 가격과 미실현 손익은 표시 불가 (None)
-                    pnl_display = ""
                     
                     with st.expander(f"{side_emoji} {row['coin_symbol']} {row['action'].upper()} - {style_emoji} {row['trading_style']}", expanded=True):
                         col1, col2, col3, col4 = st.columns(4)
@@ -593,7 +653,6 @@ def main():
                         with col2:
                             st.metric("투자금", f"${row['investment_amount']:,.2f}")
                             st.metric("수량", f"{row['amount']:.8f}")
-                            # 포지션 크기 (notional)는 DB만으로는 표시 불가
                             st.caption("포지션 크기: (API 없음)")
                         
                         with col3:
@@ -615,7 +674,8 @@ def main():
                             st.markdown(f"**⏱️ 예상 보유:** {row['holding_time_estimate']}")
                         if pd.notna(row['timestamp']):
                             st.markdown(f"**📅 진입 시간:** {row['timestamp']}")
-                        st.markdown(f"**💭 AI 분석:** {row['ai_reasoning']}")
+                        if pd.notna(row['ai_reasoning']):
+                            st.markdown(f"**💭 AI 분석:** {row['ai_reasoning']}")
             
             # 전체 포지션 수 표시
             st.markdown("---")
@@ -632,13 +692,35 @@ def main():
             # 필터
             col1, col2, col3 = st.columns(3)
             
+            # DB에 저장된 실제 상태 값 확인
+            actual_statuses = []
+            if 'status' in trades_df.columns:
+                actual_statuses = trades_df['status'].dropna().unique().tolist()
+            
+            # 사용할 수 있는 전체 상태 옵션 (DB 값과 기본 값의 합집합)
+            status_options = list(set(['OPEN', 'CLOSED'] + actual_statuses))
+            
+            # 기본 선택 값: show_closed가 True면 OPEN과 CLOSED 모두, 아니면 OPEN만 선택
+            # status_options 내에 존재하는 값만 default로 사용
+            default_status = []
+            if 'OPEN' in status_options:
+                default_status.append('OPEN')
+            if show_closed and 'CLOSED' in status_options:
+                default_status.append('CLOSED')
+            
+            # 만약 DB에 OPEN/CLOSED 외의 다른 상태가 있다면 그것도 포함
+            for status in actual_statuses:
+                if status not in default_status:
+                    # 기본적으로 OPEN/CLOSED만 표시하고 싶다면 이 줄은 제거하거나,
+                    # 사용자가 원하는 경우에만 다른 상태를 포함하도록 로직을 복잡하게 만들어야 합니다.
+                    # 여기서는 사용자 설정에 따라 OPEN/CLOSED만 기본으로 선택되도록 유지합니다.
+                    pass 
+
             with col1:
-                # status 컬럼이 없는 경우를 대비하여 기본값 처리
-                status_options = trades_df['status'].dropna().unique().tolist() if 'status' in trades_df.columns else ['OPEN', 'CLOSED']
                 status_filter = st.multiselect(
                     "상태 필터",
                     options=status_options,
-                    default=['OPEN', 'CLOSED'] if show_closed else ['OPEN']
+                    default=default_status
                 )
             
             with col2:
@@ -765,9 +847,6 @@ def main():
     with tab3:
         st.header("📈 성과 분석 (DB 기반)")
         
-        # 데이터 소스 표시 제거
-        # if use_binance_data and BINANCE_AVAILABLE: ...
-        
         if trades_df.empty or metrics['closed_trades'] == 0:
             st.info("청산된 거래가 없어 성과 분석을 표시할 수 없습니다.")
         else:
@@ -873,7 +952,7 @@ def main():
                 st.metric("Profit Factor", f"{profit_factor:.2f}")
                 
                 expectancy = (metrics['win_rate'] / 100 * metrics['avg_win']) + \
-                            ((1 - metrics['win_rate'] / 100) * metrics['avg_loss'])
+                            ((1 - metrics['win_rate'] / 100) * -metrics['avg_loss']) # avg_loss가 양수이므로 -를 붙여야 함
                 st.metric("Expectancy", f"${expectancy:.2f}")
             
             with col4:
@@ -923,9 +1002,13 @@ def main():
                         st.text(row['reasoning'])
         else:
             st.info("사이드바에서 'AI 결정 표시'를 활성화하세요.")
-    
-    # 탭 5: 실시간 로그
+
+    # 탭 5: AI 성과 리뷰 (새로 추가된 탭)
     with tab5:
+        display_ai_reviews(ai_reviews_df)
+    
+    # 탭 6: 실시간 로그
+    with tab6:
         st.header("📋 실시간 거래 로그")
         
         log_lines_list = read_log_file(log_lines)
