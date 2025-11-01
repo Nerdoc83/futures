@@ -31,15 +31,17 @@ load_dotenv()
 LOG_FILE = "trading_bot.log"
 
 class Logger:
-    """파일과 콘솔에 동시 로깅"""
+    """파일과 콘솔에 동시 로깅 (즉시 flush)"""
     def __init__(self, filename):
         self.terminal = sys.stdout
-        self.log = open(filename, 'a', encoding='utf-8')
+        # buffering=1 = 라인 버퍼링 (줄 단위 즉시 flush)
+        self.log = open(filename, 'a', encoding='utf-8', buffering=1)
     
     def write(self, message):
         self.terminal.write(message)
+        self.terminal.flush()  # 🆕 터미널도 즉시 flush
         self.log.write(message)
-        self.log.flush()
+        self.log.flush()  # 🆕 파일도 즉시 flush
     
     def flush(self):
         self.terminal.flush()
@@ -48,6 +50,9 @@ class Logger:
 # 로거 초기화
 sys.stdout = Logger(LOG_FILE)
 sys.stderr = Logger(LOG_FILE)
+
+# 🆕 Python unbuffered mode 강제 (환경변수)
+os.environ['PYTHONUNBUFFERED'] = '1'
 
 # ===== AI 모델 선택 =====
 AI_MODEL_CONFIG = {
@@ -1030,7 +1035,7 @@ def sync_db_with_binance():
 
 
 def cleanup_orphaned_orders():
-    """🆕 포지션 없는 TP/SL 주문 정리 - 심볼별 조회"""
+    """🆕 포지션 없는 TP/SL 주문 정리 - 간소화 버전"""
     try:
         print(f"\n{'='*70}")
         print(f"🧹 고아 TP/SL 주문 정리 시작")
@@ -1042,44 +1047,58 @@ def cleanup_orphaned_orders():
         
         print(f"   오픈 포지션: {len(position_symbols)}개")
         
-        # 2. DB에서 거래한 심볼 조회
+        # 2. DB에서 거래한 심볼 조회 (최근 30일)
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
-        c.execute("SELECT DISTINCT coin_symbol FROM trades")
+        cutoff = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+        c.execute("""
+            SELECT DISTINCT coin_symbol FROM trades 
+            WHERE timestamp >= ?
+        """, (cutoff,))
         traded_coins = [row[0] for row in c.fetchall()]
         conn.close()
         
-        # 3. 거래한 심볼만 체크
-        all_symbols = [f"{coin}/USDT:USDT" for coin in traded_coins]
+        print(f"   최근 거래 심볼: {len(traded_coins)}개")
         
+        # 3. 각 심볼별 TP/SL 주문 확인 및 정리
         orphaned_count = 0
-        for symbol in all_symbols:
+        for coin in traded_coins:
+            symbol = f"{coin}/USDT:USDT"
+            
             # 포지션 있으면 스킵
             if symbol in position_symbols:
                 continue
             
-            # 이 심볼의 미체결 주문 조회
-            orders = get_open_orders(symbol)
-            if not orders:
-                continue
-            
-            # TP/SL 주문만 필터링
-            tp_sl_orders = [
-                order for order in orders 
-                if order['type'] in ['TAKE_PROFIT_MARKET', 'STOP_MARKET', 
-                                      'STOP_LOSS_MARKET', 'TAKE_PROFIT']
-            ]
-            
-            if tp_sl_orders:
-                coin = symbol.replace('/USDT:USDT', '')
-                print(f"\n   🗑️ {coin}: TP/SL 주문 {len(tp_sl_orders)}개 정리 중...")
+            try:
+                # 이 심볼의 미체결 주문 조회
+                orders = get_open_orders(symbol)
+                if not orders:
+                    continue
                 
-                try:
+                # TP/SL 주문만 필터링
+                tp_sl_orders = [
+                    order for order in orders 
+                    if order['type'] in ['TAKE_PROFIT_MARKET', 'STOP_MARKET', 
+                                          'STOP_LOSS_MARKET', 'TAKE_PROFIT']
+                ]
+                
+                if tp_sl_orders:
+                    print(f"\n   🗑️ {coin}: TP/SL 주문 {len(tp_sl_orders)}개 발견")
+                    
+                    # 각 주문 상세 출력
+                    for order in tp_sl_orders:
+                        print(f"      - {order['type']} @ ${order.get('price', 0):,.2f}")
+                    
+                    # 전부 취소
                     cancelled = cancel_all_orders(symbol)
                     orphaned_count += cancelled
-                    print(f"     ✅ {cancelled}개 취소 완료")
-                except Exception as e:
-                    print(f"     ❌ 취소 실패: {e}")
+                    print(f"      ✅ {cancelled}개 취소 완료")
+                    
+            except Exception as e:
+                # 심볼별 오류는 스킵 (다음 심볼 계속 처리)
+                if 'does not have market symbol' not in str(e):
+                    print(f"   ⚠️ {coin} 처리 실패: {e}")
+                continue
         
         if orphaned_count > 0:
             print(f"\n   ✅ 고아 주문 정리 완료: {orphaned_count}개 취소")
@@ -1270,28 +1289,52 @@ def save_trade_to_db(trade_data: Dict) -> int:
     return trade_id
 
 def update_trade_close(trade_id: int, close_data: Dict):
-    """거래 청산 정보 업데이트 (바이낸스 실제 결과 사용)"""
+    """거래 청산 정보 업데이트 (바이낸스 실제 결과 사용 + AI 청산 이유 추가)"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     
-    c.execute('''
-        UPDATE trades SET
-            exit_price = ?,
-            pnl = ?,
-            pnl_percentage = ?,
-            status = 'CLOSED',
-            close_timestamp = CURRENT_TIMESTAMP,
-            binance_pnl = ?,
-            binance_close_price = ?
-        WHERE id = ?
-    ''', (
-        close_data.get('close_price', 0),
-        close_data.get('pnl', 0),
-        close_data.get('pnl_percentage', 0),
-        close_data.get('binance_pnl', 0),
-        close_data.get('binance_close_price', 0),
-        trade_id
-    ))
+    # 🆕 AI 청산 이유가 있으면 ai_reasoning에 추가
+    if close_data.get('ai_close_reason'):
+        c.execute('''
+            UPDATE trades SET
+                exit_price = ?,
+                pnl = ?,
+                pnl_percentage = ?,
+                status = 'CLOSED',
+                close_timestamp = CURRENT_TIMESTAMP,
+                binance_pnl = ?,
+                binance_close_price = ?,
+                ai_reasoning = COALESCE(ai_reasoning, '') || ?
+            WHERE id = ?
+        ''', (
+            close_data.get('close_price', 0),
+            close_data.get('pnl', 0),
+            close_data.get('pnl_percentage', 0),
+            close_data.get('binance_pnl', 0),
+            close_data.get('binance_close_price', 0),
+            f"\n[청산 이유] {close_data.get('ai_close_reason')}",
+            trade_id
+        ))
+    else:
+        # AI 이유 없으면 기존 방식
+        c.execute('''
+            UPDATE trades SET
+                exit_price = ?,
+                pnl = ?,
+                pnl_percentage = ?,
+                status = 'CLOSED',
+                close_timestamp = CURRENT_TIMESTAMP,
+                binance_pnl = ?,
+                binance_close_price = ?
+            WHERE id = ?
+        ''', (
+            close_data.get('close_price', 0),
+            close_data.get('pnl', 0),
+            close_data.get('pnl_percentage', 0),
+            close_data.get('binance_pnl', 0),
+            close_data.get('binance_close_price', 0),
+            trade_id
+        ))
     
     conn.commit()
     conn.close()
@@ -3116,7 +3159,8 @@ def manage_live_positions():
                                 'pnl': close_result['pnl'],
                                 'pnl_percentage': (close_result['pnl'] / trade['investment'] * 100) if trade.get('investment', 0) > 0 else 0,
                                 'binance_pnl': close_result['pnl'],
-                                'binance_close_price': live_pos['entryPrice']
+                                'binance_close_price': live_pos['entryPrice'],
+                                'ai_close_reason': decision.get('reason', 'AI 조기 청산')  # 🆕 AI 이유 추가
                             }
                             update_trade_close(trade['id'], close_data)
                             
@@ -3128,13 +3172,30 @@ def manage_live_positions():
                             print(f"   ✅ DB 업데이트 완료 (실현 PnL: ${close_result['pnl']:+,.2f})")
                         continue
                     
-                    # DB 업데이트 (바이낸스 실제 PnL 사용)
+                    # 🆕 청산 성공 시 즉시 TP/SL 주문 정리
+                    try:
+                        open_orders = get_open_orders(symbol)
+                        tp_sl_orders = [
+                            order for order in open_orders 
+                            if order['type'] in ['TAKE_PROFIT_MARKET', 'STOP_MARKET', 
+                                                  'STOP_LOSS_MARKET', 'TAKE_PROFIT']
+                        ]
+                        
+                        if tp_sl_orders:
+                            print(f"   🗑️ TP/SL 주문 {len(tp_sl_orders)}개 정리 중...")
+                            cancelled = cancel_all_orders(symbol)
+                            print(f"   ✅ {cancelled}개 주문 취소 완료")
+                    except Exception as cleanup_error:
+                        print(f"   ⚠️ TP/SL 정리 실패: {cleanup_error}")
+                    
+                    # DB 업데이트 (바이낸스 실제 PnL 사용 + 🆕 AI 청산 이유)
                     close_data = {
                         'close_price': close_result['close_price'],
                         'pnl': close_result['pnl'],
                         'pnl_percentage': (close_result['pnl'] / trade['investment'] * 100) if trade.get('investment', 0) > 0 else 0,
                         'binance_pnl': close_result['pnl'],
-                        'binance_close_price': close_result['close_price']
+                        'binance_close_price': close_result['close_price'],
+                        'ai_close_reason': decision.get('reason', 'AI 조기 청산')  # 🆕 AI 이유 추가
                     }
                     
                     update_trade_close(trade['id'], close_data)
@@ -3558,6 +3619,62 @@ def ai_performance_review():
             print(f"   📊 소폭 손실: 전략 점검 후 계속 진행")
     
     print(f"{'='*70}")
+    
+    # 🆕 성과 리뷰 데이터를 DB에 저장
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        
+        # AI 피드백 텍스트 생성
+        feedback_parts = []
+        
+        if performance['total_trades'] >= 3:
+            feedback_parts.append(f"승률: {performance['win_rate']:.1f}%")
+            
+            if performance['win_rate'] < 40:
+                feedback_parts.append("승률 개선 필요")
+            elif performance['win_rate'] > 70:
+                feedback_parts.append("승률 우수")
+            
+            if has_decision_data and decision_analysis:
+                high_conf = decision_analysis['confidence_analysis'].get('high', [])
+                if high_conf:
+                    high_win_rate = len([t for t in high_conf if t['pnl'] > 0]) / len(high_conf) * 100
+                    feedback_parts.append(f"높은 신뢰도 승률: {high_win_rate:.1f}%")
+            
+            if performance['avg_loss'] > 0:
+                rr_ratio = abs(performance['avg_win'] / performance['avg_loss'])
+                feedback_parts.append(f"Risk/Reward: 1:{rr_ratio:.2f}")
+        else:
+            feedback_parts.append(f"데이터 수집 중 ({performance['total_trades']}회)")
+        
+        ai_feedback = " | ".join(feedback_parts)
+        
+        # INSERT
+        c.execute('''
+            INSERT INTO performance_reviews (
+                total_trades, winning_trades, losing_trades, total_pnl,
+                win_rate, avg_win, avg_loss, current_balance, ai_feedback
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            performance['total_trades'],
+            performance['winning_trades'],
+            performance['losing_trades'],
+            performance['total_pnl'],
+            performance['win_rate'],
+            performance['avg_win'],
+            performance['avg_loss'],
+            current_balance,
+            ai_feedback
+        ))
+        
+        conn.commit()
+        conn.close()
+        
+        print(f"\n   💾 성과 리뷰 데이터 DB 저장 완료")
+        
+    except Exception as e:
+        print(f"\n   ⚠️ DB 저장 실패: {e}")
 
 def display_dashboard():
     """대시보드 표시 (바이낸스 실제 데이터 우선)"""
@@ -3873,9 +3990,22 @@ def main():
             break
             
         except Exception as e:
-            print(f"\n❌ 오류: {e}")
+            # 🆕 즉시 flush하여 에러 로그 보장
+            error_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            print(f"\n{'='*80}")
+            print(f"❌ [{error_time}] 오류 발생!")
+            print(f"{'='*80}")
+            print(f"오류 내용: {e}")
+            sys.stdout.flush()
+            
             import traceback
+            print("\n스택 트레이스:")
             traceback.print_exc()
+            sys.stdout.flush()
+            
+            print(f"\n⏳ 30초 후 재시도...")
+            print(f"   봇은 계속 실행됩니다...")
+            sys.stdout.flush()
             time.sleep(30)
 
 if __name__ == "__main__":
