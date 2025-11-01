@@ -1007,6 +1007,31 @@ def sync_db_with_binance():
                     
                     pnl_pct = (actual_pnl / investment * 100) if investment > 0 else 0
                     
+                    # 🆕 청산 이유 판단
+                    close_reason = "자동 청산"
+                    
+                    # TP/SL 도달 여부 확인
+                    tp_price = trade[6] if len(trade) > 6 else None  # tp_price 컬럼 (있다면)
+                    sl_price = trade[5] if len(trade) > 5 else None  # sl_price 컬럼 (있다면)
+                    
+                    if exit_price and entry_price:
+                        price_change_pct = abs((exit_price - entry_price) / entry_price * 100)
+                        
+                        # TP 도달 확인 (수익 청산 + 가격이 TP 근처)
+                        if actual_pnl > 0:
+                            if tp_price and abs(exit_price - tp_price) / tp_price < 0.02:  # 2% 이내
+                                close_reason = "익절 목표가 도달 (TP)"
+                            else:
+                                close_reason = "익절 청산"
+                        # SL 도달 확인 (손실 청산 + 가격이 SL 근처)
+                        elif actual_pnl < 0:
+                            if sl_price and abs(exit_price - sl_price) / sl_price < 0.02:  # 2% 이내
+                                close_reason = "손절 라인 도달 (SL)"
+                            else:
+                                close_reason = "손절 청산"
+                        else:
+                            close_reason = "무손익 청산"
+                    
                     # 🆕 청산 감지 즉시 TP/SL 주문 취소
                     symbol = f"{coin}/USDT:USDT"
                     cancel_all_tpsl_orders(symbol)
@@ -1020,9 +1045,9 @@ def sync_db_with_binance():
                             pnl_percentage = ?,
                             binance_pnl = ?,
                             close_timestamp = CURRENT_TIMESTAMP,
-                            ai_reasoning = COALESCE(ai_reasoning, '') || ' [자동동기화: 바이낸스 포지션 없음]'
+                            ai_reasoning = COALESCE(ai_reasoning, '') || ?
                         WHERE id = ?
-                    ''', (exit_price, actual_pnl, pnl_pct, binance_pnl, trade_id))
+                    ''', (exit_price, actual_pnl, pnl_pct, binance_pnl, f'\n[청산 이유] {close_reason}', trade_id))
                     
                     synced_count += 1
                     print(f"     ✅ {coin} DB 청산 완료 (청산가: ${exit_price:,.2f}, PnL: ${actual_pnl:+,.2f})")
@@ -3131,15 +3156,26 @@ def manage_live_positions():
             # 바이낸스에서 청산된 경우 PnL 조회 후 DB 업데이트
             try:
                 pnl_info = get_position_pnl(symbol)
+                realized_pnl = pnl_info.get('realizedPnl', 0)
+                
+                # 청산 이유 판단
+                if realized_pnl > 0:
+                    close_reason = "익절 목표가 도달 (TP)"
+                elif realized_pnl < 0:
+                    close_reason = "손절 라인 도달 (SL)"
+                else:
+                    close_reason = "청산 완료 (무손익)"
+                
                 close_data = {
                     'close_price': 0,
-                    'pnl': pnl_info.get('realizedPnl', 0),
+                    'pnl': realized_pnl,
                     'pnl_percentage': 0,
-                    'binance_pnl': pnl_info.get('realizedPnl', 0),
-                    'binance_close_price': 0
+                    'binance_pnl': realized_pnl,
+                    'binance_close_price': 0,
+                    'ai_close_reason': close_reason
                 }
                 update_trade_close(trade['id'], close_data)
-                print(f"   ✅ DB 업데이트 완료 (실현 PnL: ${pnl_info.get('realizedPnl', 0):,.2f})")
+                print(f"   ✅ DB 업데이트 완료 (실현 PnL: ${realized_pnl:,.2f})")
             except Exception as e:
                 print(f"   ⚠️ PnL 조회 실패: {e}")
                 # PnL 조회 실패해도 DB 업데이트는 해야 함

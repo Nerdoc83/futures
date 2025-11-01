@@ -156,6 +156,39 @@ def load_closed_trades(days=30):
                 lambda x: x['binance_pnl'] if pd.notna(x['binance_pnl']) and x['binance_pnl'] != 0 else x['pnl'],
                 axis=1
             )
+            
+            # 🆕 청산 이유 추출
+            def extract_close_reason(ai_reasoning):
+                if pd.isna(ai_reasoning):
+                    return "청산 완료"
+                
+                # [청산 이유] 태그 찾기
+                if '[청산 이유]' in ai_reasoning:
+                    reason_part = ai_reasoning.split('[청산 이유]')[1].strip()
+                    # 다음 줄까지만 (첫 번째 줄만 추출)
+                    first_line = reason_part.split('\n')[0].strip()
+                    return first_line if first_line else "청산 완료"
+                
+                return "청산 완료"
+            
+            df['close_reason'] = df['ai_reasoning'].apply(extract_close_reason)
+            
+            # 🆕 청산 이유에 이모지 추가
+            def add_emoji_to_reason(reason):
+                reason_lower = reason.lower()
+                
+                if 'tp' in reason_lower or '익절 목표가' in reason:
+                    return f"🎯 {reason}"
+                elif 'sl' in reason_lower or '손절 라인' in reason:
+                    return f"🛑 {reason}"
+                elif 'ai' in reason_lower and ('익절' in reason or '추세 전환' in reason):
+                    return f"🤖 {reason}"
+                elif 'ai' in reason_lower and '손절' in reason:
+                    return f"⚠️ {reason}"
+                else:
+                    return f"✅ {reason}"
+            
+            df['close_reason'] = df['close_reason'].apply(add_emoji_to_reason)
         
         return df
         
@@ -486,12 +519,12 @@ def main():
             # 거래 테이블
             display_df = closed_trades[[
                 'coin_symbol', 'action', 'entry_price', 'exit_price',
-                'leverage', 'final_pnl', 'close_timestamp'
+                'leverage', 'final_pnl', 'close_reason'
             ]].copy()
             
             display_df.columns = [
                 '코인', '방향', '진입가', '청산가',
-                '레버리지', '손익', '청산 시간'
+                '레버리지', '손익', '청산 이유'
             ]
             
             # 진입가 포맷
