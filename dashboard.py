@@ -478,6 +478,11 @@ def main():
         if closed_trades.empty:
             st.info("청산된 거래가 없습니다.")
         else:
+            # 데이터 정합성 체크
+            missing_exit = closed_trades[closed_trades['exit_price'].isna() | (closed_trades['exit_price'] == 0)]
+            if not missing_exit.empty:
+                st.warning(f"⚠️ {len(missing_exit)}건의 거래에서 청산가 정보가 누락되었습니다. DB 데이터를 확인하세요.")
+            
             # 거래 테이블
             display_df = closed_trades[[
                 'coin_symbol', 'action', 'entry_price', 'exit_price',
@@ -489,21 +494,23 @@ def main():
                 '레버리지', '손익', '청산 시간'
             ]
             
-            display_df['진입가'] = display_df['진입가'].apply(lambda x: f"${x:,.2f}" if x > 0 else "N/A")
-            display_df['청산가'] = display_df['청산가'].apply(lambda x: f"${x:,.2f}" if x > 0 else "N/A")
+            # 진입가 포맷
+            display_df['진입가'] = display_df['진입가'].apply(
+                lambda x: f"${x:,.2f}" if pd.notna(x) and x > 0 else "N/A"
+            )
+            
+            # 청산가 포맷 (NULL 또는 0인 경우 N/A)
+            display_df['청산가'] = display_df['청산가'].apply(
+                lambda x: f"${x:,.2f}" if pd.notna(x) and x > 0 else "N/A"
+            )
+            
             display_df['레버리지'] = display_df['레버리지'].apply(lambda x: f"{x}x")
             display_df['방향'] = display_df['방향'].str.upper()
             
-            # 손익 색상
-            def color_pnl(val):
-                try:
-                    num_val = float(val.replace('$', '').replace(',', ''))
-                    color = 'green' if num_val > 0 else 'red'
-                    return f'color: {color}'
-                except:
-                    return ''
-            
-            display_df['손익'] = display_df['손익'].apply(lambda x: f"${x:+,.2f}")
+            # 손익 포맷 (NULL인 경우 N/A)
+            display_df['손익'] = display_df['손익'].apply(
+                lambda x: f"${x:+,.2f}" if pd.notna(x) else "N/A"
+            )
             
             st.dataframe(display_df, use_container_width=True, hide_index=True)
             
@@ -822,7 +829,8 @@ def main():
             log_lines = st.slider("표시할 라인 수", 50, 500, 200)
             
             try:
-                with open(LOG_FILE, 'r', encoding='utf-8') as f:
+                # 인코딩 오류 처리: UTF-8이 아닌 문자는 대체 문자(�)로 표시
+                with open(LOG_FILE, 'r', encoding='utf-8', errors='replace') as f:
                     lines = f.readlines()
                     recent_lines = lines[-log_lines:]
                     log_text = ''.join(recent_lines)

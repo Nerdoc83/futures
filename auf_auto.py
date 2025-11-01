@@ -896,27 +896,19 @@ def sync_db_with_binance():
                     # 바이낸스에 없음 → DB에서 청산 처리
                     print(f"   🔄 동기화: {coin} 포지션이 바이낸스에 없음 → DB 청산 처리")
                     
-                    # 현재가 조회
-                    try:
-                        symbol = f"{coin}/USDT:USDT"
-                        ticker = exchange.fetch_ticker(symbol)
-                        current_price = ticker['last']
-                    except:
-                        current_price = entry_price  # 조회 실패 시 진입가 사용
-                    
-                    # 바이낸스에서 실제 PnL 조회 시도
+                    # 🆕 바이낸스에서 실제 청산 정보 조회
+                    symbol_binance = f"{coin}USDT"
                     actual_pnl = 0
                     binance_pnl = None
+                    exit_price = None
                     
                     try:
-                        # 최근 거래 내역에서 이 코인의 실현 손익 조회
-                        symbol_binance = f"{coin}USDT"
-                        
-                        # 진입 시간 이후의 PnL 조회
+                        # 진입 시간 이후의 거래 내역 조회
                         if timestamp:
                             start_time = int(datetime.fromisoformat(timestamp).timestamp() * 1000)
                             end_time = int(datetime.now().timestamp() * 1000)
                             
+                            # 1. Income History에서 실현 손익 조회
                             income_data = exchange.fapiPrivateGetIncome({
                                 'symbol': symbol_binance,
                                 'incomeType': 'REALIZED_PNL',
@@ -925,7 +917,7 @@ def sync_db_with_binance():
                                 'limit': 10
                             })
                             
-                            # 가장 최근 실현 손익 사용
+                            # 가장 최근 실현 손익 찾기
                             if income_data:
                                 for item in reversed(income_data):  # 최신 순서
                                     pnl_value = float(item.get('income', 0))
@@ -934,15 +926,47 @@ def sync_db_with_binance():
                                         actual_pnl = pnl_value
                                         print(f"     📊 바이낸스 실제 PnL: ${binance_pnl:+,.2f}")
                                         break
+                            
+                            # 2. 🆕 User Trades에서 청산가 조회 (최근 체결 내역)
+                            try:
+                                trades = exchange.fapiPrivateGetUserTrades({
+                                    'symbol': symbol_binance,
+                                    'startTime': start_time,
+                                    'endTime': end_time,
+                                    'limit': 50
+                                })
+                                
+                                # 청산 거래 찾기 (reduceOnly=true 또는 positionSide가 반대)
+                                if trades:
+                                    for trade in reversed(trades):  # 최신 순서
+                                        # realizedPnl이 있고 0이 아닌 거래 = 청산 거래
+                                        realized_pnl = float(trade.get('realizedPnl', 0))
+                                        if realized_pnl != 0:
+                                            exit_price = float(trade.get('price', 0))
+                                            print(f"     💰 청산가 발견: ${exit_price:,.4f}")
+                                            break
+                            except Exception as trade_err:
+                                print(f"     ⚠️ 거래 내역 조회 실패: {trade_err}")
+                            
                     except Exception as e:
-                        print(f"     ⚠️ 바이낸스 PnL 조회 실패: {e}")
+                        print(f"     ⚠️ 바이낸스 데이터 조회 실패: {e}")
+                    
+                    # 청산가가 없으면 현재가 사용
+                    if exit_price is None:
+                        try:
+                            symbol = f"{coin}/USDT:USDT"
+                            ticker = exchange.fetch_ticker(symbol)
+                            exit_price = ticker['last']
+                            print(f"     📊 현재가 사용: ${exit_price:,.4f}")
+                        except:
+                            exit_price = entry_price  # 조회 실패 시 진입가 사용
                     
                     # PnL 계산 (바이낸스 조회 실패 시 대략적 계산)
-                    if actual_pnl == 0:
+                    if actual_pnl == 0 and exit_price:
                         if action == 'long':
-                            price_change = (current_price - entry_price) / entry_price
+                            price_change = (exit_price - entry_price) / entry_price
                         else:  # short
-                            price_change = (entry_price - current_price) / entry_price
+                            price_change = (entry_price - exit_price) / entry_price
                         
                         actual_pnl = investment * price_change * leverage
                         print(f"     📊 계산된 PnL: ${actual_pnl:+,.2f} (대략)")
@@ -960,10 +984,10 @@ def sync_db_with_binance():
                             close_timestamp = CURRENT_TIMESTAMP,
                             ai_reasoning = COALESCE(ai_reasoning, '') || ' [자동동기화: 바이낸스 포지션 없음]'
                         WHERE id = ?
-                    ''', (current_price, actual_pnl, pnl_pct, binance_pnl, trade_id))
+                    ''', (exit_price, actual_pnl, pnl_pct, binance_pnl, trade_id))
                     
                     synced_count += 1
-                    print(f"     ✅ {coin} DB 청산 완료 (청산가: ${current_price:,.2f}, PnL: ${actual_pnl:+,.2f})")
+                    print(f"     ✅ {coin} DB 청산 완료 (청산가: ${exit_price:,.2f}, PnL: ${actual_pnl:+,.2f})")
         
         # 4. 바이낸스에만 있고 DB에 없는 포지션 찾기 (DB에 추가)
         binance_only_coins = binance_coins - db_coins
