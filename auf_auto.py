@@ -2845,6 +2845,9 @@ def calculate_position_size(available_balance: float, ai_investment_pct: float, 
     # 🆕 1. Kelly Criterion 기반 조정 (선택적)
     strategy_perf = get_strategy_performance(trading_style)
     
+    # 🆕 동적 균등 분할 모드: 기본적으로 균등 분할 금액 100% 사용
+    base_investment = equal_split_amount
+    
     if strategy_perf and strategy_perf['total_trades'] >= 5:
         # 충분한 데이터가 있으면 Kelly Criterion으로 조정
         win_rate = strategy_perf['win_rate']
@@ -2855,23 +2858,19 @@ def calculate_position_size(available_balance: float, ai_investment_pct: float, 
         
         print(f"   📊 Kelly Criterion: {kelly_pct:.1f}% (승률:{win_rate:.1f}%, R/R:{avg_win/avg_loss if avg_loss > 0 else 0:.2f})")
         
-        # Kelly가 50% 이하면 보수적으로 조정
-        if kelly_pct < 50:
-            kelly_multiplier = kelly_pct / 100  # 0.3 = 30%
-            equal_split_amount *= kelly_multiplier
-            print(f"   💡 Kelly 조정: {kelly_multiplier:.2f}x → ${equal_split_amount:,.2f}")
+        # Kelly가 30% 이하면 보수적으로 조정 (너무 낮은 경우만)
+        if kelly_pct < 30:
+            kelly_multiplier = max(0.5, kelly_pct / 100)  # 최소 50%는 보장
+            base_investment *= kelly_multiplier
+            print(f"   💡 Kelly 조정: {kelly_multiplier:.2f}x → ${base_investment:,.2f}")
     else:
-        # 데이터 부족 시 AI 투자비율 사용 (최소 보장 제거)
-        investment_multiplier = ai_investment_pct / 100
-        equal_split_amount *= investment_multiplier
-        print(f"   💡 AI 투자비율: {ai_investment_pct:.1f}% → ${equal_split_amount:,.2f}")
+        # 🆕 데이터 부족 시에도 100% 사용 (AI 투자비율 무시)
+        print(f"   💡 동적 균등 분할: 100% 사용 → ${base_investment:,.2f}")
     
-    base_investment = equal_split_amount
-    
-    # 🆕 2. 연속 손실 페널티
+    # 🆕 2. 연속 손실 페널티 (완화)
     consecutive_losses = get_consecutive_losses()
-    if consecutive_losses >= 3:
-        penalty = 0.5  # 50%로 축소
+    if consecutive_losses >= 5:
+        penalty = 0.7  # 70%로 축소 (기존 50%)
         base_investment *= penalty
         print(f"   ⚠️ 연속 손실 {consecutive_losses}회 → {penalty}x 투자")
         
@@ -2884,19 +2883,19 @@ def calculate_position_size(available_balance: float, ai_investment_pct: float, 
             consecutive_losses=consecutive_losses,
             current_drawdown=get_current_drawdown()
         )
-    elif consecutive_losses >= 2:
-        penalty = 0.75  # 75%로 축소
+    elif consecutive_losses >= 3:
+        penalty = 0.85  # 85%로 축소 (기존 75%)
         base_investment *= penalty
         print(f"   ⚠️ 연속 손실 {consecutive_losses}회 → {penalty}x 투자")
     
-    # 🆕 3. 드로다운 페널티
+    # 🆕 3. 드로다운 페널티 (완화)
     current_drawdown = get_current_drawdown()
-    if current_drawdown > 200:
-        penalty = 0.5
+    if current_drawdown > 300:  # 기존 200 → 300
+        penalty = 0.7  # 기존 0.5 → 0.7
         base_investment *= penalty
         print(f"   ⚠️ 드로다운 ${current_drawdown:.2f} → {penalty}x 투자")
-    elif current_drawdown > 100:
-        penalty = 0.75
+    elif current_drawdown > 150:  # 기존 100 → 150
+        penalty = 0.85  # 기존 0.75 → 0.85
         base_investment *= penalty
         print(f"   ⚠️ 드로다운 ${current_drawdown:.2f} → {penalty}x 투자")
     
@@ -2907,22 +2906,22 @@ def calculate_position_size(available_balance: float, ai_investment_pct: float, 
     investment = min(base_investment, max_investment)
     investment = max(investment, min_investment)
     
-    # 5. 변동성 기반 조정
+    # 5. 변동성 기반 조정 (완화)
     if config['VOLATILITY_BASED_SIZING']:
         if volatility > config['HIGH_VOLATILITY_THRESHOLD']:
-            # 고변동성 = 리스크 높음 = 투자 줄임
-            multiplier = config['HIGH_VOLATILITY_MULTIPLIER']
+            # 고변동성 = 리스크 높음 = 투자 줄임 (기존 0.6x → 0.8x)
+            multiplier = 0.8
             investment *= multiplier
             print(f"   📉 고변동성 ({volatility:.1f}%) → {multiplier}x 투자")
         elif volatility < config['HIGH_VOLATILITY_THRESHOLD'] / 2:
-            # 저변동성 = 리스크 낮음 = 투자 늘림
-            multiplier = config['LOW_VOLATILITY_MULTIPLIER']
+            # 저변동성 = 리스크 낮음 = 투자 늘림 (기존 1.5x → 1.2x)
+            multiplier = 1.2
             investment *= multiplier
             print(f"   📈 저변동성 ({volatility:.1f}%) → {multiplier}x 투자")
     
-    # 6. 가용 잔고 초과 방지
-    if investment > available_balance * 0.95:  # 95% 이상 사용 방지
-        investment = available_balance * 0.95
+    # 6. 가용 잔고 초과 방지 (동적 균등 분할은 100% 사용 가능)
+    if investment > available_balance:
+        investment = available_balance
         print(f"   ⚠️ 가용 잔고 부족 → ${investment:.2f}로 조정")
     
     print(f"   ✅ 최종 투자금: ${investment:,.2f}")
