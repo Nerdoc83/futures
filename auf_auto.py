@@ -258,6 +258,34 @@ def create_take_profit_order(symbol: str, side: str, amount: float, stop_price: 
         print(f"❌ 익절 주문 오류: {e}")
         raise
 
+def cancel_all_tpsl_orders(symbol: str) -> int:
+    """특정 코인의 모든 TP/SL 주문 취소 (청산 감지 시 즉시 호출)"""
+    try:
+        print(f"   🗑️ {symbol} TP/SL 주문 취소 중...")
+        open_orders = exchange.fetch_open_orders(symbol)
+        
+        cancelled_count = 0
+        for order in open_orders:
+            order_type = order.get('type', '').upper()
+            # STOP_MARKET (손절) 또는 TAKE_PROFIT_MARKET (익절) 주문만 취소
+            if 'STOP' in order_type or 'TAKE_PROFIT' in order_type:
+                try:
+                    exchange.cancel_order(order['id'], symbol)
+                    cancelled_count += 1
+                    print(f"      ├─ 취소: {order_type} 주문 ID {order['id']}")
+                except Exception as e:
+                    print(f"      ├─ 취소 실패: {order['id']} ({e})")
+        
+        if cancelled_count > 0:
+            print(f"   ✅ {cancelled_count}개 TP/SL 주문 취소 완료")
+        else:
+            print(f"   ℹ️ 취소할 TP/SL 주문 없음")
+        
+        return cancelled_count
+    except Exception as e:
+        print(f"   ⚠️ TP/SL 주문 취소 중 오류: {e}")
+        return 0
+
 def cancel_all_orders(symbol: str):
     """심볼의 모든 오픈 주문 취소"""
     try:
@@ -293,6 +321,9 @@ def close_position(symbol: str, side: str, amount: float) -> Dict:
         # 포지션이 이미 청산됨 (TP/SL에 걸렸을 가능성)
         if not actual_position:
             print(f"   ⚠️ 포지션이 이미 청산되었습니다 (TP/SL 체결?)")
+            
+            # 🆕 이미 청산된 경우에도 TP/SL 주문 취소
+            cancel_all_tpsl_orders(symbol)
             
             # 실현 PnL 조회
             time.sleep(1)
@@ -351,6 +382,9 @@ def close_position(symbol: str, side: str, amount: float) -> Dict:
         print(f"   ✅ 청산 완료: {order.get('id', 'N/A')}")
         print(f"   ├─ 청산가: ${order.get('average', order.get('price', 0)):,.4f}")
         print(f"   └─ 수량: {order.get('filled', actual_amount)}")
+        
+        # 🆕 청산 성공 시 TP/SL 주문 취소
+        cancel_all_tpsl_orders(symbol)
         
         # 실제 청산 후 PnL 조회
         time.sleep(1)
@@ -973,6 +1007,10 @@ def sync_db_with_binance():
                     
                     pnl_pct = (actual_pnl / investment * 100) if investment > 0 else 0
                     
+                    # 🆕 청산 감지 즉시 TP/SL 주문 취소
+                    symbol = f"{coin}/USDT:USDT"
+                    cancel_all_tpsl_orders(symbol)
+                    
                     # DB 업데이트
                     c.execute('''
                         UPDATE trades
@@ -1113,10 +1151,9 @@ def cleanup_orphaned_orders():
                     for order in tp_sl_orders:
                         print(f"      - {order['type']} @ ${order.get('price', 0):,.2f}")
                     
-                    # 전부 취소
-                    cancelled = cancel_all_orders(symbol)
+                    # TP/SL 주문만 취소
+                    cancelled = cancel_all_tpsl_orders(symbol)
                     orphaned_count += cancelled
-                    print(f"      ✅ {cancelled}개 취소 완료")
                     
             except Exception as e:
                 # 심볼별 오류는 스킵 (다음 심볼 계속 처리)
@@ -3089,21 +3126,8 @@ def manage_live_positions():
         if not live_pos:
             print(f"\n   ⚠️ {coin}: DB에는 있으나 바이낸스에 포지션 없음")
             
-            # 🆕 해당 심볼의 미체결 TP/SL 주문 정리
-            try:
-                open_orders = get_open_orders(symbol)
-                tp_sl_orders = [
-                    order for order in open_orders 
-                    if order['type'] in ['TAKE_PROFIT_MARKET', 'STOP_MARKET', 
-                                          'STOP_LOSS_MARKET', 'TAKE_PROFIT']
-                ]
-                
-                if tp_sl_orders:
-                    print(f"   🗑️ {coin}: TP/SL 주문 {len(tp_sl_orders)}개 정리 중...")
-                    cancelled = cancel_all_orders(symbol)
-                    print(f"   ✅ {cancelled}개 주문 취소 완료")
-            except Exception as e:
-                print(f"   ⚠️ TP/SL 주문 정리 실패: {e}")
+            # 🆕 청산된 포지션의 TP/SL 주문 즉시 취소
+            cancel_all_tpsl_orders(symbol)
             
             # 바이낸스에서 청산된 경우 PnL 조회 후 DB 업데이트
             try:
@@ -3196,21 +3220,7 @@ def manage_live_positions():
                             print(f"   ✅ DB 업데이트 완료 (실현 PnL: ${close_result['pnl']:+,.2f})")
                         continue
                     
-                    # 🆕 청산 성공 시 즉시 TP/SL 주문 정리
-                    try:
-                        open_orders = get_open_orders(symbol)
-                        tp_sl_orders = [
-                            order for order in open_orders 
-                            if order['type'] in ['TAKE_PROFIT_MARKET', 'STOP_MARKET', 
-                                                  'STOP_LOSS_MARKET', 'TAKE_PROFIT']
-                        ]
-                        
-                        if tp_sl_orders:
-                            print(f"   🗑️ TP/SL 주문 {len(tp_sl_orders)}개 정리 중...")
-                            cancelled = cancel_all_orders(symbol)
-                            print(f"   ✅ {cancelled}개 주문 취소 완료")
-                    except Exception as cleanup_error:
-                        print(f"   ⚠️ TP/SL 정리 실패: {cleanup_error}")
+                    # 🆕 청산 성공 후 TP/SL 주문은 이미 close_position에서 취소됨
                     
                     # DB 업데이트 (바이낸스 실제 PnL 사용 + 🆕 AI 청산 이유)
                     close_data = {
