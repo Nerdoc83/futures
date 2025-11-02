@@ -4031,14 +4031,29 @@ def main():
     print(f"  📊 DB-바이낸스 PnL 매칭: ON")
     print(f"{'='*80}\n")
     
+    # 🔧 현재 포지션 수 확인
+    print("📊 현재 포지션 상태 확인 중...")
+    live_positions = get_open_positions()
+    open_positions_count = len(live_positions)
+    max_positions = LIVE_TRADING_CONFIG['MAX_CONCURRENT_POSITIONS']
+    
+    print(f"   현재 오픈 포지션: {open_positions_count}/{max_positions}개")
+    
     # 잔고 확인
     available_balance = get_available_balance()
-    if available_balance < LIVE_TRADING_CONFIG['MIN_CAPITAL_THRESHOLD']:
-        print(f"\n❌ 가용 잔고(${available_balance:,.2f})가 최소 요구량(${LIVE_TRADING_CONFIG['MIN_CAPITAL_THRESHOLD']:,.2f})보다 작습니다.")
-        print("   충분한 잔고를 확보한 후 다시 시도하세요.")
-        return
     
-    print(f"✅ 가용 잔고: ${available_balance:,.2f}\n")
+    # 🔧 포지션이 꽉 차있으면 잔고 체크 스킵
+    if open_positions_count >= max_positions:
+        print(f"\n⚠️  포지션이 이미 {open_positions_count}개로 꽉 차있습니다.")
+        print(f"   가용 잔고(${available_balance:,.2f})가 적어도 기존 포지션 관리는 가능합니다.")
+        print(f"   신규 진입은 불가하며, 기존 포지션 관리 모드로 실행합니다.\n")
+    elif available_balance < LIVE_TRADING_CONFIG['MIN_CAPITAL_THRESHOLD']:
+        print(f"\n❌ 가용 잔고(${available_balance:,.2f})가 최소 요구량(${LIVE_TRADING_CONFIG['MIN_CAPITAL_THRESHOLD']:,.2f})보다 작습니다.")
+        print(f"   현재 포지션: {open_positions_count}개")
+        print("   신규 진입을 위해서는 충분한 잔고를 확보하거나, 기존 포지션을 정리해주세요.")
+        return
+    else:
+        print(f"✅ 가용 잔고: ${available_balance:,.2f} (신규 진입 가능)\n")
     
     # DB 설정 (기존 데이터 유지)
     if os.path.exists(DB_FILE):
