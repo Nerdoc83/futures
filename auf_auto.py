@@ -112,7 +112,7 @@ LIVE_TRADING_CONFIG = {
     "MIN_CAPITAL_THRESHOLD": 100.0,  # 최소 잔고 (USDT)
     "AI_ANALYSIS_INTERVAL": 60,  # 신규 진입 분석 (1분마다)
     "PERFORMANCE_REVIEW_INTERVAL": 600,  # AI 성과 리뷰 (10분)
-    "POSITION_CHECK_INTERVAL": 3600,  # 🔧 1시간마다 AI 중간평가 (조기 청산 판단)
+    "POSITION_CHECK_INTERVAL": 1200,  # 🔧 20분마다 AI 중간평가 (조기 청산 판단)
     
     # 🔧 자금 관리 설정 (동적 균등 분할)
     "MAX_POSITION_SIZE_PCT": 40,  # 안전장치: 가용 자금의 최대 40%
