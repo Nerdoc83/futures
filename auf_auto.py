@@ -236,69 +236,68 @@ def fetch_futures_market_indicators(symbol: str) -> Dict:
     }
     
     try:
-        # CCXT 심볼을 바이낸스 형식으로 변환 (BTC/USDT:USDT -> BTCUSDT)
-        binance_symbol = symbol.replace('/USDT:USDT', 'USDT')
-        
-        # 1. 펀딩 비율 (Funding Rate)
+        # 1. 펀딩 비율 (Funding Rate) - CCXT 표준 메서드 사용
         try:
-            funding_info = exchange.fapiPublic_get_premiumindex({'symbol': binance_symbol})
-            funding_rate = float(funding_info['lastFundingRate']) * 100  # 퍼센트로 변환
-            indicators['funding_rate'] = round(funding_rate, 4)
-            
-            # 펀딩비 상태 분류
-            if funding_rate > 0.05:
-                indicators['funding_rate_status'] = 'long_overheated'  # 롱 과열
-            elif funding_rate < -0.05:
-                indicators['funding_rate_status'] = 'short_overheated'  # 숏 과열
-            elif funding_rate > 0.01:
-                indicators['funding_rate_status'] = 'bullish'
-            elif funding_rate < -0.01:
-                indicators['funding_rate_status'] = 'bearish'
+            # fetch_funding_rate 사용 (CCXT 표준)
+            funding_info = exchange.fetch_funding_rate(symbol)
+            if funding_info and 'fundingRate' in funding_info:
+                funding_rate = float(funding_info['fundingRate']) * 100  # 퍼센트로 변환
+                indicators['funding_rate'] = round(funding_rate, 4)
+                
+                # 펀딩비 상태 분류
+                if funding_rate > 0.05:
+                    indicators['funding_rate_status'] = 'long_overheated'  # 롱 과열
+                elif funding_rate < -0.05:
+                    indicators['funding_rate_status'] = 'short_overheated'  # 숏 과열
+                elif funding_rate > 0.01:
+                    indicators['funding_rate_status'] = 'bullish'
+                elif funding_rate < -0.01:
+                    indicators['funding_rate_status'] = 'bearish'
             
         except Exception as e:
             print(f"      ⚠️ 펀딩비 조회 실패: {e}")
         
-        # 2. 미결제 약정 (Open Interest)
+        # 2. 미결제 약정 (Open Interest) - CCXT 표준 메서드 사용
         try:
-            oi_current = exchange.fapiPublic_get_openinterest({'symbol': binance_symbol})
-            oi_value = float(oi_current['openInterest'])
-            indicators['open_interest'] = oi_value
-            
-            # 24시간 전 OI와 비교 (간단히 현재값만 사용)
-            # 실제로는 24시간 전 데이터를 저장했다가 비교해야 하지만, 
-            # 여기서는 현재 OI 크기로만 판단
-            indicators['oi_status'] = 'high' if oi_value > 0 else 'neutral'
+            # fetch_open_interest 사용 (CCXT 표준)
+            oi_data = exchange.fetch_open_interest(symbol)
+            if oi_data and 'openInterestAmount' in oi_data:
+                oi_value = float(oi_data['openInterestAmount'])
+                indicators['open_interest'] = oi_value
+                indicators['oi_status'] = 'high' if oi_value > 0 else 'neutral'
             
         except Exception as e:
             print(f"      ⚠️ OI 조회 실패: {e}")
         
-        # 3. 청산 데이터 (최근 1시간)
+        # 3. 청산 데이터 (최근 1시간) - 직접 API 호출
         try:
-            # 현재 시간 (밀리초)
+            # CCXT에는 청산 데이터 표준 메서드가 없으므로 직접 호출
+            binance_symbol = symbol.replace('/USDT:USDT', 'USDT')
             end_time = int(time.time() * 1000)
             start_time = end_time - (60 * 60 * 1000)  # 1시간 전
             
-            # 최근 청산 내역 조회
-            liquidations = exchange.fapiPublic_get_allforcedorders({
+            # 직접 API 호출 (publicGetFapi 형식)
+            liquidations = exchange.publicGetFapiV1AllForceOrders({
                 'symbol': binance_symbol,
                 'startTime': start_time,
                 'endTime': end_time,
-                'limit': 1000  # 최대 1000개
+                'limit': 1000
             })
             
             # 롱/숏 청산액 집계
             long_liq = 0
             short_liq = 0
             
-            for liq in liquidations:
-                qty = float(liq['origQty'])
-                price = float(liq['price'])
-                value = qty * price
-                
-                if liq['side'] == 'SELL':  # 롱 포지션 청산 (매도)
-                    long_liq += value
-                else:  # 숏 포지션 청산 (매수)
-                    short_liq += value
+            if isinstance(liquidations, list):
+                for liq in liquidations:
+                    qty = float(liq.get('origQty', 0))
+                    price = float(liq.get('price', 0))
+                    value = qty * price
+                    
+                    if liq.get('side') == 'SELL':  # 롱 포지션 청산
+                        long_liq += value
+                    else:  # 숏 포지션 청산
+                        short_liq += value
             
             indicators['liquidations_long_1h'] = round(long_liq, 2)
             indicators['liquidations_short_1h'] = round(short_liq, 2)
@@ -308,12 +307,13 @@ def fetch_futures_market_indicators(symbol: str) -> Dict:
             if total_liq > 0:
                 long_ratio = long_liq / total_liq
                 if long_ratio > 0.7:
-                    indicators['liquidation_dominance'] = 'long_cascade'  # 롱 청산 폭포
+                    indicators['liquidation_dominance'] = 'long_cascade'
                 elif long_ratio < 0.3:
-                    indicators['liquidation_dominance'] = 'short_cascade'  # 숏 청산 폭포
+                    indicators['liquidation_dominance'] = 'short_cascade'
             
         except Exception as e:
-            print(f"      ⚠️ 청산 데이터 조회 실패: {e}")
+            # 청산 데이터는 선택적 기능이므로 실패해도 계속 진행
+            print(f"      ⚠️ 청산 데이터 조회 실패 (선택적 기능): {e}")
         
         return indicators
         
