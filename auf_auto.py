@@ -908,7 +908,7 @@ def sync_db_with_binance():
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         c.execute('''
-            SELECT id, coin_symbol, entry_price, amount, leverage, investment_amount, timestamp, action
+            SELECT id, coin_symbol, entry_price, amount, leverage, investment_amount, timestamp, action, sl_price, tp_price
             FROM trades
             WHERE status = 'OPEN'
         ''')
@@ -924,7 +924,7 @@ def sync_db_with_binance():
         # 3. DB에만 있고 바이낸스에 없는 포지션 찾기 (청산 처리)
         if db_positions:
             for db_pos in db_positions:
-                trade_id, coin, entry_price, amount, leverage, investment, timestamp, action = db_pos
+                trade_id, coin, entry_price, amount, leverage, investment, timestamp, action, sl_price, tp_price = db_pos
                 
                 if coin not in binance_coins:
                     # 바이낸스에 없음 → DB에서 청산 처리
@@ -1007,25 +1007,21 @@ def sync_db_with_binance():
                     
                     pnl_pct = (actual_pnl / investment * 100) if investment > 0 else 0
                     
-                    # 🆕 청산 이유 판단
+                    # 🆕 청산 이유 판단 (sl_price, tp_price는 이미 언팩됨)
                     close_reason = "자동 청산"
-                    
-                    # TP/SL 도달 여부 확인
-                    tp_price = trade[6] if len(trade) > 6 else None  # tp_price 컬럼 (있다면)
-                    sl_price = trade[5] if len(trade) > 5 else None  # sl_price 컬럼 (있다면)
                     
                     if exit_price and entry_price:
                         price_change_pct = abs((exit_price - entry_price) / entry_price * 100)
                         
                         # TP 도달 확인 (수익 청산 + 가격이 TP 근처)
                         if actual_pnl > 0:
-                            if tp_price and abs(exit_price - tp_price) / tp_price < 0.02:  # 2% 이내
+                            if tp_price and tp_price > 0 and abs(exit_price - tp_price) / tp_price < 0.02:  # 2% 이내
                                 close_reason = "익절 목표가 도달 (TP)"
                             else:
                                 close_reason = "익절 청산"
                         # SL 도달 확인 (손실 청산 + 가격이 SL 근처)
                         elif actual_pnl < 0:
-                            if sl_price and abs(exit_price - sl_price) / sl_price < 0.02:  # 2% 이내
+                            if sl_price and sl_price > 0 and abs(exit_price - sl_price) / sl_price < 0.02:  # 2% 이내
                                 close_reason = "손절 라인 도달 (SL)"
                             else:
                                 close_reason = "손절 청산"
