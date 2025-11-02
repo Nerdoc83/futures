@@ -115,21 +115,21 @@ LIVE_TRADING_CONFIG = {
     "POSITION_CHECK_INTERVAL": 3600,  # 🔧 1시간마다 AI 중간평가 (조기 청산 판단)
     
     # 🔧 자금 관리 설정 (동적 균등 분할)
-    "MAX_POSITION_SIZE_PCT": 20,  # 안전장치: 가용 자금의 최대 20%
-    "MIN_POSITION_SIZE_PCT": 3,   # 최소 3% (너무 작은 포지션 방지)
+    "MAX_POSITION_SIZE_PCT": 40,  # 안전장치: 가용 자금의 최대 40%
+    "MIN_POSITION_SIZE_PCT": 10,   # 최소 3% (너무 작은 포지션 방지)
     "DYNAMIC_EQUAL_SPLIT": True,  # 동적 균등 분할 활성화
     "VOLATILITY_BASED_SIZING": True,  # 변동성 기반 포지션 크기 조절
     "HIGH_VOLATILITY_THRESHOLD": 5.0,  # 5% 이상이면 고변동성
     "LOW_VOLATILITY_MULTIPLIER": 1.5,  # 저변동성 = 1.5배 투자
-    "HIGH_VOLATILITY_MULTIPLIER": 0.6,  # 고변동성 = 0.6배 투자
+    "HIGH_VOLATILITY_MULTIPLIER": 0.7,  # 고변동성 = 0.7배 투자
     
     # 🔧 거래 수수료 (바이낸스 선물 일반회원)
     "MAKER_FEE": 0.02,  # 0.02%
     "TAKER_FEE": 0.05,  # 0.05%
     
     # 🔧 레버리지 설정
-    "MAX_LEVERAGE": 10,
-    "CONSERVATIVE_LEVERAGE": 7,
+    "MAX_LEVERAGE": 15,
+    "CONSERVATIVE_LEVERAGE": 10,
     
     # 🔧 마진 모드
     "MARGIN_MODE": "isolated",  # isolated 또는 cross
