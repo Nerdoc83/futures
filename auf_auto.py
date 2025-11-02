@@ -16,7 +16,7 @@ import time
 import pandas as pd
 import sqlite3
 from dotenv import load_dotenv
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import pandas_ta as ta
 import google.generativeai as genai
 import random
@@ -24,6 +24,29 @@ import json
 from typing import Dict, List, Optional, Tuple
 from decimal import Decimal
 import sys
+
+load_dotenv()
+
+# ===== 시간 설정 (UTC 통일) =====
+def get_utc_now():
+    """UTC 현재 시간 반환 (timezone-aware)"""
+    return datetime.now(timezone.utc)
+
+def get_utc_timestamp_ms():
+    """UTC 타임스탬프 (밀리초) 반환"""
+    return int(get_utc_now().timestamp() * 1000)
+
+def parse_db_timestamp(timestamp_str):
+    """DB timestamp를 UTC datetime으로 변환 (timezone-aware)"""
+    if not timestamp_str:
+        return None
+    # 공백을 T로 변환 (ISO 형식)
+    iso_str = timestamp_str.replace(' ', 'T')
+    dt = datetime.fromisoformat(iso_str)
+    # timezone 정보가 없으면 UTC로 간주
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 load_dotenv()
 
@@ -112,16 +135,16 @@ LIVE_TRADING_CONFIG = {
     "MIN_CAPITAL_THRESHOLD": 100.0,  # 최소 잔고 (USDT)
     "AI_ANALYSIS_INTERVAL": 60,  # 신규 진입 분석 (1분마다)
     "PERFORMANCE_REVIEW_INTERVAL": 600,  # AI 성과 리뷰 (10분)
-    "POSITION_CHECK_INTERVAL": 1200,  # 🔧 20분마다 AI 중간평가 (조기 청산 판단)
+    "POSITION_CHECK_INTERVAL": 3600,  # 🔧 1시간마다 AI 중간평가 (조기 청산 판단)
     
     # 🔧 자금 관리 설정 (동적 균등 분할)
-    "MAX_POSITION_SIZE_PCT": 40,  # 안전장치: 가용 자금의 최대 40%
-    "MIN_POSITION_SIZE_PCT": 10,   # 최소 3% (너무 작은 포지션 방지)
+    "MAX_POSITION_SIZE_PCT": 100,  # 안전장치: 가용 자금의 최대 100% (동적 균등 분할 활용)
+    "MIN_POSITION_SIZE_PCT": 3,   # 최소 3% (너무 작은 포지션 방지)
     "DYNAMIC_EQUAL_SPLIT": True,  # 동적 균등 분할 활성화
     "VOLATILITY_BASED_SIZING": True,  # 변동성 기반 포지션 크기 조절
     "HIGH_VOLATILITY_THRESHOLD": 5.0,  # 5% 이상이면 고변동성
-    "LOW_VOLATILITY_MULTIPLIER": 1.5,  # 저변동성 = 1.5배 투자
-    "HIGH_VOLATILITY_MULTIPLIER": 0.7,  # 고변동성 = 0.7배 투자
+    "LOW_VOLATILITY_MULTIPLIER": 1.2,  # 저변동성 = 1.2배 투자
+    "HIGH_VOLATILITY_MULTIPLIER": 0.8,  # 고변동성 = 0.8배 투자
     
     # 🔧 거래 수수료 (바이낸스 선물 일반회원)
     "MAKER_FEE": 0.02,  # 0.02%
@@ -286,16 +309,6 @@ def cancel_all_tpsl_orders(symbol: str) -> int:
         print(f"   ⚠️ TP/SL 주문 취소 중 오류: {e}")
         return 0
 
-def cancel_all_orders(symbol: str):
-    """심볼의 모든 오픈 주문 취소"""
-    try:
-        result = exchange.cancel_all_orders(symbol)
-        print(f"   ✅ 모든 주문 취소: {symbol}")
-        return result
-    except Exception as e:
-        print(f"   ⚠️ 주문 취소 오류: {e}")
-        return None
-
 def close_position(symbol: str, side: str, amount: float) -> Dict:
     """포지션 청산 (실제 청산 결과 반환) - 안전 버전"""
     try:
@@ -426,9 +439,9 @@ def get_binance_income_history(days: int = 7) -> List[Dict]:
         conn.close()
         
         if first_trade:
-            # 첫 거래 시점부터 조회
-            start_time = int(datetime.strptime(first_trade, '%Y-%m-%d %H:%M:%S').timestamp() * 1000)
-            print(f"   🔍 봇 시작 이후 수익 내역 조회 중... (첫 거래: {first_trade})")
+            # 첫 거래 시점부터 조회 (DB의 timestamp는 UTC)
+            start_time = int(datetime.strptime(first_trade, '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc).timestamp() * 1000)
+            print(f"   🔍 봇 시작 이후 수익 내역 조회 중... (첫 거래: {first_trade} UTC)")
         else:
             # DB에 거래가 없으면 최근 N일
             end_time = int(time.time() * 1000)
@@ -486,7 +499,7 @@ def get_binance_income_history(days: int = 7) -> List[Dict]:
                         'income': float(item.get('income', 0)),
                         'asset': item.get('asset', 'USDT'),
                         'time': int(item.get('time', 0)),
-                        'timestamp': datetime.fromtimestamp(int(item.get('time', 0)) / 1000),
+                        'timestamp': datetime.fromtimestamp(int(item.get('time', 0)) / 1000, tz=timezone.utc),
                         'tranId': item.get('tranId', ''),
                         'tradeId': item.get('tradeId', '')
                     })
@@ -513,7 +526,7 @@ def get_bot_trades_with_binance_pnl(days: int = 7) -> List[Dict]:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         
-        cutoff_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+        cutoff_date = (get_utc_now() - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
         
         c.execute('''
             SELECT coin_symbol, action, pnl, binance_pnl, entry_price, exit_price,
@@ -539,10 +552,10 @@ def get_bot_trades_with_binance_pnl(days: int = 7) -> List[Dict]:
             first_trade_time = min(trade[6] for trade in db_trades if trade[6])  # close_timestamp
             last_trade_time = max(trade[6] for trade in db_trades if trade[6])
             
-            start_time = int(datetime.strptime(first_trade_time, '%Y-%m-%d %H:%M:%S').timestamp() * 1000)
-            end_time = int(datetime.strptime(last_trade_time, '%Y-%m-%d %H:%M:%S').timestamp() * 1000) + 86400000  # +1일
+            start_time = int(datetime.strptime(first_trade_time, '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc).timestamp() * 1000)
+            end_time = int(datetime.strptime(last_trade_time, '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc).timestamp() * 1000) + 86400000  # +1일
             
-            print(f"   🔍 바이낸스 PnL 조회 중... ({first_trade_time} ~ {last_trade_time})")
+            print(f"   🔍 바이낸스 PnL 조회 중... ({first_trade_time} ~ {last_trade_time} UTC)")
             
             # 바이낸스 API 호출
             binance_pnl_data = None
@@ -573,7 +586,7 @@ def get_bot_trades_with_binance_pnl(days: int = 7) -> List[Dict]:
                         realized_pnl_map[symbol].append({
                             'income': income,
                             'time': time_key,
-                            'timestamp': datetime.fromtimestamp(time_key / 1000)
+                            'timestamp': datetime.fromtimestamp(time_key / 1000, tz=timezone.utc)
                         })
                 
                 print(f"   📊 바이낸스 실현 손익: {len(realized_pnl_map)}개 심볼")
@@ -600,7 +613,7 @@ def get_bot_trades_with_binance_pnl(days: int = 7) -> List[Dict]:
                 
                 if symbol_binance in realized_pnl_map and close_time:
                     try:
-                        close_dt = datetime.strptime(close_time, '%Y-%m-%d %H:%M:%S')
+                        close_dt = datetime.strptime(close_time, '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
                         
                         # 청산 시간 ±30분 내의 바이낸스 PnL 찾기
                         for binance_item in realized_pnl_map[symbol_binance]:
@@ -614,7 +627,7 @@ def get_bot_trades_with_binance_pnl(days: int = 7) -> List[Dict]:
             
             if close_time:
                 try:
-                    timestamp_dt = datetime.strptime(close_time, '%Y-%m-%d %H:%M:%S')
+                    timestamp_dt = datetime.strptime(close_time, '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
                     
                     matched_trades.append({
                         'symbol': f"{coin}USDT",
@@ -664,7 +677,7 @@ def calculate_binance_performance(days: int = 7) -> Dict:
             # DB에서 직접 조회
             conn = sqlite3.connect(DB_FILE)
             c = conn.cursor()
-            cutoff_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+            cutoff_date = (get_utc_now() - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
             c.execute('''
                 SELECT coin_symbol, pnl, close_timestamp FROM trades 
                 WHERE status = 'CLOSED' AND close_timestamp >= ?
@@ -675,7 +688,7 @@ def calculate_binance_performance(days: int = 7) -> Dict:
             for coin, pnl, close_time in trades:
                 if pnl and close_time:
                     try:
-                        timestamp_dt = datetime.strptime(close_time, '%Y-%m-%d %H:%M:%S')
+                        timestamp_dt = datetime.strptime(close_time, '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
                         income_data.append({
                             'symbol': f"{coin}USDT",
                             'income': float(pnl),
@@ -939,8 +952,8 @@ def sync_db_with_binance():
                     try:
                         # 진입 시간 이후의 거래 내역 조회
                         if timestamp:
-                            start_time = int(datetime.fromisoformat(timestamp).timestamp() * 1000)
-                            end_time = int(datetime.now().timestamp() * 1000)
+                            start_time = int(parse_db_timestamp(timestamp).timestamp() * 1000)
+                            end_time = get_utc_timestamp_ms()
                             
                             # 1. Income History에서 실현 손익 조회
                             income_data = exchange.fapiPrivateGetIncome({
@@ -1133,7 +1146,7 @@ def cleanup_orphaned_orders():
         # 2. DB에서 거래한 심볼 조회 (최근 30일)
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
-        cutoff = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+        cutoff = (get_utc_now() - timedelta(days=30)).strftime('%Y-%m-%d')
         c.execute("""
             SELECT DISTINCT coin_symbol FROM trades 
             WHERE timestamp >= ?
@@ -1902,76 +1915,6 @@ def calculate_kelly_criterion(win_rate: float, avg_win: float, avg_loss: float) 
         })
     
     return trades
-
-def save_ai_decision(decision_data: Dict):
-    """AI 결정 저장"""
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    
-    c.execute('''
-        INSERT INTO ai_decisions (
-            coin_symbol, decision_type, direction, leverage,
-            investment_percentage, sl_percentage, tp_percentage,
-            confidence_score, reasoning, market_data, related_trade_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (
-        decision_data['coin_symbol'],
-        decision_data['decision_type'],
-        decision_data.get('direction'),
-        decision_data.get('leverage'),
-        decision_data.get('investment_percentage'),
-        decision_data.get('sl_percentage'),
-        decision_data.get('tp_percentage'),
-        decision_data['confidence_score'],
-        decision_data['reasoning'],
-        decision_data.get('market_data', ''),
-        decision_data.get('related_trade_id')
-    ))
-    
-    conn.commit()
-    conn.close()
-
-def get_recent_performance(days: int = 7) -> Dict:
-    """최근 성과 조회"""
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    
-    c.execute('''
-        SELECT 
-            COUNT(*) as total_trades,
-            SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as winning_trades,
-            SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END) as losing_trades,
-            COALESCE(SUM(pnl), 0) as total_pnl,
-            COALESCE(AVG(CASE WHEN pnl > 0 THEN pnl END), 0) as avg_win,
-            COALESCE(AVG(CASE WHEN pnl < 0 THEN pnl END), 0) as avg_loss
-        FROM trades
-        WHERE status = 'CLOSED'
-        AND close_timestamp >= datetime('now', '-' || ? || ' days')
-    ''', (days,))
-    
-    row = c.fetchone()
-    conn.close()
-    
-    if not row or row[0] == 0:
-        return {
-            'total_trades': 0,
-            'winning_trades': 0,
-            'losing_trades': 0,
-            'win_rate': 0,
-            'total_pnl': 0,
-            'avg_win': 0,
-            'avg_loss': 0
-        }
-    
-    return {
-        'total_trades': row[0],
-        'winning_trades': row[1],
-        'losing_trades': row[2],
-        'win_rate': (row[1] / row[0] * 100) if row[0] > 0 else 0,
-        'total_pnl': row[3],
-        'avg_win': row[4],
-        'avg_loss': abs(row[5]) if row[5] else 0  # 절댓값으로 표시
-    }
 
 # ===== 시장 데이터 수집 =====
 
@@ -2766,7 +2709,7 @@ def ai_position_management(trade: Dict, market_data: Dict, current_price: float)
 레버리지: {leverage}x
 실제 수익률: {actual_pnl_pct:+.2f}% (투자금 ${investment:,.2f} 대비)
 실제 손익: ${actual_pnl_amount:+,.2f}
-보유 시간: {(datetime.now() - datetime.fromisoformat(trade['timestamp'])).total_seconds() / 3600:.1f}시간
+보유 시간: {(get_utc_now() - parse_db_timestamp(trade['timestamp'])).total_seconds() / 3600:.1f}시간
 트레이딩 스타일: {trade.get('trading_style', 'DAY_TRADING')}
 
 {market_summary}
@@ -2778,7 +2721,7 @@ def ai_position_management(trade: Dict, market_data: Dict, current_price: float)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 1. **최소 보유 시간 체크 (필수)**
-   현재 보유: {(datetime.now() - datetime.fromisoformat(trade['timestamp'])).total_seconds() / 3600:.1f}시간
+   현재 보유: {(get_utc_now() - parse_db_timestamp(trade['timestamp'])).total_seconds() / 3600:.1f}시간
    트레이딩 스타일: {trade.get('trading_style', 'DAY_TRADING')}
    
    **최소 보유 시간 기준:**
@@ -3363,7 +3306,7 @@ def analyze_ai_decision_patterns(days: int = 7) -> Dict:
         c = conn.cursor()
         
         # 최근 N일 봇 거래의 결정 근거 조회
-        cutoff_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+        cutoff_date = (get_utc_now() - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
         
         c.execute('''
             SELECT coin_symbol, action, pnl, confidence_score, ai_reasoning, 
@@ -3899,7 +3842,7 @@ def main():
     while True:
         try:
             current_time = time.time()
-            now = datetime.now()
+            now = get_utc_now()
             
             # 대시보드 표시
             if current_time - last_dashboard_time > 120:
@@ -3907,7 +3850,7 @@ def main():
                 last_dashboard_time = current_time
             
             print(f"\n{'='*80}")
-            print(f"⏰ [{now.strftime('%Y-%m-%d %H:%M:%S')}]")
+            print(f"⏰ [{now.strftime('%Y-%m-%d %H:%M:%S')} UTC]")
             print(f"{'='*80}")
             
             # 잔고 조회
@@ -4056,9 +3999,9 @@ def main():
             
         except Exception as e:
             # 🆕 즉시 flush하여 에러 로그 보장
-            error_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            error_time = get_utc_now().strftime('%Y-%m-%d %H:%M:%S')
             print(f"\n{'='*80}")
-            print(f"❌ [{error_time}] 오류 발생!")
+            print(f"❌ [{error_time} UTC] 오류 발생!")
             print(f"{'='*80}")
             print(f"오류 내용: {e}")
             sys.stdout.flush()
