@@ -222,17 +222,12 @@ def fetch_futures_market_indicators(symbol: str) -> Dict:
     바이낸스 선물 특화 지표 수집
     1. 펀딩 비율 (Funding Rate)
     2. 미결제 약정 (Open Interest)
-    3. 청산 데이터 (Liquidation Data)
     """
     indicators = {
         'funding_rate': None,
         'funding_rate_status': 'neutral',
         'open_interest': None,
-        'oi_change_24h': None,
         'oi_status': 'neutral',
-        'liquidations_long_1h': 0,
-        'liquidations_short_1h': 0,
-        'liquidation_dominance': 'neutral'
     }
     
     try:
@@ -268,52 +263,6 @@ def fetch_futures_market_indicators(symbol: str) -> Dict:
             
         except Exception as e:
             print(f"      ⚠️ OI 조회 실패: {e}")
-        
-        # 3. 청산 데이터 (최근 1시간) - 직접 API 호출
-        try:
-            # CCXT에는 청산 데이터 표준 메서드가 없으므로 직접 호출
-            binance_symbol = symbol.replace('/USDT:USDT', 'USDT')
-            end_time = int(time.time() * 1000)
-            start_time = end_time - (60 * 60 * 1000)  # 1시간 전
-            
-            # 직접 API 호출 (publicGetFapi 형식)
-            liquidations = exchange.publicGetFapiV1AllForceOrders({
-                'symbol': binance_symbol,
-                'startTime': start_time,
-                'endTime': end_time,
-                'limit': 1000
-            })
-            
-            # 롱/숏 청산액 집계
-            long_liq = 0
-            short_liq = 0
-            
-            if isinstance(liquidations, list):
-                for liq in liquidations:
-                    qty = float(liq.get('origQty', 0))
-                    price = float(liq.get('price', 0))
-                    value = qty * price
-                    
-                    if liq.get('side') == 'SELL':  # 롱 포지션 청산
-                        long_liq += value
-                    else:  # 숏 포지션 청산
-                        short_liq += value
-            
-            indicators['liquidations_long_1h'] = round(long_liq, 2)
-            indicators['liquidations_short_1h'] = round(short_liq, 2)
-            
-            # 청산 우세 판단
-            total_liq = long_liq + short_liq
-            if total_liq > 0:
-                long_ratio = long_liq / total_liq
-                if long_ratio > 0.7:
-                    indicators['liquidation_dominance'] = 'long_cascade'
-                elif long_ratio < 0.3:
-                    indicators['liquidation_dominance'] = 'short_cascade'
-            
-        except Exception as e:
-            # 청산 데이터는 선택적 기능이므로 실패해도 계속 진행
-            print(f"      ⚠️ 청산 데이터 조회 실패 (선택적 기능): {e}")
         
         return indicators
         
@@ -2116,13 +2065,6 @@ def fetch_comprehensive_market_data(symbol: str) -> Dict:
         oi = futures_indicators['open_interest']
         print(f"   📊 미결제약정: {oi:,.0f}")
     
-    # 청산 정보 출력
-    long_liq = futures_indicators['liquidations_long_1h']
-    short_liq = futures_indicators['liquidations_short_1h']
-    liq_dom = futures_indicators['liquidation_dominance']
-    if long_liq > 0 or short_liq > 0:
-        print(f"   💥 청산(1h): 롱 ${long_liq:,.0f} / 숏 ${short_liq:,.0f} ({liq_dom})")
-    
     # market_data에 선물 지표 추가
     market_data['futures_indicators'] = futures_indicators
     
@@ -2330,6 +2272,8 @@ def ai_comprehensive_analysis(coin_data: Dict, market_data: Dict, performance_hi
                     futures_indicators_text += "   💡 숏 우세 → 하락 추세 가능성, 롱 신중\n"
                 else:
                     futures_indicators_text += "   💡 중립적 펀딩비 → 방향성 판단 어려움\n"
+            else:
+                futures_indicators_text += "⚠️ 펀딩 비율 데이터 없음\n"
             
             # 2. 미결제 약정 (Open Interest)
             if fi['open_interest'] is not None:
@@ -2340,29 +2284,8 @@ def ai_comprehensive_analysis(coin_data: Dict, market_data: Dict, performance_hi
                 futures_indicators_text += "   💡 OI 증가 + 가격 상승 = 강한 상승 추세\n"
                 futures_indicators_text += "   💡 OI 증가 + 가격 하락 = 강한 하락 추세\n"
                 futures_indicators_text += "   💡 OI 감소 = 포지션 청산 중, 추세 약화\n"
-            
-            # 3. 청산 데이터
-            long_liq = fi['liquidations_long_1h']
-            short_liq = fi['liquidations_short_1h']
-            liq_dom = fi['liquidation_dominance']
-            
-            if long_liq > 0 or short_liq > 0:
-                total_liq = long_liq + short_liq
-                liq_emoji = "💥" if total_liq > 1000000 else "⚠️" if total_liq > 100000 else "✅"
-                
-                futures_indicators_text += f"\n{liq_emoji} **청산 데이터 (최근 1시간)**:\n"
-                futures_indicators_text += f"   롱 청산: ${long_liq:,.0f}\n"
-                futures_indicators_text += f"   숏 청산: ${short_liq:,.0f}\n"
-                futures_indicators_text += f"   우세: {liq_dom}\n"
-                
-                if liq_dom == 'long_cascade':
-                    futures_indicators_text += "   💡 롱 청산 폭증! → 과매도, LONG 반등 기회 가능\n"
-                elif liq_dom == 'short_cascade':
-                    futures_indicators_text += "   💡 숏 청산 폭증! → 과매수, SHORT 조정 기회 가능\n"
-                else:
-                    futures_indicators_text += "   💡 청산 균형 → 방향성 중립\n"
             else:
-                futures_indicators_text += f"\n✅ **청산 데이터**: 최근 1시간 청산 없음 (안정적)\n"
+                futures_indicators_text += "\n⚠️ 미결제 약정 데이터 없음\n"
         else:
             futures_indicators_text += "⚠️ 선물 특화 지표를 가져올 수 없습니다.\n"
         
@@ -2505,7 +2428,7 @@ def ai_comprehensive_analysis(coin_data: Dict, market_data: Dict, performance_hi
 ✅ 추세강도: ADX, Aroon, Parabolic SAR
 ✅ 거래량: OBV, VWAP, MFI, A/D
 ✅ 지지/저항선 자동 계산
-✅ 🆕 선물 특화: 펀딩비, 미결제약정(OI), 청산 데이터
+✅ 🆕 선물 특화: 펀딩비, 미결제약정(OI)
 
 【선물 특화 지표 활용법 - 코인 선물만의 강력한 도구】
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -2521,17 +2444,11 @@ def ai_comprehensive_analysis(coin_data: Dict, market_data: Dict, performance_hi
    ✅ OI 감소 + 가격 변동 = 포지션 청산, 추세 약화
    💡 OI 급증은 추세 강화 신호, OI 급락은 추세 전환 가능
 
-3. **청산 데이터 (Liquidation)** - 극단적 기회 포착
-   ✅ 롱 청산 폭증 → 과매도, LONG 반등 기회
-   ✅ 숏 청산 폭증 → 과매수, SHORT 조정 기회
-   ✅ 대량 청산 발생 시 역추세 진입 검토
-   💡 청산 폭포(cascade)는 단기 급격한 가격 변동 유발
-
 🎯 **선물 지표 종합 전략**
-- 펀딩비 + OI + 청산 데이터를 종합적으로 분석
-- 3가지 지표가 모두 같은 방향 → 강한 신호
-- 예: 펀딩비 롱과열 + OI 증가 + 롱청산 발생 = SHORT 절호의 기회
-- 예: 펀딩비 숏과열 + OI 증가 + 숏청산 발생 = LONG 절호의 기회
+- 펀딩비 + OI를 종합적으로 분석
+- 2가지 지표가 같은 방향 → 강한 신호
+- 예: 펀딩비 롱과열 + OI 증가 + 가격 상승 = SHORT 고려 (조정 가능성)
+- 예: 펀딩비 숏과열 + OI 증가 + 가격 하락 = LONG 고려 (반등 가능성)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 【분석 가이드 - 실거래 모드】
