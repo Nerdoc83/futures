@@ -27,6 +27,15 @@ AI Live Trading Bot v1.0 (실거래 버전)
 4. 수동거래 현황 확인:
    - display_manual_trades_status()
    - list_manual_trades()
+   - check_trade_protection(거래_ID)  # 특정 거래 보호 상태 확인
+   - show_all_trades_protection()      # 모든 거래 보호 상태 확인
+
+⚠️ 중요:
+- AI 포지션 관리가 30분마다 실행됩니다 (이익 보호 중심)
+- 변동성에 따라 청산 임계값이 자동 조정됩니다
+- 수동거래는 여전히 AI 청산에서 보호됩니다
+- 수동거래는 DB 동기화에서도 보호됩니다
+- 수동으로 청산한 후에는 unprotect_trade(ID) 호출하여 DB 정리 필요
 ----------------------------------------------------------------------
 """
 
@@ -155,7 +164,7 @@ LIVE_TRADING_CONFIG = {
     "MIN_CAPITAL_THRESHOLD": 100.0,  # 최소 잔고 (USDT)
     "AI_ANALYSIS_INTERVAL": 60,  # 신규 진입 분석 (1분마다)
     "PERFORMANCE_REVIEW_INTERVAL": 600,  # AI 성과 리뷰 (10분)
-    "POSITION_CHECK_INTERVAL": 3600,  # 🔧 1시간마다 AI 중간평가 (조기 청산 판단)
+    "POSITION_CHECK_INTERVAL": 1800,  # 🔧 30분마다 스마트 포지션 관리 (이익 보호 중심)
     
     # 🔧 자금 관리 설정 (동적 균등 분할)
     "MAX_POSITION_SIZE_PCT": 50,  # 안전장치: 가용 자금의 최대 50% (동적 균등 분할 활용)
@@ -988,13 +997,13 @@ def cancel_all_orders(symbol: str) -> int:
         return 0
 
 def sync_db_with_binance():
-    """🆕 DB 포지션을 바이낸스 실제 포지션과 동기화 (양방향)"""
+    """🆕 DB 포지션을 바이낸스 실제 포지션과 동기화 (양방향) - 수동거래 보호"""
     try:
-        # 1. DB 오픈 포지션 조회
+        # 1. DB 오픈 포지션 조회 (manual_trade 컬럼 포함)
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         c.execute('''
-            SELECT id, coin_symbol, entry_price, amount, leverage, investment_amount, timestamp, action, sl_price, tp_price
+            SELECT id, coin_symbol, entry_price, amount, leverage, investment_amount, timestamp, action, sl_price, tp_price, manual_trade
             FROM trades
             WHERE status = 'OPEN'
         ''')
@@ -1010,11 +1019,16 @@ def sync_db_with_binance():
         # 3. DB에만 있고 바이낸스에 없는 포지션 찾기 (청산 처리)
         if db_positions:
             for db_pos in db_positions:
-                trade_id, coin, entry_price, amount, leverage, investment, timestamp, action, sl_price, tp_price = db_pos
+                trade_id, coin, entry_price, amount, leverage, investment, timestamp, action, sl_price, tp_price, manual_trade = db_pos
+                
+                # 🛡️ 수동거래 보호 - 동기화에서 제외
+                if manual_trade == 1:
+                    print(f"   🛡️ {coin} 수동거래 보호 - DB 동기화에서 제외")
+                    continue
                 
                 if coin not in binance_coins:
-                    # 바이낸스에 없음 → DB에서 청산 처리
-                    print(f"   🔄 동기화: {coin} 포지션이 바이낸스에 없음 → DB 청산 처리")
+                    # 바이낸스에 없음 → DB에서 청산 처리 (AI 거래만)
+                    print(f"   🔄 동기화: {coin} AI거래가 바이낸스에 없음 → DB 청산 처리")
                     
                     # 🆕 바이낸스에서 실제 청산 정보 조회
                     symbol_binance = f"{coin}USDT"
@@ -3004,10 +3018,23 @@ def ai_position_management(trade: Dict, market_data: Dict, current_price: float)
 포지션 관리 AI [실거래 모드]
 
 🎯 **OBJECTIVE: MAXIMIZE RISK-ADJUSTED RETURNS**
-- 손실 확대 방지가 최우선 (손실 -10% 초과 시 즉시 청산 고려)
-- 수익 실현보다 손실 방지가 더 중요
-- 추세 반전 신호가 보이면 수익 중이라도 청산
-- 불확실성 증가 시 포지션 축소 or 청산
+- **이익 보호가 최우선**: 수익 중일 때는 이익 보호에 집중
+- **변동성 대응**: 큰 이익에서는 추세 약화 시 적극적 익절
+- 손실 확대 방지 (손실 -12% 초과 시 즉시 청산 고려)  
+- 추세 반전 신호가 보이면 수익 보호 우선
+
+🚨 **이익 보호 우선 원칙**
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚠️ **변동성 장세에서 이익 실현이 손실 방지보다 중요**
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+**수익 상황별 대응:**
+- **+20% 이상**: 추세 약화/반전 신호 시 즉시 익절 고려 (이익 보호 최우선)
+- **+15% 이상**: 여러 타임프레임 약화 시 익절 고려
+- **+10% 이상**: 강한 반전 신호 시에만 익절 고려
+- **+5% 이상**: 목표가 근처에서만 익절 고려
+
+**🔥 핵심: 큰 이익에서는 보수적으로, 작은 이익에서는 적극적으로 홀드**
 
 🚨 **중요: 트레이딩 스타일별 최소 보유 시간 준수**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -3036,9 +3063,18 @@ def ai_position_management(trade: Dict, market_data: Dict, current_price: float)
 
 【판단 기준 - Risk-Adjusted Returns 중심】
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-✅ **손실 방지가 수익 추구보다 우선**
-✅ **트레이딩 스타일별 최소 보유 시간 엄격 준수**
+✅ **이익 보호가 수익 추구보다 우선**
+✅ **변동성 고려한 동적 임계값 적용**
+✅ **트레이딩 스타일별 최소 보유 시간 준수 (단, 이익 보호 시 예외)**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🔥 **변동성 기반 동적 임계값**
+현재 변동성: {market_data.get('1h', {}).get('summary', {}).get('volatility', 3.0):.1f}%
+- 고변동성 (5% 이상): 손실 임계값 -15%, 이익 보호 +12%
+- 중변동성 (3-5%): 손실 임계값 -12%, 이익 보호 +15%  
+- 저변동성 (3% 미만): 손실 임계값 -10%, 이익 보호 +18%
+
+**현재 적용 임계값:** 변동성에 따라 자동 조정됨
 
 1. **최소 보유 시간 체크 (필수)**
    현재 보유: {(get_utc_now() - parse_db_timestamp(trade['timestamp'])).total_seconds() / 3600:.1f}시간
@@ -3052,29 +3088,57 @@ def ai_position_management(trade: Dict, market_data: Dict, current_price: float)
    **⚠️ 최소 시간 미달 시 청산 금지 (단, 아래 예외 상황 제외)**
 
 2. **예외적 즉시 청산 조건 (최소 시간 무시)**
-   - 손실 -8% 초과 (큰 손실 방지)
+   - 손실 -12% 초과 (큰 손실 방지) - 기존 -8%에서 완화
    - 설정된 손절가 정확히 도달
-   - 3개 이상 타임프레임에서 강력한 추세 반전 + 손실 -6% 초과
+   - 3개 이상 타임프레임에서 강력한 추세 반전 + 손실 -8% 초과
 
 3. **일반 청산 조건 (최소 시간 충족 후)**
-   - 손실 -5% 초과 + 반등 근거 부족
-   - 여러 타임프레임 추세 반전 + 손실 중
-   - 목표 수익 달성 (익절)
-
-4. **변동성 고려**
-   - 암호화폐 특성상 -4~5% 변동은 정상
-   - 단기 변동에 과민 반응 금지
-   - 추세가 명확하게 반전될 때만 청산
-
-4. **수익 실현 (Take-Profit)**
-   - 큰 수익(+15% 이상) → 일부 실현 고려
-   - 목표 도달 + 추세 약화 신호 → 전량 청산
+   💰 **수익 상황 (이익 보호 우선):**
+   - 수익 +20% 이상 + 추세 약화 신호 → 즉시 익절 고려
+   - 수익 +15% 이상 + 2개 이상 타임프레임 약화 → 익절 고려  
+   - 수익 +10% 이상 + 강한 반전 신호 → 익절 고려
+   - 목표 수익 달성 + 추세 약화 → 익절
    
-5. **홀딩 vs 청산 결정**
-   - 손실 중: 반등 근거 명확 → 홀드, 불명확 → 청산
-   - 수익 중: 추세 지속 → 홀드, 약화 → 청산
+   📉 **손실 상황:**
+   - 손실 -8% 초과 + 반등 근거 부족 → 청산 고려
+   - 여러 타임프레임 추세 반전 + 손실 -5% 초과 → 청산 고려
 
-**핵심: 불확실하면 청산. 명확한 근거 있을 때만 홀드.**
+4. **변동성 고려 (완화된 기준)**
+   - 암호화폐 특성상 ±8% 변동은 정상 (기존 ±5%에서 완화)
+   - **수익 중에는 단기 변동 무시, 이익 보호에 집중**
+   - 손실 중에만 추세 반전에 민감하게 반응
+
+5. **수익 실현 (Take-Profit) - 이익 보호 중심**
+   🔥 **변동성 장세 대응 - 이익 보호 최우선**
+   - 수익 +25% 이상 → 추세 약화 첫 신호에서 즉시 익절
+   - 수익 +20% 이상 → 2개 타임프레임 약화 시 익절
+   - 수익 +15% 이상 → 3개 타임프레임 약화 시 익절  
+   - 수익 +10% 이상 → 강한 반전 + 거래량 급증 시 익절
+   - 목표가 도달 + 추세 약화 신호 → 전량 청산
+   
+   💡 **핵심**: 큰 이익일수록 보수적으로 보호, TP 못 도달해도 이익 확보
+   
+6. **홀딩 vs 청산 결정 (수익 우선)**
+   - **수익 중**: 이익 보호가 최우선 → 의심스러우면 익절
+   - **손실 중**: 반등 근거 명확 → 홀드, 불명확 → 청산
+
+**핵심: 수익 중에는 보수적으로 이익 보호, 손실 중에는 적극적 반등 대기**
+
+📊 **구체적 판단 기준 (수익률별)**
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+**수익 +30% 이상**: 어떤 약화 신호든 즉시 익절 (이익 보호 절대 우선)
+**수익 +25% 이상**: RSI 과매수 + MACD 약화 → 즉시 익절
+**수익 +20% 이상**: 2개 타임프레임 추세 약화 → 익절 고려
+**수익 +15% 이상**: 3개 타임프레임 추세 약화 → 익절 고려
+**수익 +10% 이상**: 강한 반전 신호만 익절 고려
+**수익 +5~10%**: 목표가 근처에서만 익절, 기본은 홀드
+**수익 0~5%**: 적극적 홀드, 반전 신호 무시
+
+**손실 -5% 이내**: 적극적 홀드, 반등 대기
+**손실 -5~10%**: 반등 근거 있으면 홀드, 없으면 청산 고려
+**손실 -10~15%**: 명확한 반등 신호만 홀드, 기본은 청산
+**손실 -15% 이상**: 즉시 청산 (변동성 무관)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 JSON 형식:
 {{
@@ -3454,6 +3518,51 @@ def unprotect_trade(trade_id: int):
     """거래 보호 해제 (AI 청산 허용)"""
     return unmark_manual_trade(trade_id)
 
+def check_trade_protection(trade_id: int) -> bool:
+    """거래 보호 상태 확인"""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        
+        c.execute("SELECT coin_symbol, action, manual_trade FROM trades WHERE id = ? AND status = 'OPEN'", (trade_id,))
+        result = c.fetchone()
+        conn.close()
+        
+        if not result:
+            print(f"❌ 거래 ID {trade_id}를 찾을 수 없거나 이미 종료되었습니다.")
+            return False
+        
+        coin_symbol, action, manual_trade = result
+        is_protected = manual_trade == 1
+        
+        status = "🛡️ 보호됨 (AI 청산 차단)" if is_protected else "🤖 AI 관리"
+        print(f"거래 ID {trade_id} ({coin_symbol} {action}): {status}")
+        
+        return is_protected
+        
+    except Exception as e:
+        print(f"❌ 보호 상태 확인 오류: {e}")
+        return False
+
+def show_all_trades_protection():
+    """모든 진행중인 거래의 보호 상태 표시"""
+    open_trades = get_all_open_trades()
+    
+    if not open_trades:
+        print("📝 진행중인 거래가 없습니다.")
+        return
+    
+    print(f"\n{'='*80}")
+    print(f"📊 전체 거래 보호 상태")
+    print(f"{'='*80}")
+    
+    for trade in open_trades:
+        is_manual = trade.get('manual_trade', 0) == 1
+        status = "🛡️ 수동거래" if is_manual else "🤖 AI거래"
+        print(f"   ID {trade['id']:2d}: {trade['coin_symbol']:6s} {trade['action']:5s} | {status}")
+    
+    print(f"{'='*80}")
+
 def manage_live_positions():
     """실제 포지션 관리"""
     
@@ -3486,7 +3595,15 @@ def manage_live_positions():
         
         # 포지션이 이미 청산되었는지 확인
         if not live_pos:
-            print(f"\n   ⚠️ {coin}: DB에는 있으나 바이낸스에 포지션 없음")
+            # 🛡️ 수동거래 보호 - 바이낸스에 없어도 DB 업데이트 안함
+            is_manual_trade = trade.get('manual_trade', 0) == 1
+            
+            if is_manual_trade:
+                print(f"\n   🛡️ {coin}: 수동거래 - 바이낸스 포지션 없어도 DB 유지")
+                print(f"   ⚠️ 수동으로 청산했다면 unprotect_trade({trade['id']}) 호출하여 DB 정리하세요")
+                continue
+            
+            print(f"\n   ⚠️ {coin}: DB에는 있으나 바이낸스에 포지션 없음 (AI거래)")
             
             # 🆕 청산된 포지션의 TP/SL 주문 즉시 취소
             cancel_all_tpsl_orders(symbol)
