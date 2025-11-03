@@ -138,7 +138,7 @@ LIVE_TRADING_CONFIG = {
     "POSITION_CHECK_INTERVAL": 3600,  # 🔧 1시간마다 AI 중간평가 (조기 청산 판단)
     
     # 🔧 자금 관리 설정 (동적 균등 분할)
-    "MAX_POSITION_SIZE_PCT": 100,  # 안전장치: 가용 자금의 최대 100% (동적 균등 분할 활용)
+    "MAX_POSITION_SIZE_PCT": 50,  # 안전장치: 가용 자금의 최대 50% (동적 균등 분할 활용)
     "MIN_POSITION_SIZE_PCT": 3,   # 최소 3% (너무 작은 포지션 방지)
     "DYNAMIC_EQUAL_SPLIT": True,  # 동적 균등 분할 활성화
     "VOLATILITY_BASED_SIZING": True,  # 변동성 기반 포지션 크기 조절
