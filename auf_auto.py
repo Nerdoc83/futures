@@ -7,6 +7,26 @@ AI Live Trading Bot v1.0 (실거래 버전)
 - Isolated Margin 모드
 - 실제 주문 체결 및 청산
 - AI 보수적 리스크 관리
+
+🛡️ 수동거래 보호 기능
+----------------------------------------------------------------------
+수동거래를 등록하면 AI가 자동으로 청산하지 않습니다.
+
+사용법:
+1. 수동거래 등록:
+   - register_manual_trade("BTC", "LONG", 50000, 0.1, 10)
+   - add_manual_long("BTC", 50000, 0.1, 10)  # 롱 포지션
+   - add_manual_short("ETH", 3000, 1.0, 5)   # 숏 포지션
+
+2. 기존 거래를 수동거래로 보호:
+   - protect_trade(12)  # 거래 ID 12를 AI 청산에서 보호
+
+3. 수동거래 보호 해제:
+   - unprotect_trade(12)  # 거래 ID 12의 보호 해제 (AI 청산 허용)
+
+4. 수동거래 현황 확인:
+   - display_manual_trades_status()
+   - list_manual_trades()
 ----------------------------------------------------------------------
 """
 
@@ -1298,9 +1318,21 @@ def setup_database():
             binance_close_price REAL,
             confidence_score INTEGER,
             reasoning TEXT,
-            pattern_description TEXT
+            pattern_description TEXT,
+            manual_trade INTEGER DEFAULT 0
         )
     ''')
+    
+    # 🆕 기존 DB에 manual_trade 컬럼 추가 (마이그레이션)
+    try:
+        c.execute("ALTER TABLE trades ADD COLUMN manual_trade INTEGER DEFAULT 0")
+        print("✅ manual_trade 컬럼이 추가되었습니다.")
+    except sqlite3.OperationalError as e:
+        if "duplicate column name" in str(e):
+            # 컬럼이 이미 존재함
+            pass
+        else:
+            print(f"⚠️ DB 마이그레이션 오류: {e}")
     
     # AI 결정 테이블
     c.execute('''
@@ -1411,8 +1443,8 @@ def save_trade_to_db(trade_data: Dict) -> int:
             coin_symbol, action, entry_price, amount, leverage,
             investment_amount, sl_price, tp_price, trading_style,
             holding_time_estimate, ai_reasoning, market_conditions, binance_order_id,
-            confidence_score
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            confidence_score, manual_trade
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (
         trade_data['coin_symbol'],
         trade_data['action'],
@@ -1427,7 +1459,8 @@ def save_trade_to_db(trade_data: Dict) -> int:
         trade_data['ai_reasoning'],
         trade_data.get('market_conditions', ''),
         trade_data.get('binance_order_id', ''),
-        trade_data.get('confidence_score', 0)
+        trade_data.get('confidence_score', 0),
+        trade_data.get('manual_trade', 0)
     ))
     
     trade_id = c.lastrowid
@@ -1435,6 +1468,115 @@ def save_trade_to_db(trade_data: Dict) -> int:
     conn.close()
     
     return trade_id
+
+def register_manual_trade(coin_symbol: str, action: str, entry_price: float, amount: float, leverage: int = 1) -> int:
+    """
+    수동거래를 시스템에 등록
+    - coin_symbol: 코인 심볼 (예: "BTC")
+    - action: "LONG" 또는 "SHORT"
+    - entry_price: 진입 가격
+    - amount: 수량
+    - leverage: 레버리지 (기본값 1)
+    """
+    print(f"\n{'='*60}")
+    print(f"📝 수동거래 등록")
+    print(f"{'='*60}")
+    print(f"   코인: {coin_symbol}")
+    print(f"   방향: {action}")
+    print(f"   진입가: ${entry_price:,.4f}")
+    print(f"   수량: {amount}")
+    print(f"   레버리지: {leverage}x")
+    
+    trade_data = {
+        'coin_symbol': coin_symbol,
+        'action': action,
+        'entry_price': entry_price,
+        'amount': amount,
+        'leverage': leverage,
+        'investment_amount': entry_price * amount,
+        'sl_price': 0,  # 수동거래는 초기 SL/TP 없음
+        'tp_price': 0,
+        'trading_style': 'MANUAL',
+        'holding_time_estimate': 'Manual Control',
+        'ai_reasoning': f'수동거래: {action} {coin_symbol} @ ${entry_price:,.4f}',
+        'market_conditions': 'Manual Entry',
+        'binance_order_id': '',
+        'confidence_score': 100,  # 수동거래는 100% 신뢰도
+        'manual_trade': 1  # 🔧 수동거래 플래그
+    }
+    
+    trade_id = save_trade_to_db(trade_data)
+    print(f"   ✅ 수동거래 등록 완료 (ID: {trade_id})")
+    print(f"   🛡️ AI 자동 청산 방지 설정됨")
+    print(f"{'='*60}")
+    
+    return trade_id
+
+def mark_existing_trade_as_manual(trade_id: int) -> bool:
+    """
+    기존 거래를 수동거래로 표시 (AI 청산 방지)
+    """
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        
+        # 거래 존재 확인
+        c.execute("SELECT coin_symbol, action FROM trades WHERE id = ? AND status = 'OPEN'", (trade_id,))
+        result = c.fetchone()
+        
+        if not result:
+            print(f"❌ 거래 ID {trade_id}를 찾을 수 없거나 이미 종료되었습니다.")
+            conn.close()
+            return False
+        
+        coin_symbol, action = result
+        
+        # manual_trade 플래그 설정
+        c.execute("UPDATE trades SET manual_trade = 1 WHERE id = ?", (trade_id,))
+        conn.commit()
+        conn.close()
+        
+        print(f"✅ 거래 ID {trade_id} ({coin_symbol} {action})를 수동거래로 설정했습니다.")
+        print(f"   🛡️ AI 자동 청산이 비활성화됩니다.")
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ 수동거래 설정 오류: {e}")
+        return False
+
+def unmark_manual_trade(trade_id: int) -> bool:
+    """
+    수동거래 플래그 해제 (AI 청산 활성화)
+    """
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        
+        # 거래 존재 확인
+        c.execute("SELECT coin_symbol, action FROM trades WHERE id = ? AND status = 'OPEN'", (trade_id,))
+        result = c.fetchone()
+        
+        if not result:
+            print(f"❌ 거래 ID {trade_id}를 찾을 수 없거나 이미 종료되었습니다.")
+            conn.close()
+            return False
+        
+        coin_symbol, action = result
+        
+        # manual_trade 플래그 해제
+        c.execute("UPDATE trades SET manual_trade = 0 WHERE id = ?", (trade_id,))
+        conn.commit()
+        conn.close()
+        
+        print(f"✅ 거래 ID {trade_id} ({coin_symbol} {action})의 수동거래 플래그를 해제했습니다.")
+        print(f"   🤖 AI 자동 청산이 활성화됩니다.")
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ 수동거래 해제 오류: {e}")
+        return False
 
 def update_trade_close(trade_id: int, close_data: Dict):
     """거래 청산 정보 업데이트 (바이낸스 실제 결과 사용 + AI 청산 이유 추가)"""
@@ -1713,7 +1855,7 @@ def get_all_open_trades() -> List[Dict]:
     c.execute('''
         SELECT id, coin_symbol, action, entry_price, amount, leverage,
                investment_amount, sl_price, tp_price, timestamp, ai_reasoning,
-               binance_order_id, trading_style
+               binance_order_id, trading_style, manual_trade
         FROM trades
         WHERE status = 'OPEN'
         ORDER BY timestamp DESC
@@ -1737,7 +1879,8 @@ def get_all_open_trades() -> List[Dict]:
             'timestamp': row[9],
             'ai_reasoning': row[10],
             'binance_order_id': row[11],
-            'trading_style': row[12] if len(row) > 12 else 'DAY_TRADING'
+            'trading_style': row[12] if len(row) > 12 else 'DAY_TRADING',
+            'manual_trade': row[13] if len(row) > 13 else 0
         })
     
     return trades
@@ -2458,7 +2601,7 @@ def ai_comprehensive_analysis(coin_data: Dict, market_data: Dict, performance_hi
 4. 거래량 확인: MFI, OBV 상승 → 매수세 강함
 5. 변동성 고려: BB밴드폭 좁으면 → 큰 움직임 임박, 넓으면 조정 가능성
 6. 지지/저항 근처: 반등 or 돌파 가능성 평가
-7. 레버리지: BTC/ETH 최대 10배, 알트 5~7배 (실거래는 보수적으로)
+7. 레버리지: BTC/ETH 최대 15배, 알트 8~12배 (실거래도 적극적으로)
 8. 과거 실패 패턴 반드시 회피
 9. 🆕 선물 특화 지표로 시장 심리와 추세 강도를 정확히 파악
 
@@ -2480,7 +2623,7 @@ def ai_comprehensive_analysis(coin_data: Dict, market_data: Dict, performance_hi
    - 목표 수익: 1~3%
    - 손절: 0.5~1.5%
    - 보유 시간: 수분~1시간
-   - 레버리지: 높음 (7~10x)
+   - 레버리지: 높음 (10~15x)
    - 시그널 예: 5m/15m 급등/급락, 단기 과매수/과매도, 초단기 모멘텀
    - 타임프레임 검증: 5m과 15m이 일치하면 진입
    - 예: "5m과 15m 모두 RSI 과매도 + 볼린저밴드 하단 터치" ✅
@@ -2493,7 +2636,7 @@ def ai_comprehensive_analysis(coin_data: Dict, market_data: Dict, performance_hi
    - 목표 수익: 3~8%
    - 손절: 1.5~3%
    - 보유 시간: 수시간~1일 (4~12시간 목표)
-   - 레버리지: 중간 (5~7x)
+   - 레버리지: 중상 (8~12x)
    - 시그널 예: 1h/4h 추세 전환, 중기 모멘텀, 당일 변동성 트레이딩
    - 타임프레임 검증: 15m, 1h, 4h 중 최소 2개 이상 일치하면 진입
    - 예: "1h과 4h 추세 일치, 15m 진입 신호, ADX 상승" ✅
@@ -2506,7 +2649,7 @@ def ai_comprehensive_analysis(coin_data: Dict, market_data: Dict, performance_hi
    - 목표 수익: 8~20%
    - 손절: 3~5%
    - 보유 시간: 수일~수주
-   - 레버리지: 낮음 (3~5x)
+   - 레버리지: 중간 (5~8x)
    - 시그널 예: 4h/1d/1w 장기 추세 전환, 주봉 패턴, 거시적 모멘텀
    - 타임프레임 검증: 4h, 1d, 1w 중 최소 2개 이상 일치하면 진입
    - 예: "1d와 1w 모두 상승 추세 전환, 4h 골든크로스" ✅
@@ -2617,12 +2760,43 @@ SHORT 포지션은 **SCALPING 또는 DAY_TRADING만** 허용:
 7. **과거 실패 패턴 반드시 회피**
    - 유사한 패턴에서 손실 발생 → 동일 실수 금지
 
-8. **레버리지 보수적 운용**
-   - 높은 확신(90+) + 강한 추세 → 높은 레버리지 가능
-   - 중간 확신(70%) → 중간 레버리지 (5~7x)
+8. **레버리지 적극적 운용**
+   - 높은 확신(90+) + 강한 추세 → 높은 레버리지 적극 사용 (12~15x)
+   - 중간 확신(80%) → 중상 레버리지 (8~12x)
+   - 기본 확신(70%) → 중간 레버리지 (6~10x)
    - 낮은 확신 → 거래 금지
 
 **핵심: 불확실한 거래는 절대 하지 않는다. 확실한 Risk/Reward만 공략한다. LONG과 SHORT는 동등한 기회다.**
+
+🚨 **레버리지 선택 가이드 - 매우 중요!**
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚠️ **실거래에서도 적극적인 레버리지 사용으로 수익 극대화**
+
+**트레이딩 스타일별 권장 레버리지:**
+- SCALPING: 10~15x (초단기, 빠른 진출입)
+- DAY_TRADING: 8~12x (중기, 안정적 수익)  
+- SWING_TRADING: 5~8x (장기, 안전 우선)
+
+**확신도별 레버리지 조정:**
+- Confidence 95%+: 최대 레버리지 (12~15x)
+- Confidence 85-95%: 중상 레버리지 (10~12x)
+- Confidence 75-85%: 중간 레버리지 (8~10x)
+- Confidence 70-75%: 기본 레버리지 (6~8x)
+
+**코인별 레버리지 조정:**
+- BTC/ETH: 최대 15x 가능 (안정적)
+- 주요 알트코인: 10~12x 권장
+- 신규/소형 알트: 8~10x 안전
+
+**시장 상황별 레버리지:**
+- 강한 추세 (ADX > 30): +2x 보너스
+- 변동성 낮음 (ATR < 3%): +1x 보너스
+- 다중 지표 합의: +1x 보너스
+
+**예시:**
+- BTC DAY_TRADING + Confidence 85% + 강한 추세 = 10x + 2x = 12x
+- ETH SCALPING + Confidence 90% + 낮은 변동성 = 12x + 1x = 13x
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 **반드시 다음 JSON 형식으로만 답변:**
 
@@ -2634,7 +2808,7 @@ SHORT 포지션은 **SCALPING 또는 DAY_TRADING만** 허용:
   "expected_reward_pct": 1.0~20.0 (예상 수익 %),
   "risk_adjusted_score": 0~100 (Risk/Reward 고려한 점수, 80+ 진입),
   "trading_style": "SCALPING" or "DAY_TRADING" or "SWING_TRADING",
-  "leverage": 3~{LIVE_TRADING_CONFIG['MAX_LEVERAGE']},
+  "leverage": 5~{LIVE_TRADING_CONFIG['MAX_LEVERAGE']},
   "investment_percentage": 50~100 (신뢰도 연동: 70%=50%, 80%=70%, 90%=90%, 95%=100%),
   "sl_percentage": 0.5~5 (스타일에 맞게),
   "tp_percentage": 1~20 (스타일에 맞게),
@@ -2663,6 +2837,12 @@ SHORT 포지션은 **SCALPING 또는 DAY_TRADING만** 허용:
   - 스윙: SL 3~5%, TP 8~20%
   - **범위를 벗어나면 trade: false로 거부**
 - **expected_reward_pct / expected_risk_pct ≥ 2.0 되도록 설정**
+- **레버리지 계산 공식:**
+  - 기본 레버리지 = 트레이딩 스타일 기준값 (SCALPING: 12x, DAY: 10x, SWING: 6x)
+  - + Confidence 보너스: (Confidence - 80) / 5 (85% = +1x, 90% = +2x, 95% = +3x)
+  - + 추세 보너스: ADX > 30이면 +2x, ADX > 25면 +1x
+  - + 안정성 보너스: BTC/ETH면 +1x
+  - 최종 레버리지 = min(계산값, 15x)
 
 주의: JSON 외 다른 텍스트 포함 금지
 """
@@ -3195,6 +3375,85 @@ def execute_live_trade(coin_data: Dict, decision: Dict, available_balance: float
         traceback.print_exc()
         return False
 
+def list_manual_trades() -> List[Dict]:
+    """수동거래 목록 조회"""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    
+    c.execute('''
+        SELECT id, coin_symbol, action, entry_price, amount, leverage,
+               investment_amount, timestamp, status
+        FROM trades
+        WHERE manual_trade = 1
+        ORDER BY timestamp DESC
+    ''')
+    
+    rows = c.fetchall()
+    conn.close()
+    
+    manual_trades = []
+    for row in rows:
+        manual_trades.append({
+            'id': row[0],
+            'coin_symbol': row[1],
+            'action': row[2],
+            'entry_price': row[3],
+            'amount': row[4],
+            'leverage': row[5],
+            'investment_amount': row[6],
+            'timestamp': row[7],
+            'status': row[8]
+        })
+    
+    return manual_trades
+
+def display_manual_trades_status():
+    """수동거래 현황 표시"""
+    manual_trades = list_manual_trades()
+    
+    if not manual_trades:
+        print("📝 등록된 수동거래가 없습니다.")
+        return
+    
+    print(f"\n{'='*80}")
+    print(f"📝 수동거래 현황 ({len(manual_trades)}개)")
+    print(f"{'='*80}")
+    
+    open_count = 0
+    closed_count = 0
+    
+    for trade in manual_trades:
+        status_emoji = "🟢" if trade['status'] == 'OPEN' else "🔴"
+        print(f"   {status_emoji} ID {trade['id']}: {trade['coin_symbol']} {trade['action']} "
+              f"${trade['entry_price']:,.4f} ({trade['status']})")
+        
+        if trade['status'] == 'OPEN':
+            open_count += 1
+        else:
+            closed_count += 1
+    
+    print(f"{'='*80}")
+    print(f"   🟢 진행중: {open_count}개")
+    print(f"   🔴 종료됨: {closed_count}개")
+    print(f"{'='*80}")
+
+# 🆕 수동거래 쉬운 사용을 위한 전역 함수들
+def add_manual_long(coin: str, price: float, amount: float, leverage: int = 1):
+    """수동 롱 포지션 등록"""
+    return register_manual_trade(coin, "LONG", price, amount, leverage)
+
+def add_manual_short(coin: str, price: float, amount: float, leverage: int = 1):
+    """수동 숏 포지션 등록"""
+    return register_manual_trade(coin, "SHORT", price, amount, leverage)
+
+def protect_trade(trade_id: int):
+    """거래를 수동거래로 보호 (AI 청산 방지)"""
+    return mark_existing_trade_as_manual(trade_id)
+
+def unprotect_trade(trade_id: int):
+    """거래 보호 해제 (AI 청산 허용)"""
+    return unmark_manual_trade(trade_id)
+
 def manage_live_positions():
     """실제 포지션 관리"""
     
@@ -3301,6 +3560,15 @@ def manage_live_positions():
             
             # 청산 판단
             if decision.get('close_position'):
+                # 🛡️ 수동거래 체크 - AI 청산 방지
+                is_manual_trade = trade.get('manual_trade', 0) == 1
+                
+                if is_manual_trade:
+                    print(f"\n   🛡️ 수동거래 보호 - AI 청산 차단")
+                    print(f"   AI 권장: {decision.get('reason', 'N/A')}")
+                    print(f"   ⚠️ 수동으로 관리하세요!")
+                    continue  # 청산하지 않고 다음 포지션으로
+                
                 print(f"\n   🔴 AI 청산 권장")
                 
                 try:
@@ -3922,6 +4190,18 @@ def display_dashboard():
         print(f"   └─ 손실: {losing_trades}회 (평균: ${avg_loss:,.2f})")
         print(f"   승률: {win_rate:.1f}%")
         print(f"   실현 손익: ${realized_pnl:,.2f}")
+    
+    # 🆕 수동거래 현황 표시
+    manual_trades = list_manual_trades()
+    open_manual_trades = [t for t in manual_trades if t['status'] == 'OPEN']
+    
+    if open_manual_trades:
+        print(f"\n{'─'*70}")
+        print(f"   🛡️ 수동거래 현황 (AI 청산 차단됨)")
+        print(f"{'─'*70}")
+        for trade in open_manual_trades:
+            direction = "🟢 LONG" if trade['action'] == 'LONG' else "🔴 SHORT"
+            print(f"   ID {trade['id']:2d} {trade['coin_symbol']:6s} {direction} | 진입: ${trade['entry_price']:8,.4f} | 투자: ${trade['investment_amount']:8,.2f}")
     
     print(f"{'='*70}\n")
 
