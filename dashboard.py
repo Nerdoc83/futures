@@ -151,9 +151,19 @@ def load_closed_trades(days=30):
         if not df.empty:
             df['timestamp'] = pd.to_datetime(df['timestamp'])
             df['close_timestamp'] = pd.to_datetime(df['close_timestamp'])
-            # binance_pnl 우선, 없으면 pnl
+            
+            # 🆕 binance_pnl 데이터 품질 체크
+            missing_binance_pnl = df[(df['binance_pnl'].isna()) | (df['binance_pnl'] == 0)]
+            
+            # binance_pnl 우선, 없으면 pnl (계산값)
             df['final_pnl'] = df.apply(
                 lambda x: x['binance_pnl'] if pd.notna(x['binance_pnl']) and x['binance_pnl'] != 0 else x['pnl'],
+                axis=1
+            )
+            
+            # 🆕 PnL 소스 표시 (바이낸스 실제값 vs 계산값)
+            df['pnl_source'] = df.apply(
+                lambda x: '✅ 바이낸스' if pd.notna(x['binance_pnl']) and x['binance_pnl'] != 0 else '⚠️ 추정',
                 axis=1
             )
             
@@ -516,15 +526,35 @@ def main():
             if not missing_exit.empty:
                 st.warning(f"⚠️ {len(missing_exit)}건의 거래에서 청산가 정보가 누락되었습니다. DB 데이터를 확인하세요.")
             
+            # 🆕 바이낸스 PnL 누락 경고
+            missing_binance_pnl = closed_trades[(closed_trades['binance_pnl'].isna()) | (closed_trades['binance_pnl'] == 0)]
+            if not missing_binance_pnl.empty:
+                st.warning(
+                    f"⚠️ {len(missing_binance_pnl)}건의 거래가 추정 손익을 사용 중입니다. "
+                    f"바이낸스에서 실제 손익을 가져오지 못했습니다. "
+                    f"수수료와 펀딩비가 정확히 반영되지 않을 수 있습니다."
+                )
+                
+                with st.expander("📌 추정 손익 vs 실제 손익 차이"):
+                    st.info(
+                        "**추정 손익**: DB에 저장된 계산값 (수수료/펀딩비 미반영 또는 추정치 사용)\n\n"
+                        "**실제 손익** (바이낸스): 바이낸스가 제공하는 실제 실현 손익 + 펀딩비 + 수수료\n\n"
+                        "차이가 나는 이유:\n"
+                        "- 거래 수수료 (진입 0.05% + 청산 0.05%)\n"
+                        "- 펀딩비 (8시간마다 발생)\n"
+                        "- 슬리피지 (시장가 주문 시 가격 차이)\n\n"
+                        "**해결방법**: `sync_db_with_binance()` 함수가 주기적으로 실행되어 자동 보정됩니다."
+                    )
+            
             # 거래 테이블
             display_df = closed_trades[[
                 'coin_symbol', 'action', 'entry_price', 'exit_price',
-                'leverage', 'final_pnl', 'close_reason'
+                'leverage', 'final_pnl', 'pnl_source', 'close_reason'
             ]].copy()
             
             display_df.columns = [
                 '코인', '방향', '진입가', '청산가',
-                '레버리지', '손익', '청산 이유'
+                '레버리지', '손익', 'PnL 소스', '청산 이유'
             ]
             
             # 진입가 포맷
