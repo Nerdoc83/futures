@@ -169,11 +169,11 @@ LIVE_TRADING_CONFIG = {
     "PERFORMANCE_REVIEW_INTERVAL": 600,  # AI 성과 리뷰 (10분)
     "POSITION_CHECK_INTERVAL": 600,  # 🔧 10분마다 AI 포지션 평가 (실시간 시장 대응)
     
-    # 🆕 트레일링 스탑 설정
-    "TRAILING_STOP_ENABLED": True,         # 트레일링 스탑 활성화
-    "TRAILING_STOP_ACTIVATION": 20,        # 20% 이익부터 트레일링 스탑 시작
-    "TRAILING_STOP_DISTANCE": 7,           # 최고가 대비 -7% 하락 시 익절
-    "TRAILING_STOP_CHECK_INTERVAL": 60,    # 1분마다 체크 (빠른 대응)
+    # 🆕 바이낸스 트레일링 스탑 설정
+    "BINANCE_TRAILING_STOP_ENABLED": True,      # 바이낸스 네이티브 트레일링 스탑 사용
+    "TRAILING_STOP_ACTIVATION": 20,             # 20% 이익부터 트레일링 스탑 시작
+    "TRAILING_STOP_CALLBACK_RATE": 7,           # 콜백 7% (최고가 대비 -7% 하락 시 청산)
+    "TRAILING_STOP_CHECK_INTERVAL": 300,        # 5분마다 체크
     
     # 🔧 자금 관리 설정 (동적 균등 분할)
     "MAX_POSITION_SIZE_PCT": 50,  # 안전장치: 가용 자금의 최대 50% (동적 균등 분할 활용)
@@ -3602,194 +3602,174 @@ def display_manual_trades_status():
     print(f"   🔴 종료됨: {closed_count}개")
     print(f"{'='*80}")
 
-# ===== 트레일링 스탑 기능 =====
+# ===== 바이낸스 트레일링 스탑 기능 =====
 
-def update_highest_price(trade_id: int, current_price: float, coin_symbol: str) -> float:
-    """최고가 업데이트 및 반환"""
+def set_binance_trailing_stop(symbol: str, side: str, amount: float, entry_price: float, leverage: int, activation_pct: float = 20.0, callback_rate: float = 7.0) -> bool:
+    """바이낸스 네이티브 트레일링 스탑 설정
+    
+    Args:
+        symbol: 거래 심볼 (예: ZEC/USDT:USDT)
+        side: 'long' 또는 'short'
+        amount: 수량
+        entry_price: 진입가
+        leverage: 레버리지
+        activation_pct: 활성화 수익률 (기본 20%)
+        callback_rate: 콜백 비율 (기본 7%)
+    
+    Returns:
+        성공 여부
+    """
+    try:
+        # 활성화 가격 계산 (진입가 대비 +20%)
+        if side == 'long':
+            activation_price = entry_price * (1 + activation_pct / 100)
+            close_side = 'sell'
+        else:
+            activation_price = entry_price * (1 - activation_pct / 100)
+            close_side = 'buy'
+        
+        print(f"   🎯 바이낸스 트레일링 스탑 설정:")
+        print(f"      진입가: ${entry_price:.4f}")
+        print(f"      활성화가: ${activation_price:.4f} (+{activation_pct}%)")
+        print(f"      콜백: {callback_rate}%")
+        
+        # 바이낸스 트레일링 스탑 주문
+        order = exchange.create_order(
+            symbol=symbol,
+            type='TRAILING_STOP_MARKET',
+            side=close_side,
+            amount=amount,
+            params={
+                'activationPrice': activation_price,
+                'callbackRate': callback_rate,
+                'reduceOnly': True,
+                'workingType': 'MARK_PRICE'  # 마크 가격 기준
+            }
+        )
+        
+        print(f"   ✅ 트레일링 스탑 주문 완료: {order.get('id', 'N/A')}")
+        return True
+        
+    except Exception as e:
+        print(f"   ❌ 트레일링 스탑 설정 실패: {e}")
+        return False
+
+def check_and_set_trailing_stops():
+    """오픈 포지션을 체크하고 수익률 20% 이상이면 트레일링 스탑 설정"""
     try:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         
-        c.execute("SELECT highest_price, entry_price FROM trades WHERE id = ?", (trade_id,))
-        result = c.fetchone()
+        # 오픈 포지션 조회
+        c.execute("""
+            SELECT id, coin_symbol, action, entry_price, amount, leverage, 
+                   investment_amount, timestamp
+            FROM trades 
+            WHERE status = 'OPEN'
+            AND manual_trade = 0
+        """)
         
-        if not result:
-            conn.close()
-            return current_price
-        
-        stored_highest, entry_price = result
-        
-        if stored_highest is None or stored_highest == 0:
-            stored_highest = max(entry_price, current_price)
-        
-        if current_price > stored_highest:
-            c.execute("UPDATE trades SET highest_price = ? WHERE id = ?", (current_price, trade_id))
-            conn.commit()
-            
-            profit_from_entry = (current_price - entry_price) / entry_price * 100
-            print(f"      📈 {coin_symbol} 최고가 갱신: ${stored_highest:.4f} → ${current_price:.4f} (+{profit_from_entry:.1f}%)")
-            
-            conn.close()
-            return current_price
-        
+        trades = c.fetchall()
         conn.close()
-        return stored_highest
+        
+        if not trades:
+            return
+        
+        print(f"\n{'='*80}")
+        print(f"🎯 트레일링 스탑 체크 (5분마다)")
+        print(f"{'='*80}")
+        
+        for trade_data in trades:
+            try:
+                trade_id, coin, action, entry_price, amount, leverage, investment, timestamp = trade_data
+                
+                symbol = f"{coin}/USDT:USDT"
+                
+                # 현재가 조회
+                ticker = exchange.fetch_ticker(symbol)
+                current_price = ticker['last']
+                
+                # 수익률 계산 (레버리지 포함)
+                if action == 'long':
+                    price_change_pct = (current_price - entry_price) / entry_price
+                else:
+                    price_change_pct = (entry_price - current_price) / entry_price
+                
+                profit_pct = price_change_pct * leverage * 100
+                
+                print(f"\n   {coin} ({action.upper()}):")
+                print(f"   ├─ 진입: ${entry_price:.4f} → 현재: ${current_price:.4f}")
+                print(f"   └─ 수익률: {profit_pct:+.2f}% (Lev {leverage}x)")
+                
+                # 20% 이상 수익이면 트레일링 스탑 설정
+                if profit_pct >= 20.0:
+                    print(f"   🚀 수익률 20% 초과! 트레일링 스탑 전환")
+                    
+                    # 🔥 기존 TP/SL 주문 모두 삭제
+                    print(f"   🧹 기존 TP/SL 주문 삭제 중...")
+                    cancel_all_tpsl_orders(symbol)
+                    time.sleep(0.5)
+                    
+                    # 다시 한 번 확인 (중요!)
+                    open_orders = exchange.fetch_open_orders(symbol)
+                    tpsl_orders = [o for o in open_orders if o.get('reduceOnly') == True or 
+                                   o['type'] in ['TAKE_PROFIT_MARKET', 'STOP_MARKET', 'STOP_LOSS_MARKET']]
+                    
+                    if tpsl_orders:
+                        print(f"   ⚠️ TP/SL 주문 {len(tpsl_orders)}개 남아있음, 재삭제...")
+                        for order in tpsl_orders:
+                            try:
+                                exchange.cancel_order(order['id'], symbol)
+                                print(f"      ✅ 주문 {order['id']} 삭제")
+                            except:
+                                pass
+                        time.sleep(0.5)
+                    
+                    # 바이낸스 트레일링 스탑 설정
+                    success = set_binance_trailing_stop(
+                        symbol=symbol,
+                        side=action,
+                        amount=amount,
+                        entry_price=entry_price,
+                        leverage=leverage,
+                        activation_pct=20.0,
+                        callback_rate=7.0
+                    )
+                    
+                    if success:
+                        # DB에 트레일링 스탑 설정 기록
+                        conn = sqlite3.connect(DB_FILE)
+                        c = conn.cursor()
+                        c.execute("""
+                            UPDATE trades
+                            SET ai_reasoning = COALESCE(ai_reasoning, '') || ?
+                            WHERE id = ?
+                        """, (f'\n[트레일링 스탑] 수익률 {profit_pct:.1f}% 도달, 바이낸스 트레일링 스탑 설정 (콜백 7%)', trade_id))
+                        conn.commit()
+                        conn.close()
+                        
+                        print(f"   ✅ {coin} 트레일링 스탑 전환 완료")
+                
+            except Exception as e:
+                print(f"   ❌ {coin if 'coin' in locals() else 'Unknown'} 트레일링 스탑 체크 오류: {e}")
+                continue
+        
+        print(f"{'='*80}\n")
         
     except Exception as e:
-        print(f"      ⚠️ 최고가 업데이트 오류 (무시하고 계속): {e}")
-        return current_price
+        print(f"   ❌ 트레일링 스탑 체크 오류: {e}")
 
-def check_trailing_stop(trade: Dict, current_price: float) -> Tuple[bool, str]:
-    """트레일링 스탑 조건 확인"""
-    try:
-        if not LIVE_TRADING_CONFIG.get("TRAILING_STOP_ENABLED", False):
-            return False, None
-        
-        trade_id = trade['id']
-        coin_symbol = trade['coin_symbol']
-        action = trade['action']
-        entry_price = trade['entry_price']
-        leverage = trade.get('leverage', 1)
-        highest_price = trade.get('highest_price', 0)
-        
-        if highest_price is None or highest_price == 0:
-            highest_price = max(entry_price, current_price)
-        
-        if action != 'long':
-            return False, None
-        
-        # 🔧 레버리지 적용된 수익률 계산
-        current_profit_pct = (current_price - entry_price) / entry_price * leverage * 100
-        highest_profit_pct = (highest_price - entry_price) / entry_price * leverage * 100
-        
-        # 활성화 기준 체크 (레버리지 적용된 수익률)
-        activation_threshold = LIVE_TRADING_CONFIG.get("TRAILING_STOP_ACTIVATION", 15)
-        if current_profit_pct < activation_threshold:
-            return False, None
-        
-        # 🔧 수익률 하락폭 계산 (레버리지 적용)
-        profit_drop_pct = highest_profit_pct - current_profit_pct
-        trailing_distance = LIVE_TRADING_CONFIG.get("TRAILING_STOP_DISTANCE", 5)
-        
-        # 수익률이 설정값 이상 떨어지면 청산
-        if profit_drop_pct >= trailing_distance:
-            reason = (
-                f"트레일링 스탑 발동: 최고수익 +{highest_profit_pct:.1f}% → 현재수익 +{current_profit_pct:.1f}% "
-                f"(-{profit_drop_pct:.1f}%p 하락, 레버리지 {leverage}x)"
-            )
-            return True, reason
-        
-        # 트레일링 활성 상태 표시
-        if current_profit_pct >= activation_threshold:
-            safe_profit = highest_profit_pct - trailing_distance
-            print(f"      🎯 {coin_symbol} 트레일링 스탑 활성 (Lev {leverage}x): 최고수익 +{highest_profit_pct:.1f}% | 현재 +{current_profit_pct:.1f}% | 익절라인 +{safe_profit:.1f}%")
-        
-        return False, None
-        
-    except Exception as e:
-        print(f"      ⚠️ 트레일링 스탑 체크 오류 (무시하고 계속): {e}")
-        return False, None
-
-    except Exception as e:
-        print(f"      ⚠️ 트레일링 스탑 체크 오류 (무시하고 계속): {e}")
-        return False, None
-
-def trailing_stop_monitor():
-    """트레일링 스탑 모니터링 루프 (별도 스레드)"""
-    print(f"\n🎯 트레일링 스탑 모니터 시작 (체크 주기: {LIVE_TRADING_CONFIG.get('TRAILING_STOP_CHECK_INTERVAL', 60)}초)")
+def trailing_stop_checker_loop():
+    """5분마다 트레일링 스탑 체크 (별도 스레드)"""
+    print(f"🎯 바이낸스 트레일링 스탑 체커 시작 (5분마다)")
     
     while True:
         try:
-            if not LIVE_TRADING_CONFIG.get("TRAILING_STOP_ENABLED", False):
-                time.sleep(60)
-                continue
-            
-            conn = sqlite3.connect(DB_FILE)
-            c = conn.cursor()
-            c.execute("""
-                SELECT id, coin_symbol, action, entry_price, amount, leverage, 
-                       investment_amount, highest_price, manual_trade
-                FROM trades 
-                WHERE status = 'OPEN'
-            """)
-            trades = c.fetchall()
-            conn.close()
-            
-            if not trades:
-                time.sleep(LIVE_TRADING_CONFIG.get('TRAILING_STOP_CHECK_INTERVAL', 60))
-                continue
-            
-            for trade_data in trades:
-                try:
-                    trade_id, coin, action, entry_price, amount, leverage, investment, highest_price, manual_trade = trade_data
-                    
-                    if manual_trade == 1:
-                        continue
-                    
-                    symbol = f"{coin}/USDT:USDT"
-                    ticker = exchange.fetch_ticker(symbol)
-                    current_price = ticker['last']
-                    
-                    highest_price = update_highest_price(trade_id, current_price, coin)
-                    
-                    trade_dict = {
-                        'id': trade_id,
-                        'coin_symbol': coin,
-                        'action': action,
-                        'entry_price': entry_price,
-                        'amount': amount,
-                        'leverage': leverage,
-                        'investment_amount': investment,
-                        'highest_price': highest_price
-                    }
-                    
-                    should_close, reason = check_trailing_stop(trade_dict, current_price)
-                    
-                    if should_close:
-                        print(f"\n   💰 {coin} {reason}")
-                        print(f"   🔄 트레일링 스탑 청산 실행 중...")
-                        
-                        close_result = close_position(symbol, action, amount)
-                        
-                        if close_result and close_result.get('order'):
-                            conn = sqlite3.connect(DB_FILE)
-                            c = conn.cursor()
-                            
-                            exit_price = close_result.get('close_price', current_price)
-                            pnl = close_result.get('pnl', 0)
-                            
-                            if action == 'long':
-                                price_change_pct = (exit_price - entry_price) / entry_price
-                            else:
-                                price_change_pct = (entry_price - exit_price) / entry_price
-                            
-                            calculated_pnl = investment * price_change_pct * leverage
-                            pnl_pct = price_change_pct * leverage * 100
-                            
-                            c.execute("""
-                                UPDATE trades
-                                SET status = 'CLOSED',
-                                    exit_price = ?,
-                                    pnl = ?,
-                                    pnl_percentage = ?,
-                                    close_timestamp = CURRENT_TIMESTAMP,
-                                    ai_reasoning = COALESCE(ai_reasoning, '') || ?
-                                WHERE id = ?
-                            """, (exit_price, calculated_pnl, pnl_pct, f'\n[청산 이유] {reason}', trade_id))
-                            
-                            conn.commit()
-                            conn.close()
-                            
-                            print(f"   ✅ 트레일링 스탑 청산 완료: {coin} PnL=${calculated_pnl:+,.2f} ({pnl_pct:+.1f}%)")
-                        
-                except Exception as pos_err:
-                    print(f"   ⚠️ {coin if 'coin' in locals() else 'Unknown'} 트레일링 스탑 처리 오류: {pos_err}")
-                    continue
-            
-            time.sleep(LIVE_TRADING_CONFIG.get('TRAILING_STOP_CHECK_INTERVAL', 60))
+            check_and_set_trailing_stops()
+            time.sleep(300)  # 5분 대기
             
         except Exception as e:
-            print(f"   ❌ 트레일링 스탑 모니터 오류: {e}")
+            print(f"❌ 트레일링 스탑 체커 오류: {e}")
             time.sleep(60)
 
 # 🆕 수동거래 쉬운 사용을 위한 전역 함수들
@@ -4673,17 +4653,17 @@ def main():
     print(f"   Ctrl+C를 눌러 안전하게 종료할 수 있습니다.")
     print(f"{'='*80}\n")
     
-    # 🆕 트레일링 스탑 모니터 시작 (별도 스레드)
-    if LIVE_TRADING_CONFIG.get("TRAILING_STOP_ENABLED", False):
-        print(f"🎯 트레일링 스탑 활성화:")
+    # 🆕 바이낸스 트레일링 스탑 체커 시작 (별도 스레드)
+    if LIVE_TRADING_CONFIG.get("BINANCE_TRAILING_STOP_ENABLED", False):
+        print(f"🎯 바이낸스 트레일링 스탑 활성화:")
         print(f"   ✅ 활성화 기준: +{LIVE_TRADING_CONFIG['TRAILING_STOP_ACTIVATION']}% 이익")
-        print(f"   ✅ 익절 거리: 최고가 대비 -{LIVE_TRADING_CONFIG['TRAILING_STOP_DISTANCE']}%")
-        print(f"   ✅ 체크 주기: {LIVE_TRADING_CONFIG['TRAILING_STOP_CHECK_INTERVAL']}초\n")
+        print(f"   ✅ 콜백 비율: {LIVE_TRADING_CONFIG['TRAILING_STOP_CALLBACK_RATE']}% (최고가 대비)")
+        print(f"   ✅ 체크 주기: {LIVE_TRADING_CONFIG['TRAILING_STOP_CHECK_INTERVAL']}초 (5분)\n")
         
         trailing_stop_thread = threading.Thread(
-            target=trailing_stop_monitor,
+            target=trailing_stop_checker_loop,
             daemon=True,
-            name="TrailingStopMonitor"
+            name="BinanceTrailingStopChecker"
         )
         trailing_stop_thread.start()
         time.sleep(1)
