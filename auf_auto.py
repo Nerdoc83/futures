@@ -893,13 +893,22 @@ def ai_comprehensive_analysis(coin_data: dict, market_data: dict, performance_hi
         time.sleep(delay - elapsed)
     
     # 시장 데이터 요약
+    def safe_float(val, default=0.0):
+        """None이나 NaN을 안전하게 float로 변환"""
+        if val is None or (isinstance(val, float) and pd.isna(val)):
+            return default
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            return default
+    
     summary = {
         'coin': coin_data['coin'],
-        'price': coin_data['price'],
-        'volume_24h': coin_data['volume_24h'] / 1_000_000,  # 백만 단위
-        'change_24h': coin_data['change_24h'],
-        'funding_rate': market_data.get('funding_rate', 0),
-        'open_interest': market_data.get('open_interest', 0) / 1_000_000,  # 백만 단위
+        'price': safe_float(coin_data.get('price'), 0.0),
+        'volume_24h': safe_float(coin_data.get('volume_24h'), 0.0) / 1_000_000,  # 백만 단위
+        'change_24h': safe_float(coin_data.get('change_24h'), 0.0),
+        'funding_rate': safe_float(market_data.get('funding_rate'), 0.0),
+        'open_interest': safe_float(market_data.get('open_interest'), 0.0) / 1_000_000,  # 백만 단위
         'timeframes': {}
     }
     
@@ -909,16 +918,17 @@ def ai_comprehensive_analysis(coin_data: dict, market_data: dict, performance_hi
             df = market_data[tf]
             if not df.empty:
                 latest = df.iloc[-1]
+                
                 summary['timeframes'][tf] = {
-                    'rsi': float(latest.get('rsi', 0)),
-                    'macd': float(latest.get('macd', 0)),
-                    'macd_signal': float(latest.get('macd_signal', 0)),
-                    'close': float(latest['close']),
-                    'sma_20': float(latest.get('sma_20', 0)),
-                    'sma_50': float(latest.get('sma_50', 0)),
-                    'atr': float(latest.get('atr', 0)),
-                    'volume': float(latest['volume']),
-                    'volume_sma': float(latest.get('volume_sma', 0))
+                    'rsi': safe_float(latest.get('rsi'), 50.0),  # RSI 기본값 50 (중립)
+                    'macd': safe_float(latest.get('macd'), 0.0),
+                    'macd_signal': safe_float(latest.get('macd_signal'), 0.0),
+                    'close': safe_float(latest.get('close'), 0.0),
+                    'sma_20': safe_float(latest.get('sma_20'), 0.0),
+                    'sma_50': safe_float(latest.get('sma_50'), 0.0),
+                    'atr': safe_float(latest.get('atr'), 0.0),
+                    'volume': safe_float(latest.get('volume'), 0.0),
+                    'volume_sma': safe_float(latest.get('volume_sma'), 0.0)
                 }
     
     # AI 프롬프트
