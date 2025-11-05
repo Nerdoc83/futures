@@ -525,57 +525,50 @@ def init_db():
     
     # 🆕 기존 테이블에 누락된 컬럼 추가 (마이그레이션)
     try:
-        # side 컬럼 확인 및 추가
+        # 현재 컬럼 목록 확인
         c.execute("PRAGMA table_info(trades)")
         columns = [col[1] for col in c.fetchall()]
         
-        if 'side' not in columns:
-            print("   🔄 DB 마이그레이션: 'side' 컬럼 추가 중...")
-            c.execute("ALTER TABLE trades ADD COLUMN side TEXT DEFAULT 'LONG'")
-            print("   ✅ 'side' 컬럼 추가 완료")
+        # 필수 컬럼 목록과 기본값
+        required_columns = {
+            'side': ('TEXT', 'LONG'),
+            'quantity': ('REAL', 0),
+            'leverage': ('INTEGER', 10),
+            'position_size': ('REAL', 0),
+            'entry_price': ('REAL', 0),
+            'exit_price': ('REAL', None),
+            'pnl': ('REAL', None),
+            'pnl_percent': ('REAL', None),
+            'reason': ('TEXT', None),
+            'status': ('TEXT', 'OPEN'),
+            'manual_trade': ('INTEGER', 0),
+            'closed_at': ('TEXT', None),
+            'stop_loss_price': ('REAL', None),
+            'take_profit_price': ('REAL', None),
+            'ai_confidence': ('REAL', None),
+            'ai_reasoning': ('TEXT', None),
+            'timestamp': ('TEXT', None),
+            'coin_symbol': ('TEXT', None)
+        }
         
-        if 'quantity' not in columns:
-            print("   🔄 DB 마이그레이션: 'quantity' 컬럼 추가 중...")
-            c.execute("ALTER TABLE trades ADD COLUMN quantity REAL DEFAULT 0")
-            print("   ✅ 'quantity' 컬럼 추가 완료")
+        # 없는 컬럼 추가
+        for col_name, (col_type, default_val) in required_columns.items():
+            if col_name not in columns:
+                print(f"   🔄 DB 마이그레이션: '{col_name}' 컬럼 추가 중...")
+                if default_val is None:
+                    c.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
+                elif isinstance(default_val, str) and col_type == 'TEXT':
+                    c.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type} DEFAULT '{default_val}'")
+                else:
+                    c.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type} DEFAULT {default_val}")
+                print(f"   ✅ '{col_name}' 컬럼 추가 완료")
         
-        if 'leverage' not in columns:
-            print("   🔄 DB 마이그레이션: 'leverage' 컬럼 추가 중...")
-            c.execute("ALTER TABLE trades ADD COLUMN leverage INTEGER DEFAULT 10")
-            print("   ✅ 'leverage' 컬럼 추가 완료")
-        
-        if 'manual_trade' not in columns:
-            print("   🔄 DB 마이그레이션: 'manual_trade' 컬럼 추가 중...")
-            c.execute("ALTER TABLE trades ADD COLUMN manual_trade INTEGER DEFAULT 0")
-            print("   ✅ 'manual_trade' 컬럼 추가 완료")
-        
-        if 'closed_at' not in columns:
-            print("   🔄 DB 마이그레이션: 'closed_at' 컬럼 추가 중...")
-            c.execute("ALTER TABLE trades ADD COLUMN closed_at TEXT")
-            print("   ✅ 'closed_at' 컬럼 추가 완료")
-        
-        if 'stop_loss_price' not in columns:
-            print("   🔄 DB 마이그레이션: 'stop_loss_price' 컬럼 추가 중...")
-            c.execute("ALTER TABLE trades ADD COLUMN stop_loss_price REAL")
-            print("   ✅ 'stop_loss_price' 컬럼 추가 완료")
-        
-        if 'take_profit_price' not in columns:
-            print("   🔄 DB 마이그레이션: 'take_profit_price' 컬럼 추가 중...")
-            c.execute("ALTER TABLE trades ADD COLUMN take_profit_price REAL")
-            print("   ✅ 'take_profit_price' 컬럼 추가 완료")
-        
-        if 'ai_confidence' not in columns:
-            print("   🔄 DB 마이그레이션: 'ai_confidence' 컬럼 추가 중...")
-            c.execute("ALTER TABLE trades ADD COLUMN ai_confidence REAL")
-            print("   ✅ 'ai_confidence' 컬럼 추가 완료")
-        
-        if 'ai_reasoning' not in columns:
-            print("   🔄 DB 마이그레이션: 'ai_reasoning' 컬럼 추가 중...")
-            c.execute("ALTER TABLE trades ADD COLUMN ai_reasoning TEXT")
-            print("   ✅ 'ai_reasoning' 컬럼 추가 완료")
+        conn.commit()
         
     except Exception as e:
-        print(f"   ⚠️ DB 마이그레이션 오류 (무시 가능): {e}")
+        print(f"   ⚠️ DB 마이그레이션 오류: {e}")
+        import traceback
+        traceback.print_exc()
     
     # performance 테이블 생성
     c.execute('''
