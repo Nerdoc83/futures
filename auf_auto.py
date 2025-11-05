@@ -111,9 +111,9 @@ os.environ['PYTHONUNBUFFERED'] = '1'
 
 # ===== AI 모델 선택 =====
 AI_MODEL_CONFIG = {
-    "provider": "deepseek",  # 🔧 여기서 변경: "gemini" (무료) 또는 "deepseek" (유료, 정확)
+    "provider": "deepseek",  # 🔧 여기서 변경: "gemini" 또는 "deepseek" (유료, 정확)
     "models": {
-        "gemini": "gemini-2.0-flash-exp",  # 무료, 빠름
+        "gemini": "gemini-2.5-flash-latest",  # 무료, 빠름
         "deepseek": "deepseek-chat"  # DeepSeek V3 (최신, 추천)
     },
     "rate_limit": {
@@ -1066,8 +1066,10 @@ def sync_db_with_binance():
                                     pnl_value = float(item.get('income', 0))
                                     if pnl_value != 0:
                                         binance_pnl = pnl_value
-                                        actual_pnl = pnl_value
-                                        print(f"     📊 바이낸스 실제 PnL: ${binance_pnl:+,.2f}")
+                                        # 🔧 actual_pnl에 바이낸스 값 사용 안 함!
+                                        # 바이낸스 realizedPnl은 수수료/펀딩비가 차감된 값
+                                        # actual_pnl은 0으로 유지 → 아래에서 정확히 재계산
+                                        print(f"     📊 바이낸스 실제 PnL: ${binance_pnl:+,.2f} (수수료/펀딩비 포함)")
                                         break
                             
                             # 2. 🆕 User Trades에서 청산가 조회 (최근 체결 내역)
@@ -1104,7 +1106,8 @@ def sync_db_with_binance():
                         except:
                             exit_price = entry_price  # 조회 실패 시 진입가 사용
                     
-                    # PnL 계산 (바이낸스 조회 실패 시 대략적 계산)
+                    # PnL 계산 (바이낸스 조회 실패 시 또는 정확한 계산 필요 시)
+                    # 🔧 actual_pnl이 0이면 정확히 재계산 (레버리지 포함)
                     if actual_pnl == 0 and exit_price:
                         if action == 'long':
                             price_change = (exit_price - entry_price) / entry_price
@@ -1112,7 +1115,7 @@ def sync_db_with_binance():
                             price_change = (entry_price - exit_price) / entry_price
                         
                         actual_pnl = investment * price_change * leverage
-                        print(f"     📊 계산된 PnL: ${actual_pnl:+,.2f} (대략)")
+                        print(f"     📊 계산된 PnL: ${actual_pnl:+,.2f} (레버리지 {leverage}x 적용)")
                     
                     pnl_pct = (actual_pnl / investment * 100) if investment > 0 else 0
                     
