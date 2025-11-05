@@ -522,6 +522,50 @@ def init_db():
         )
     ''')
     
+    # 🆕 기존 테이블에 누락된 컬럼 추가 (마이그레이션)
+    try:
+        # side 컬럼 확인 및 추가
+        c.execute("PRAGMA table_info(trades)")
+        columns = [col[1] for col in c.fetchall()]
+        
+        if 'side' not in columns:
+            print("   🔄 DB 마이그레이션: 'side' 컬럼 추가 중...")
+            c.execute("ALTER TABLE trades ADD COLUMN side TEXT DEFAULT 'LONG'")
+            print("   ✅ 'side' 컬럼 추가 완료")
+        
+        if 'manual_trade' not in columns:
+            print("   🔄 DB 마이그레이션: 'manual_trade' 컬럼 추가 중...")
+            c.execute("ALTER TABLE trades ADD COLUMN manual_trade INTEGER DEFAULT 0")
+            print("   ✅ 'manual_trade' 컬럼 추가 완료")
+        
+        if 'closed_at' not in columns:
+            print("   🔄 DB 마이그레이션: 'closed_at' 컬럼 추가 중...")
+            c.execute("ALTER TABLE trades ADD COLUMN closed_at TEXT")
+            print("   ✅ 'closed_at' 컬럼 추가 완료")
+        
+        if 'stop_loss_price' not in columns:
+            print("   🔄 DB 마이그레이션: 'stop_loss_price' 컬럼 추가 중...")
+            c.execute("ALTER TABLE trades ADD COLUMN stop_loss_price REAL")
+            print("   ✅ 'stop_loss_price' 컬럼 추가 완료")
+        
+        if 'take_profit_price' not in columns:
+            print("   🔄 DB 마이그레이션: 'take_profit_price' 컬럼 추가 중...")
+            c.execute("ALTER TABLE trades ADD COLUMN take_profit_price REAL")
+            print("   ✅ 'take_profit_price' 컬럼 추가 완료")
+        
+        if 'ai_confidence' not in columns:
+            print("   🔄 DB 마이그레이션: 'ai_confidence' 컬럼 추가 중...")
+            c.execute("ALTER TABLE trades ADD COLUMN ai_confidence REAL")
+            print("   ✅ 'ai_confidence' 컬럼 추가 완료")
+        
+        if 'ai_reasoning' not in columns:
+            print("   🔄 DB 마이그레이션: 'ai_reasoning' 컬럼 추가 중...")
+            c.execute("ALTER TABLE trades ADD COLUMN ai_reasoning TEXT")
+            print("   ✅ 'ai_reasoning' 컬럼 추가 완료")
+        
+    except Exception as e:
+        print(f"   ⚠️ DB 마이그레이션 오류 (무시 가능): {e}")
+    
     # performance 테이블 생성
     c.execute('''
         CREATE TABLE IF NOT EXISTS performance (
