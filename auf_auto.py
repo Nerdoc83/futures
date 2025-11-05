@@ -176,7 +176,7 @@ LIVE_TRADING_CONFIG = {
     "TRAILING_STOP_CHECK_INTERVAL": 60,    # 1분마다 체크 (빠른 대응)
     
     # 🔧 자금 관리 설정 (동적 균등 분할)
-    "MAX_POSITION_SIZE_PCT": 60,  # 안전장치: 가용 자금의 최대 60% (동적 균등 분할 활용)
+    "MAX_POSITION_SIZE_PCT": 50,  # 안전장치: 가용 자금의 최대 50% (동적 균등 분할 활용)
     "MIN_POSITION_SIZE_PCT": 3,   # 최소 3% (너무 작은 포지션 방지)
     "DYNAMIC_EQUAL_SPLIT": True,  # 동적 균등 분할 활성화
     "VOLATILITY_BASED_SIZING": True,  # 변동성 기반 포지션 크기 조절
@@ -3646,6 +3646,7 @@ def check_trailing_stop(trade: Dict, current_price: float) -> Tuple[bool, str]:
         coin_symbol = trade['coin_symbol']
         action = trade['action']
         entry_price = trade['entry_price']
+        leverage = trade.get('leverage', 1)
         highest_price = trade.get('highest_price', 0)
         
         if highest_price is None or highest_price == 0:
@@ -3654,28 +3655,38 @@ def check_trailing_stop(trade: Dict, current_price: float) -> Tuple[bool, str]:
         if action != 'long':
             return False, None
         
-        profit_pct = (current_price - entry_price) / entry_price * 100
+        # 🔧 레버리지 적용된 수익률 계산
+        current_profit_pct = (current_price - entry_price) / entry_price * leverage * 100
+        highest_profit_pct = (highest_price - entry_price) / entry_price * leverage * 100
         
+        # 활성화 기준 체크 (레버리지 적용된 수익률)
         activation_threshold = LIVE_TRADING_CONFIG.get("TRAILING_STOP_ACTIVATION", 15)
-        if profit_pct < activation_threshold:
+        if current_profit_pct < activation_threshold:
             return False, None
         
-        drop_from_high_pct = (highest_price - current_price) / highest_price * 100
+        # 🔧 수익률 하락폭 계산 (레버리지 적용)
+        profit_drop_pct = highest_profit_pct - current_profit_pct
         trailing_distance = LIVE_TRADING_CONFIG.get("TRAILING_STOP_DISTANCE", 5)
         
-        if drop_from_high_pct >= trailing_distance:
+        # 수익률이 설정값 이상 떨어지면 청산
+        if profit_drop_pct >= trailing_distance:
             reason = (
-                f"트레일링 스탑 발동: 최고가 ${highest_price:.4f} → 현재가 ${current_price:.4f} "
-                f"(-{drop_from_high_pct:.1f}% from high, +{profit_pct:.1f}% from entry)"
+                f"트레일링 스탑 발동: 최고수익 +{highest_profit_pct:.1f}% → 현재수익 +{current_profit_pct:.1f}% "
+                f"(-{profit_drop_pct:.1f}%p 하락, 레버리지 {leverage}x)"
             )
             return True, reason
         
-        if profit_pct >= activation_threshold:
-            trailing_stop_price = highest_price * (1 - trailing_distance / 100)
-            print(f"      🎯 {coin_symbol} 트레일링 스탑 활성: 익절라인 ${trailing_stop_price:.4f} (최고가 대비 -{trailing_distance}%)")
+        # 트레일링 활성 상태 표시
+        if current_profit_pct >= activation_threshold:
+            safe_profit = highest_profit_pct - trailing_distance
+            print(f"      🎯 {coin_symbol} 트레일링 스탑 활성 (Lev {leverage}x): 최고수익 +{highest_profit_pct:.1f}% | 현재 +{current_profit_pct:.1f}% | 익절라인 +{safe_profit:.1f}%")
         
         return False, None
         
+    except Exception as e:
+        print(f"      ⚠️ 트레일링 스탑 체크 오류 (무시하고 계속): {e}")
+        return False, None
+
     except Exception as e:
         print(f"      ⚠️ 트레일링 스탑 체크 오류 (무시하고 계속): {e}")
         return False, None
