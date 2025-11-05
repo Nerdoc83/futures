@@ -792,20 +792,71 @@ def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
 def fetch_funding_rate(symbol: str) -> Optional[float]:
-    """펀딩비 조회"""
+    """펀딩비 조회 (바이낸스 선물)"""
     try:
         funding = exchange.fetch_funding_rate(symbol)
-        rate = funding.get('fundingRate', 0)
-        return float(rate) * 100  # 퍼센트로 변환
+        
+        # 여러 가능한 키 시도
+        if isinstance(funding, dict):
+            # 방법 1: 'fundingRate'
+            if 'fundingRate' in funding and funding['fundingRate'] is not None:
+                return float(funding['fundingRate']) * 100  # 퍼센트로 변환
+            
+            # 방법 2: 'info' 안에 있는 경우
+            if 'info' in funding and isinstance(funding['info'], dict):
+                info = funding['info']
+                if 'fundingRate' in info and info['fundingRate']:
+                    return float(info['fundingRate']) * 100
+                if 'lastFundingRate' in info and info['lastFundingRate']:
+                    return float(info['lastFundingRate']) * 100
+        
+        # 숫자로 직접 반환되는 경우
+        if isinstance(funding, (int, float)):
+            return float(funding) * 100
+        
+        print(f"   ⚠️ 펀딩비 데이터 형식 불명: {type(funding)}")
+        return None
+        
     except Exception as e:
         print(f"   ⚠️ 펀딩비 조회 실패: {e}")
         return None
 
 def fetch_open_interest(symbol: str) -> Optional[float]:
-    """미결제약정 조회"""
+    """미결제약정 조회 (바이낸스 선물)"""
     try:
-        oi = exchange.fetch_open_interest(symbol)
-        return float(oi.get('openInterest', 0))
+        # ccxt의 fetch_open_interest 응답 구조
+        oi_data = exchange.fetch_open_interest(symbol)
+        
+        # 여러 가능한 키 시도
+        if isinstance(oi_data, dict):
+            # 방법 1: 'openInterestAmount' (계약 수량)
+            if 'openInterestAmount' in oi_data and oi_data['openInterestAmount']:
+                return float(oi_data['openInterestAmount'])
+            
+            # 방법 2: 'openInterestValue' (USDT 가치)
+            if 'openInterestValue' in oi_data and oi_data['openInterestValue']:
+                return float(oi_data['openInterestValue'])
+            
+            # 방법 3: 'openInterest' (레거시)
+            if 'openInterest' in oi_data and oi_data['openInterest']:
+                return float(oi_data['openInterest'])
+            
+            # 방법 4: 'info' 안에 있는 경우
+            if 'info' in oi_data:
+                info = oi_data['info']
+                if isinstance(info, dict):
+                    if 'openInterest' in info:
+                        return float(info['openInterest'])
+                    if 'sumOpenInterest' in info:
+                        return float(info['sumOpenInterest'])
+        
+        # 숫자로 직접 반환되는 경우
+        if isinstance(oi_data, (int, float)):
+            return float(oi_data)
+        
+        print(f"   ⚠️ 미결제약정 데이터 형식 불명: {type(oi_data)}")
+        return None
+        
     except Exception as e:
         print(f"   ⚠️ 미결제약정 조회 실패: {e}")
         return None
@@ -836,11 +887,17 @@ def fetch_comprehensive_market_data(symbol: str) -> dict:
     funding_rate = fetch_funding_rate(symbol)
     if funding_rate is not None:
         market_data['funding_rate'] = funding_rate
+        print(f"   ✅ 펀딩비: {funding_rate:.4f}%")
+    else:
+        print(f"   ⚠️ 펀딩비 데이터 없음")
     
     # 미결제약정
     open_interest = fetch_open_interest(symbol)
     if open_interest is not None:
         market_data['open_interest'] = open_interest
+        print(f"   ✅ 미결제약정: ${open_interest/1_000_000:.2f}M")
+    else:
+        print(f"   ⚠️ 미결제약정 데이터 없음")
     
     return market_data
 
