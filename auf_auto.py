@@ -55,7 +55,6 @@ import json
 from typing import Dict, List, Optional, Tuple
 from decimal import Decimal
 import sys
-import threading  # 🆕 트레일링 스탑용
 
 load_dotenv()
 
@@ -168,12 +167,6 @@ LIVE_TRADING_CONFIG = {
     "AI_ANALYSIS_INTERVAL": 60,  # 신규 진입 분석 (1분마다)
     "PERFORMANCE_REVIEW_INTERVAL": 600,  # AI 성과 리뷰 (10분)
     "POSITION_CHECK_INTERVAL": 600,  # 🔧 10분마다 AI 포지션 평가 (실시간 시장 대응)
-    
-    # 🆕 트레일링 스탑 설정
-    "TRAILING_STOP_ENABLED": True,         # 트레일링 스탑 활성화
-    "TRAILING_STOP_ACTIVATION": 30,        # 30% 이익부터 트레일링 스탑 시작
-    "TRAILING_STOP_DISTANCE": 10,           # 최고가 대비 -10% 하락 시 익절
-    "TRAILING_STOP_CHECK_INTERVAL": 60,    # 1분마다 체크 (빠른 대응)
     
     # 🔧 자금 관리 설정 (동적 균등 분할)
     "MAX_POSITION_SIZE_PCT": 50,  # 안전장치: 가용 자금의 최대 50% (동적 균등 분할 활용)
@@ -1356,16 +1349,6 @@ def setup_database():
             pass
         else:
             print(f"⚠️ DB 마이그레이션 오류: {e}")
-    
-    # 🆕 트레일링 스탑용 highest_price 컬럼 추가
-    try:
-        c.execute("ALTER TABLE trades ADD COLUMN highest_price REAL DEFAULT 0")
-        print("✅ highest_price 컬럼이 추가되었습니다 (트레일링 스탑용).")
-    except sqlite3.OperationalError as e:
-        if "duplicate column name" in str(e):
-            pass
-        else:
-            print(f"⚠️ highest_price 컬럼 추가 오류: {e}")
     
     # AI 결정 테이블
     c.execute('''
@@ -2865,11 +2848,34 @@ SHORT 포지션은 **SCALPING 또는 DAY_TRADING만** 허용:
   - SWING_TRADING이면 primary_timeframe이 "4h", "1d", "1w" 중 하나여야 함
   - 매칭 안 되면 trade: false로 거부
 - **trading_style에 따라 sl_percentage와 tp_percentage를 적절히 설정:**
-  - 스캘핑: SL 0.5~1.5%, TP 1~3%
-  - 데이트레이딩: SL 1.5~3%, TP 3~8%  
-  - 스윙: SL 3~5%, TP 8~20%
-  - **범위를 벗어나면 trade: false로 거부**
-- **expected_reward_pct / expected_risk_pct ≥ 2.0 되도록 설정**
+  
+  🆕 **변동성 기반 동적 TP/SL 설정 (필수):**
+  현재 변동성: {market_data.get('1h', {}).get('summary', {}).get('volatility', 3.0):.1f}%
+  
+  📊 **변동성 구간별 TP/SL 가이드:**
+  
+  **저변동성 (< 3%)** - BTC, ETH 같은 안정적 코인:
+    - SCALPING: SL 0.5~1.0%, TP 1~2%
+    - DAY_TRADING: SL 1.5~2.5%, TP 3~5%
+    - SWING_TRADING: SL 3~4%, TP 8~12%
+  
+  **중변동성 (3~5%)** - 중형 알트코인:
+    - SCALPING: SL 1.0~2.0%, TP 2~4%
+    - DAY_TRADING: SL 2.5~4.0%, TP 5~10%
+    - SWING_TRADING: SL 4~6%, TP 12~18%
+  
+  **고변동성 (> 5%)** - JELLY, MMT 같은 급등주:
+    - SCALPING: SL 2.0~3.0%, TP 4~8%
+    - DAY_TRADING: SL 4.0~6.0%, TP 10~15%
+    - SWING_TRADING: SL 6~8%, TP 18~25%
+  
+  ⚠️ **중요:** 
+  - 변동성이 높을수록 TP/SL을 넓게 설정해야 함
+  - 좁은 TP/SL + 고변동성 = 즉시 청산 (1-2분 내)
+  - 넓은 TP/SL = 추세를 충분히 탈 수 있음
+  - **현재 변동성에 맞는 구간의 TP/SL 범위를 반드시 사용**
+  
+  - **expected_reward_pct / expected_risk_pct ≥ 2.0 되도록 설정**
 - **레버리지 계산 공식:**
   - 기본 레버리지 = 트레이딩 스타일 기준값 (SCALPING: 12x, DAY: 10x, SWING: 6x)
   - + Confidence 보너스: (Confidence - 80) / 5 (85% = +1x, 90% = +2x, 95% = +3x)
@@ -2941,26 +2947,82 @@ SHORT 포지션은 **SCALPING 또는 DAY_TRADING만** 허용:
                         print(f"   ❌ 타임프레임 불일치: SWING_TRADING인데 {primary_timeframe} 사용 (4h/1d/1w만 허용)")
                         return {"trade": False, "reasoning": f"SWING_TRADING은 4h/1d/1w 타임프레임만 사용 가능", "confidence": 0}
                 
-                # 손절/익절 범위 검증
+                # 🆕 변동성 기반 손절/익절 범위 검증
+                # 1시간 변동성 가져오기
+                volatility = market_data.get('1h', {}).get('summary', {}).get('volatility', 3.0)
+                
+                # 변동성 구간 판단
+                if volatility < 3:
+                    vol_tier = "저변동성"
+                elif volatility <= 5:
+                    vol_tier = "중변동성"
+                else:
+                    vol_tier = "고변동성"
+                
                 sl_tp_valid = False
+                
                 if trading_style == 'SCALPING':
-                    if 0.5 <= sl_pct <= 1.5 and 1 <= tp_pct <= 3:
-                        sl_tp_valid = True
-                    else:
-                        print(f"   ❌ 손절/익절 범위 초과: SCALPING인데 SL {sl_pct}%, TP {tp_pct}% (SL 0.5-1.5%, TP 1-3% 권장)")
-                        return {"trade": False, "reasoning": f"SCALPING 손절/익절 범위 부적합", "confidence": 0}
+                    if volatility < 3:  # 저변동성
+                        if 0.5 <= sl_pct <= 1.0 and 1 <= tp_pct <= 2:
+                            sl_tp_valid = True
+                        else:
+                            print(f"   ❌ {vol_tier} SCALPING SL/TP 범위 초과: SL {sl_pct}%, TP {tp_pct}% (권장: SL 0.5-1.0%, TP 1-2%)")
+                            return {"trade": False, "reasoning": f"{vol_tier} SCALPING 범위 부적합", "confidence": 0}
+                    elif volatility <= 5:  # 중변동성
+                        if 1.0 <= sl_pct <= 2.0 and 2 <= tp_pct <= 4:
+                            sl_tp_valid = True
+                        else:
+                            print(f"   ❌ {vol_tier} SCALPING SL/TP 범위 초과: SL {sl_pct}%, TP {tp_pct}% (권장: SL 1.0-2.0%, TP 2-4%)")
+                            return {"trade": False, "reasoning": f"{vol_tier} SCALPING 범위 부적합", "confidence": 0}
+                    else:  # 고변동성
+                        if 2.0 <= sl_pct <= 3.0 and 4 <= tp_pct <= 8:
+                            sl_tp_valid = True
+                        else:
+                            print(f"   ❌ {vol_tier} SCALPING SL/TP 범위 초과: SL {sl_pct}%, TP {tp_pct}% (권장: SL 2.0-3.0%, TP 4-8%)")
+                            return {"trade": False, "reasoning": f"{vol_tier} SCALPING 범위 부적합", "confidence": 0}
+                
                 elif trading_style == 'DAY_TRADING':
-                    if 1.5 <= sl_pct <= 3 and 3 <= tp_pct <= 8:
-                        sl_tp_valid = True
-                    else:
-                        print(f"   ❌ 손절/익절 범위 초과: DAY_TRADING인데 SL {sl_pct}%, TP {tp_pct}% (SL 1.5-3%, TP 3-8% 권장)")
-                        return {"trade": False, "reasoning": f"DAY_TRADING 손절/익절 범위 부적합", "confidence": 0}
+                    if volatility < 3:  # 저변동성
+                        if 1.5 <= sl_pct <= 2.5 and 3 <= tp_pct <= 5:
+                            sl_tp_valid = True
+                        else:
+                            print(f"   ❌ {vol_tier} DAY_TRADING SL/TP 범위 초과: SL {sl_pct}%, TP {tp_pct}% (권장: SL 1.5-2.5%, TP 3-5%)")
+                            return {"trade": False, "reasoning": f"{vol_tier} DAY_TRADING 범위 부적합", "confidence": 0}
+                    elif volatility <= 5:  # 중변동성
+                        if 2.5 <= sl_pct <= 4.0 and 5 <= tp_pct <= 10:
+                            sl_tp_valid = True
+                        else:
+                            print(f"   ❌ {vol_tier} DAY_TRADING SL/TP 범위 초과: SL {sl_pct}%, TP {tp_pct}% (권장: SL 2.5-4.0%, TP 5-10%)")
+                            return {"trade": False, "reasoning": f"{vol_tier} DAY_TRADING 범위 부적합", "confidence": 0}
+                    else:  # 고변동성
+                        if 4.0 <= sl_pct <= 6.0 and 10 <= tp_pct <= 15:
+                            sl_tp_valid = True
+                        else:
+                            print(f"   ❌ {vol_tier} DAY_TRADING SL/TP 범위 초과: SL {sl_pct}%, TP {tp_pct}% (권장: SL 4.0-6.0%, TP 10-15%)")
+                            return {"trade": False, "reasoning": f"{vol_tier} DAY_TRADING 범위 부적합", "confidence": 0}
+                
                 elif trading_style == 'SWING_TRADING':
-                    if 3 <= sl_pct <= 5 and 8 <= tp_pct <= 20:
-                        sl_tp_valid = True
-                    else:
-                        print(f"   ❌ 손절/익절 범위 초과: SWING_TRADING인데 SL {sl_pct}%, TP {tp_pct}% (SL 3-5%, TP 8-20% 권장)")
-                        return {"trade": False, "reasoning": f"SWING_TRADING 손절/익절 범위 부적합", "confidence": 0}
+                    if volatility < 3:  # 저변동성
+                        if 3 <= sl_pct <= 4 and 8 <= tp_pct <= 12:
+                            sl_tp_valid = True
+                        else:
+                            print(f"   ❌ {vol_tier} SWING_TRADING SL/TP 범위 초과: SL {sl_pct}%, TP {tp_pct}% (권장: SL 3-4%, TP 8-12%)")
+                            return {"trade": False, "reasoning": f"{vol_tier} SWING_TRADING 범위 부적합", "confidence": 0}
+                    elif volatility <= 5:  # 중변동성
+                        if 4 <= sl_pct <= 6 and 12 <= tp_pct <= 18:
+                            sl_tp_valid = True
+                        else:
+                            print(f"   ❌ {vol_tier} SWING_TRADING SL/TP 범위 초과: SL {sl_pct}%, TP {tp_pct}% (권장: SL 4-6%, TP 12-18%)")
+                            return {"trade": False, "reasoning": f"{vol_tier} SWING_TRADING 범위 부적합", "confidence": 0}
+                    else:  # 고변동성
+                        if 6 <= sl_pct <= 8 and 18 <= tp_pct <= 25:
+                            sl_tp_valid = True
+                        else:
+                            print(f"   ❌ {vol_tier} SWING_TRADING SL/TP 범위 초과: SL {sl_pct}%, TP {tp_pct}% (권장: SL 6-8%, TP 18-25%)")
+                            return {"trade": False, "reasoning": f"{vol_tier} SWING_TRADING 범위 부적합", "confidence": 0}
+                
+                # 변동성 정보 출력
+                print(f"   📊 변동성: {volatility:.1f}% ({vol_tier})")
                 
                 required_keys = ['direction', 'leverage', 'investment_percentage', 'sl_percentage', 'tp_percentage', 'confidence']
                 if all(key in decision for key in required_keys):
@@ -3519,235 +3581,6 @@ def display_manual_trades_status():
     print(f"   🟢 진행중: {open_count}개")
     print(f"   🔴 종료됨: {closed_count}개")
     print(f"{'='*80}")
-
-# ===== 트레일링 스탑 기능 =====
-
-def update_highest_price(trade_id: int, current_price: float, coin_symbol: str) -> float:
-    """
-    최고가 업데이트 및 반환
-    
-    Args:
-        trade_id: 거래 ID
-        current_price: 현재가
-        coin_symbol: 코인 심볼 (로깅용)
-    
-    Returns:
-        업데이트된 최고가
-    """
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        
-        # 현재 최고가 조회
-        c.execute("SELECT highest_price, entry_price FROM trades WHERE id = ?", (trade_id,))
-        result = c.fetchone()
-        
-        if not result:
-            conn.close()
-            return current_price
-        
-        stored_highest, entry_price = result
-        
-        # 최고가 초기화 (0이거나 None인 경우)
-        if stored_highest is None or stored_highest == 0:
-            stored_highest = max(entry_price, current_price)
-        
-        # 현재가가 더 높으면 업데이트
-        if current_price > stored_highest:
-            c.execute("""
-                UPDATE trades 
-                SET highest_price = ? 
-                WHERE id = ?
-            """, (current_price, trade_id))
-            conn.commit()
-            
-            # 새 최고가 갱신 로그
-            profit_from_entry = (current_price - entry_price) / entry_price * 100
-            print(f"      📈 {coin_symbol} 최고가 갱신: ${stored_highest:.4f} → ${current_price:.4f} (+{profit_from_entry:.1f}%)")
-            
-            conn.close()
-            return current_price
-        
-        conn.close()
-        return stored_highest
-        
-    except Exception as e:
-        print(f"      ⚠️ 최고가 업데이트 오류 (무시하고 계속): {e}")
-        return current_price
-
-def check_trailing_stop(trade: Dict, current_price: float) -> Tuple[bool, str]:
-    """
-    트레일링 스탑 조건 확인
-    
-    Args:
-        trade: 거래 정보 딕셔너리
-        current_price: 현재가
-    
-    Returns:
-        (청산여부, 청산사유)
-    """
-    try:
-        # 설정 확인
-        if not LIVE_TRADING_CONFIG.get("TRAILING_STOP_ENABLED", False):
-            return False, None
-        
-        trade_id = trade['id']
-        coin_symbol = trade['coin_symbol']
-        action = trade['action']
-        entry_price = trade['entry_price']
-        highest_price = trade.get('highest_price', 0)
-        
-        # 최고가 초기화
-        if highest_price is None or highest_price == 0:
-            highest_price = max(entry_price, current_price)
-        
-        # 롱 포지션만 지원 (숏은 다른 로직 필요)
-        if action != 'long':
-            return False, None
-        
-        # 현재 수익률 계산
-        profit_pct = (current_price - entry_price) / entry_price * 100
-        
-        # 활성화 기준 미달
-        activation_threshold = LIVE_TRADING_CONFIG.get("TRAILING_STOP_ACTIVATION", 15)
-        if profit_pct < activation_threshold:
-            return False, None
-        
-        # 최고가 대비 하락률 계산
-        drop_from_high_pct = (highest_price - current_price) / highest_price * 100
-        
-        # 트레일링 스탑 거리
-        trailing_distance = LIVE_TRADING_CONFIG.get("TRAILING_STOP_DISTANCE", 5)
-        
-        # 트레일링 스탑 발동 조건
-        if drop_from_high_pct >= trailing_distance:
-            reason = (
-                f"트레일링 스탑 발동: 최고가 ${highest_price:.4f} → 현재가 ${current_price:.4f} "
-                f"(-{drop_from_high_pct:.1f}% from high, +{profit_pct:.1f}% from entry)"
-            )
-            return True, reason
-        
-        # 트레일링 스탑 대기 중 로그 (활성화되었지만 아직 발동 안됨)
-        if profit_pct >= activation_threshold:
-            trailing_stop_price = highest_price * (1 - trailing_distance / 100)
-            print(f"      🎯 {coin_symbol} 트레일링 스탑 활성: 익절라인 ${trailing_stop_price:.4f} (최고가 대비 -{trailing_distance}%)")
-        
-        return False, None
-        
-    except Exception as e:
-        print(f"      ⚠️ 트레일링 스탑 체크 오류 (무시하고 계속): {e}")
-        return False, None
-
-def trailing_stop_monitor():
-    """
-    트레일링 스탑 모니터링 루프 (별도 스레드에서 실행)
-    1분마다 모든 포지션을 체크하여 빠른 대응
-    """
-    print(f"\n🎯 트레일링 스탑 모니터 시작 (체크 주기: {LIVE_TRADING_CONFIG.get('TRAILING_STOP_CHECK_INTERVAL', 60)}초)")
-    
-    while True:
-        try:
-            if not LIVE_TRADING_CONFIG.get("TRAILING_STOP_ENABLED", False):
-                time.sleep(60)
-                continue
-            
-            # DB에서 오픈 포지션 조회
-            conn = sqlite3.connect(DB_FILE)
-            c = conn.cursor()
-            c.execute("""
-                SELECT id, coin_symbol, action, entry_price, amount, leverage, 
-                       investment_amount, highest_price, manual_trade
-                FROM trades 
-                WHERE status = 'OPEN'
-            """)
-            trades = c.fetchall()
-            conn.close()
-            
-            if not trades:
-                time.sleep(LIVE_TRADING_CONFIG.get('TRAILING_STOP_CHECK_INTERVAL', 60))
-                continue
-            
-            # 각 포지션 체크
-            for trade_data in trades:
-                try:
-                    trade_id, coin, action, entry_price, amount, leverage, investment, highest_price, manual_trade = trade_data
-                    
-                    # 수동거래는 스킵
-                    if manual_trade == 1:
-                        continue
-                    
-                    # 현재가 조회
-                    symbol = f"{coin}/USDT:USDT"
-                    ticker = exchange.fetch_ticker(symbol)
-                    current_price = ticker['last']
-                    
-                    # 최고가 업데이트
-                    highest_price = update_highest_price(trade_id, current_price, coin)
-                    
-                    # 트레일링 스탑 체크
-                    trade_dict = {
-                        'id': trade_id,
-                        'coin_symbol': coin,
-                        'action': action,
-                        'entry_price': entry_price,
-                        'amount': amount,
-                        'leverage': leverage,
-                        'investment_amount': investment,
-                        'highest_price': highest_price
-                    }
-                    
-                    should_close, reason = check_trailing_stop(trade_dict, current_price)
-                    
-                    if should_close:
-                        print(f"\n   💰 {coin} {reason}")
-                        print(f"   🔄 트레일링 스탑 청산 실행 중...")
-                        
-                        # 포지션 청산
-                        close_result = close_position(symbol, action, amount)
-                        
-                        if close_result and close_result.get('order'):
-                            # DB 업데이트
-                            conn = sqlite3.connect(DB_FILE)
-                            c = conn.cursor()
-                            
-                            exit_price = close_result.get('close_price', current_price)
-                            pnl = close_result.get('pnl', 0)
-                            
-                            # PnL 계산
-                            if action == 'long':
-                                price_change_pct = (exit_price - entry_price) / entry_price
-                            else:
-                                price_change_pct = (entry_price - exit_price) / entry_price
-                            
-                            calculated_pnl = investment * price_change_pct * leverage
-                            pnl_pct = price_change_pct * leverage * 100
-                            
-                            c.execute("""
-                                UPDATE trades
-                                SET status = 'CLOSED',
-                                    exit_price = ?,
-                                    pnl = ?,
-                                    pnl_percentage = ?,
-                                    close_timestamp = CURRENT_TIMESTAMP,
-                                    ai_reasoning = COALESCE(ai_reasoning, '') || ?
-                                WHERE id = ?
-                            """, (exit_price, calculated_pnl, pnl_pct, f'\n[청산 이유] {reason}', trade_id))
-                            
-                            conn.commit()
-                            conn.close()
-                            
-                            print(f"   ✅ 트레일링 스탑 청산 완료: {coin} PnL=${calculated_pnl:+,.2f} ({pnl_pct:+.1f}%)")
-                        
-                except Exception as pos_err:
-                    print(f"   ⚠️ {coin if 'coin' in locals() else 'Unknown'} 트레일링 스탑 처리 오류: {pos_err}")
-                    continue
-            
-            # 다음 체크까지 대기
-            time.sleep(LIVE_TRADING_CONFIG.get('TRAILING_STOP_CHECK_INTERVAL', 60))
-            
-        except Exception as e:
-            print(f"   ❌ 트레일링 스탑 모니터 오류: {e}")
-            time.sleep(60)
 
 # 🆕 수동거래 쉬운 사용을 위한 전역 함수들
 def add_manual_long(coin: str, price: float, amount: float, leverage: int = 1):
@@ -4629,21 +4462,6 @@ def main():
     print(f"🚀 실거래 봇 자동 시작")
     print(f"   Ctrl+C를 눌러 안전하게 종료할 수 있습니다.")
     print(f"{'='*80}\n")
-    
-    # 🆕 트레일링 스탑 모니터 시작 (별도 스레드)
-    if LIVE_TRADING_CONFIG.get("TRAILING_STOP_ENABLED", False):
-        print(f"🎯 트레일링 스탑 활성화:")
-        print(f"   ✅ 활성화 기준: +{LIVE_TRADING_CONFIG['TRAILING_STOP_ACTIVATION']}% 이익")
-        print(f"   ✅ 익절 거리: 최고가 대비 -{LIVE_TRADING_CONFIG['TRAILING_STOP_DISTANCE']}%")
-        print(f"   ✅ 체크 주기: {LIVE_TRADING_CONFIG['TRAILING_STOP_CHECK_INTERVAL']}초\n")
-        
-        trailing_stop_thread = threading.Thread(
-            target=trailing_stop_monitor,
-            daemon=True,  # 메인 스레드 종료 시 함께 종료
-            name="TrailingStopMonitor"
-        )
-        trailing_stop_thread.start()
-        time.sleep(1)  # 스레드 시작 대기
     
     # 3초 후 자동 시작
     print("3초 후 자동 시작...")
