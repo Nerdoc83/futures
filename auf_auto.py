@@ -1032,7 +1032,7 @@ def sync_db_with_binance():
                     # 바이낸스에 없음 → DB에서 청산 처리 (AI 거래만)
                     print(f"   🔄 동기화: {coin} AI거래가 바이낸스에 없음 → DB 청산 처리")
                     
-                    # 🆕 바이낸스에서 실제 청산 정보 조회 (개선 버전)
+                    # 🆕 바이낸스에서 실제 청산 정보 조회
                     symbol_binance = f"{coin}USDT"
                     actual_pnl = 0
                     binance_pnl = None
@@ -1044,100 +1044,83 @@ def sync_db_with_binance():
                             start_time = int(parse_db_timestamp(timestamp).timestamp() * 1000)
                             end_time = get_utc_timestamp_ms()
                             
-                            # 1. 실현 손익 조회 (REALIZED_PNL)
+                            # 🔧 시간 범위 확장 (Income History 업데이트 지연 대비)
+                            start_time_expanded = start_time - (3600 * 1000)  # -1시간
+                            end_time_expanded = end_time + (3600 * 1000)      # +1시간
+                            
+                            print(f"     🔍 바이낸스 데이터 조회 중... ({coin})")
+                            
+                            # 1. Income History에서 실현 손익 조회
                             try:
-                                realized_pnl_data = exchange.fapiPrivateGetIncome({
+                                income_data = exchange.fapiPrivateGetIncome({
                                     'symbol': symbol_binance,
                                     'incomeType': 'REALIZED_PNL',
-                                    'startTime': start_time,
-                                    'endTime': end_time,
+                                    'startTime': start_time_expanded,
+                                    'endTime': end_time_expanded,
                                     'limit': 50
                                 })
                                 
-                                # 모든 실현 손익 합산
-                                total_realized_pnl = sum(float(item.get('income', 0)) for item in realized_pnl_data)
+                                print(f"     📊 Income History: {len(income_data) if income_data else 0}개 항목")
                                 
-                                if total_realized_pnl != 0:
-                                    print(f"     💰 실현 손익: ${total_realized_pnl:+,.2f}")
-                            except Exception as e:
-                                print(f"     ⚠️ 실현 손익 조회 실패: {e}")
-                                total_realized_pnl = 0
+                                # 🔧 모든 실현 손익 합산 (0도 포함)
+                                if income_data:
+                                    total_pnl = sum(float(item.get('income', 0)) for item in income_data)
+                                    
+                                    if total_pnl != 0 or len(income_data) > 0:
+                                        binance_pnl = total_pnl
+                                        actual_pnl = total_pnl
+                                        print(f"     ✅ 바이낸스 실제 PnL: ${binance_pnl:+,.2f}")
+                                    else:
+                                        print(f"     ⚠️ Income History 비어있음")
+                                else:
+                                    print(f"     ⚠️ Income History 조회 결과 없음")
+                                    
+                            except Exception as income_err:
+                                print(f"     ❌ Income History 조회 실패: {income_err}")
                             
-                            # 2. 펀딩비 조회 (FUNDING_FEE) - 매우 중요!
-                            try:
-                                funding_data = exchange.fapiPrivateGetIncome({
-                                    'symbol': symbol_binance,
-                                    'incomeType': 'FUNDING_FEE',
-                                    'startTime': start_time,
-                                    'endTime': end_time,
-                                    'limit': 50
-                                })
-                                
-                                # 모든 펀딩비 합산 (음수면 지불, 양수면 수령)
-                                total_funding = sum(float(item.get('income', 0)) for item in funding_data)
-                                
-                                if total_funding != 0:
-                                    print(f"     💸 펀딩비: ${total_funding:+,.2f}")
-                            except Exception as e:
-                                print(f"     ⚠️ 펀딩비 조회 실패: {e}")
-                                total_funding = 0
-                            
-                            # 3. 거래 수수료 조회 (COMMISSION) - 추가 개선
-                            try:
-                                commission_data = exchange.fapiPrivateGetIncome({
-                                    'symbol': symbol_binance,
-                                    'incomeType': 'COMMISSION',
-                                    'startTime': start_time,
-                                    'endTime': end_time,
-                                    'limit': 50
-                                })
-                                
-                                # 모든 수수료 합산 (음수)
-                                total_commission = sum(float(item.get('income', 0)) for item in commission_data)
-                                
-                                if total_commission != 0:
-                                    print(f"     💳 거래 수수료: ${total_commission:+,.2f}")
-                            except Exception as e:
-                                print(f"     ⚠️ 수수료 조회 실패: {e}")
-                                total_commission = 0
-                            
-                            # 🎯 실제 순손익 = 실현손익 + 펀딩비 + 수수료
-                            # (수수료와 펀딩비는 이미 음수로 반환됨)
-                            if total_realized_pnl != 0:
-                                binance_pnl = total_realized_pnl + total_funding + total_commission
-                                actual_pnl = binance_pnl
-                                print(f"     📊 바이낸스 최종 순손익: ${binance_pnl:+,.2f}")
-                                print(f"        (실현손익: ${total_realized_pnl:+,.2f} + 펀딩비: ${total_funding:+,.2f} + 수수료: ${total_commission:+,.2f})")
-                            
-                            # 2. 🆕 User Trades에서 청산가 조회 (개선 버전: 거래량 가중 평균)
+                            # 2. 🆕 User Trades에서 청산가 조회 (확장된 시간 범위)
                             try:
                                 trades = exchange.fapiPrivateGetUserTrades({
                                     'symbol': symbol_binance,
-                                    'startTime': start_time,
-                                    'endTime': end_time,
+                                    'startTime': start_time_expanded,
+                                    'endTime': end_time_expanded,
                                     'limit': 100
                                 })
                                 
-                                # 청산 거래 찾기 (realizedPnl != 0)
+                                print(f"     📊 User Trades: {len(trades) if trades else 0}개 거래")
+                                
+                                # 청산 거래 찾기 (realizedPnl 필드가 있는 거래)
                                 exit_trades = []
                                 if trades:
                                     for trade in trades:
-                                        realized_pnl_trade = float(trade.get('realizedPnl', 0))
-                                        if realized_pnl_trade != 0:
+                                        # 🔧 realizedPnl 필드가 있으면 청산 거래 (0도 포함)
+                                        if 'realizedPnl' in trade:
                                             exit_trades.append({
                                                 'price': float(trade.get('price', 0)),
                                                 'qty': float(trade.get('qty', 0)),
+                                                'realizedPnl': float(trade.get('realizedPnl', 0)),
                                                 'time': trade.get('time', 0)
                                             })
                                     
-                                    # 거래량 가중 평균 청산가 계산
                                     if exit_trades:
+                                        # 거래량 가중 평균 청산가
                                         total_qty = sum(t['qty'] for t in exit_trades)
                                         if total_qty > 0:
                                             exit_price = sum(t['price'] * t['qty'] for t in exit_trades) / total_qty
                                             print(f"     💰 평균 청산가: ${exit_price:,.4f} ({len(exit_trades)}개 거래)")
+                                        
+                                        # 🔧 User Trades의 realizedPnl 합산 (Income History 대체값)
+                                        if binance_pnl is None or binance_pnl == 0:
+                                            trades_total_pnl = sum(t['realizedPnl'] for t in exit_trades)
+                                            if trades_total_pnl != 0 or len(exit_trades) > 0:
+                                                binance_pnl = trades_total_pnl
+                                                actual_pnl = trades_total_pnl
+                                                print(f"     🔄 User Trades PnL 사용: ${binance_pnl:+,.2f} (대체)")
+                                    else:
+                                        print(f"     ⚠️ 청산 거래를 찾을 수 없음")
+                                        
                             except Exception as trade_err:
-                                print(f"     ⚠️ 거래 내역 조회 실패: {trade_err}")
+                                print(f"     ❌ User Trades 조회 실패: {trade_err}")
                             
                     except Exception as e:
                         print(f"     ⚠️ 바이낸스 데이터 조회 실패: {e}")
@@ -1152,52 +1135,15 @@ def sync_db_with_binance():
                         except:
                             exit_price = entry_price  # 조회 실패 시 진입가 사용
                     
-                    # PnL 계산 (바이낸스 조회 실패 시 대략적 계산 - 수수료 포함)
+                    # PnL 계산 (바이낸스 조회 실패 시 대략적 계산)
                     if actual_pnl == 0 and exit_price:
-                        # 포지션 크기 계산
-                        position_size = amount * leverage
-                        
-                        # 가격 변동률
                         if action == 'long':
-                            price_change_pct = (exit_price - entry_price) / entry_price
+                            price_change = (exit_price - entry_price) / entry_price
                         else:  # short
-                            price_change_pct = (entry_price - exit_price) / entry_price
+                            price_change = (entry_price - exit_price) / entry_price
                         
-                        # 총 PnL (수수료 전)
-                        gross_pnl = investment * price_change_pct * leverage
-                        
-                        # 🔧 수수료 계산 (진입 + 청산)
-                        entry_cost = entry_price * position_size
-                        entry_fee = entry_cost * 0.0005  # 0.05% Taker
-                        
-                        exit_cost = exit_price * position_size
-                        exit_fee = exit_cost * 0.0005  # 0.05% Taker
-                        
-                        total_fees = entry_fee + exit_fee
-                        
-                        # 🔧 펀딩비 추정 (보유 시간 기준)
-                        if timestamp:
-                            try:
-                                entry_dt = parse_db_timestamp(timestamp)
-                                hold_hours = (get_utc_now() - entry_dt).total_seconds() / 3600
-                                funding_periods = int(hold_hours / 8)  # 8시간마다 1회
-                                
-                                # 펀딩비 추정 (0.01% per 8h, LONG은 지불)
-                                estimated_funding = investment * 0.0001 * funding_periods
-                                if action == 'long':
-                                    estimated_funding = -abs(estimated_funding)  # LONG은 마이너스
-                                else:
-                                    estimated_funding = abs(estimated_funding)   # SHORT는 플러스
-                            except:
-                                estimated_funding = 0
-                        else:
-                            estimated_funding = 0
-                        
-                        # 순 PnL = 총 PnL - 수수료 + 펀딩비
-                        actual_pnl = gross_pnl - total_fees + estimated_funding
-                        
-                        print(f"     📊 계산된 PnL: ${actual_pnl:+,.2f}")
-                        print(f"        (가격변동: ${gross_pnl:+,.2f} - 수수료: ${total_fees:.2f} + 펀딩비: ${estimated_funding:+,.2f})")
+                        actual_pnl = investment * price_change * leverage
+                        print(f"     📊 계산된 PnL: ${actual_pnl:+,.2f} (대략)")
                     
                     pnl_pct = (actual_pnl / investment * 100) if investment > 0 else 0
                     
