@@ -735,17 +735,44 @@ def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
         # RSI
         df['rsi'] = ta.rsi(df['close'], length=14)
         
-        # 볼린저 밴드
+        # 볼린저 밴드 (컬럼명 안전 처리)
         bb = ta.bbands(df['close'], length=20, std=2)
-        df['bb_upper'] = bb['BBU_20_2.0']
-        df['bb_middle'] = bb['BBM_20_2.0']
-        df['bb_lower'] = bb['BBL_20_2.0']
+        if bb is not None and not bb.empty:
+            # pandas_ta 버전별 컬럼명 처리
+            bb_cols = bb.columns.tolist()
+            
+            # 상단 밴드 찾기
+            upper_col = next((col for col in bb_cols if 'BBU' in col or 'upper' in col.lower()), None)
+            # 중간 밴드 찾기
+            middle_col = next((col for col in bb_cols if 'BBM' in col or 'middle' in col.lower()), None)
+            # 하단 밴드 찾기
+            lower_col = next((col for col in bb_cols if 'BBL' in col or 'lower' in col.lower()), None)
+            
+            if upper_col:
+                df['bb_upper'] = bb[upper_col]
+            if middle_col:
+                df['bb_middle'] = bb[middle_col]
+            if lower_col:
+                df['bb_lower'] = bb[lower_col]
         
-        # MACD
+        # MACD (컬럼명 안전 처리)
         macd = ta.macd(df['close'])
-        df['macd'] = macd['MACD_12_26_9']
-        df['macd_signal'] = macd['MACDs_12_26_9']
-        df['macd_hist'] = macd['MACDh_12_26_9']
+        if macd is not None and not macd.empty:
+            macd_cols = macd.columns.tolist()
+            
+            # MACD 라인
+            macd_col = next((col for col in macd_cols if 'MACD_' in col and 'MACDs' not in col and 'MACDh' not in col), None)
+            # 시그널 라인
+            signal_col = next((col for col in macd_cols if 'MACDs' in col or 'signal' in col.lower()), None)
+            # 히스토그램
+            hist_col = next((col for col in macd_cols if 'MACDh' in col or 'histogram' in col.lower()), None)
+            
+            if macd_col:
+                df['macd'] = macd[macd_col]
+            if signal_col:
+                df['macd_signal'] = macd[signal_col]
+            if hist_col:
+                df['macd_hist'] = macd[hist_col]
         
         # 이동평균
         df['sma_20'] = ta.sma(df['close'], length=20)
