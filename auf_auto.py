@@ -171,7 +171,8 @@ LIVE_TRADING_CONFIG = {
     
     # 🆕 트레일링 스탑 설정 (처음부터 활성화)
     "TRAILING_STOP_ENABLED": True,              # 트레일링 스탑 활성화
-    "TRAILING_STOP_MIN_PROFIT_PCT": 20.0,       # 최소 확보 수익률 (%) - 레버리지 고려하여 자동 계산됨
+    "TRAILING_STOP_MIN_PROFIT_PCT": 7.0,        # 최소 확보 수익률 (%) - 레버리지 고려하여 자동 계산됨
+                                                  # 예: 7% 수익 확보 + 10배 레버리지 = 0.7% 콜백
     
     # 🔧 자금 관리 설정 (동적 균등 분할)
     "MAX_POSITION_SIZE_PCT": 50,  # 안전장치: 가용 자금의 최대 50% (동적 균등 분할 활용)
@@ -532,6 +533,16 @@ def init_db():
             print("   🔄 DB 마이그레이션: 'side' 컬럼 추가 중...")
             c.execute("ALTER TABLE trades ADD COLUMN side TEXT DEFAULT 'LONG'")
             print("   ✅ 'side' 컬럼 추가 완료")
+        
+        if 'quantity' not in columns:
+            print("   🔄 DB 마이그레이션: 'quantity' 컬럼 추가 중...")
+            c.execute("ALTER TABLE trades ADD COLUMN quantity REAL DEFAULT 0")
+            print("   ✅ 'quantity' 컬럼 추가 완료")
+        
+        if 'leverage' not in columns:
+            print("   🔄 DB 마이그레이션: 'leverage' 컬럼 추가 중...")
+            c.execute("ALTER TABLE trades ADD COLUMN leverage INTEGER DEFAULT 10")
+            print("   ✅ 'leverage' 컬럼 추가 완료")
         
         if 'manual_trade' not in columns:
             print("   🔄 DB 마이그레이션: 'manual_trade' 컬럼 추가 중...")
@@ -1717,7 +1728,7 @@ def main():
     
     # 🆕 트레일링 스탑 설정 출력
     if LIVE_TRADING_CONFIG.get("TRAILING_STOP_ENABLED", False):
-        min_profit = LIVE_TRADING_CONFIG.get("TRAILING_STOP_MIN_PROFIT_PCT", 20.0)
+        min_profit = LIVE_TRADING_CONFIG.get("TRAILING_STOP_MIN_PROFIT_PCT", 7.0)
         print(f"🎯 트레일링 스탑:")
         print(f"   ✅ 활성화됨 (진입 즉시)")
         print(f"   ✅ 최소 확보 수익률: {min_profit}%")
