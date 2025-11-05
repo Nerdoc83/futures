@@ -55,6 +55,7 @@ import json
 from typing import Dict, List, Optional, Tuple
 from decimal import Decimal
 import sys
+import threading  # 🆕 트레일링 스탑용
 
 load_dotenv()
 
@@ -167,6 +168,12 @@ LIVE_TRADING_CONFIG = {
     "AI_ANALYSIS_INTERVAL": 60,  # 신규 진입 분석 (1분마다)
     "PERFORMANCE_REVIEW_INTERVAL": 600,  # AI 성과 리뷰 (10분)
     "POSITION_CHECK_INTERVAL": 600,  # 🔧 10분마다 AI 포지션 평가 (실시간 시장 대응)
+    
+    # 🆕 트레일링 스탑 설정
+    "TRAILING_STOP_ENABLED": True,         # 트레일링 스탑 활성화
+    "TRAILING_STOP_ACTIVATION": 30,        # 30% 이익부터 트레일링 스탑 시작
+    "TRAILING_STOP_DISTANCE": 10,           # 최고가 대비 -10% 하락 시 익절
+    "TRAILING_STOP_CHECK_INTERVAL": 60,    # 1분마다 체크 (빠른 대응)
     
     # 🔧 자금 관리 설정 (동적 균등 분할)
     "MAX_POSITION_SIZE_PCT": 50,  # 안전장치: 가용 자금의 최대 50% (동적 균등 분할 활용)
@@ -1044,83 +1051,45 @@ def sync_db_with_binance():
                             start_time = int(parse_db_timestamp(timestamp).timestamp() * 1000)
                             end_time = get_utc_timestamp_ms()
                             
-                            # 🔧 시간 범위 확장 (Income History 업데이트 지연 대비)
-                            start_time_expanded = start_time - (3600 * 1000)  # -1시간
-                            end_time_expanded = end_time + (3600 * 1000)      # +1시간
-                            
-                            print(f"     🔍 바이낸스 데이터 조회 중... ({coin})")
-                            
                             # 1. Income History에서 실현 손익 조회
-                            try:
-                                income_data = exchange.fapiPrivateGetIncome({
-                                    'symbol': symbol_binance,
-                                    'incomeType': 'REALIZED_PNL',
-                                    'startTime': start_time_expanded,
-                                    'endTime': end_time_expanded,
-                                    'limit': 50
-                                })
-                                
-                                print(f"     📊 Income History: {len(income_data) if income_data else 0}개 항목")
-                                
-                                # 🔧 모든 실현 손익 합산 (0도 포함)
-                                if income_data:
-                                    total_pnl = sum(float(item.get('income', 0)) for item in income_data)
-                                    
-                                    if total_pnl != 0 or len(income_data) > 0:
-                                        binance_pnl = total_pnl
-                                        actual_pnl = total_pnl
-                                        print(f"     ✅ 바이낸스 실제 PnL: ${binance_pnl:+,.2f}")
-                                    else:
-                                        print(f"     ⚠️ Income History 비어있음")
-                                else:
-                                    print(f"     ⚠️ Income History 조회 결과 없음")
-                                    
-                            except Exception as income_err:
-                                print(f"     ❌ Income History 조회 실패: {income_err}")
+                            income_data = exchange.fapiPrivateGetIncome({
+                                'symbol': symbol_binance,
+                                'incomeType': 'REALIZED_PNL',
+                                'startTime': start_time,
+                                'endTime': end_time,
+                                'limit': 10
+                            })
                             
-                            # 2. 🆕 User Trades에서 청산가 조회 (확장된 시간 범위)
+                            # 가장 최근 실현 손익 찾기
+                            if income_data:
+                                for item in reversed(income_data):  # 최신 순서
+                                    pnl_value = float(item.get('income', 0))
+                                    if pnl_value != 0:
+                                        binance_pnl = pnl_value
+                                        actual_pnl = pnl_value
+                                        print(f"     📊 바이낸스 실제 PnL: ${binance_pnl:+,.2f}")
+                                        break
+                            
+                            # 2. 🆕 User Trades에서 청산가 조회 (최근 체결 내역)
                             try:
                                 trades = exchange.fapiPrivateGetUserTrades({
                                     'symbol': symbol_binance,
-                                    'startTime': start_time_expanded,
-                                    'endTime': end_time_expanded,
-                                    'limit': 100
+                                    'startTime': start_time,
+                                    'endTime': end_time,
+                                    'limit': 50
                                 })
                                 
-                                print(f"     📊 User Trades: {len(trades) if trades else 0}개 거래")
-                                
-                                # 청산 거래 찾기 (realizedPnl 필드가 있는 거래)
-                                exit_trades = []
+                                # 청산 거래 찾기 (reduceOnly=true 또는 positionSide가 반대)
                                 if trades:
-                                    for trade in trades:
-                                        # 🔧 realizedPnl 필드가 있으면 청산 거래 (0도 포함)
-                                        if 'realizedPnl' in trade:
-                                            exit_trades.append({
-                                                'price': float(trade.get('price', 0)),
-                                                'qty': float(trade.get('qty', 0)),
-                                                'realizedPnl': float(trade.get('realizedPnl', 0)),
-                                                'time': trade.get('time', 0)
-                                            })
-                                    
-                                    if exit_trades:
-                                        # 거래량 가중 평균 청산가
-                                        total_qty = sum(t['qty'] for t in exit_trades)
-                                        if total_qty > 0:
-                                            exit_price = sum(t['price'] * t['qty'] for t in exit_trades) / total_qty
-                                            print(f"     💰 평균 청산가: ${exit_price:,.4f} ({len(exit_trades)}개 거래)")
-                                        
-                                        # 🔧 User Trades의 realizedPnl 합산 (Income History 대체값)
-                                        if binance_pnl is None or binance_pnl == 0:
-                                            trades_total_pnl = sum(t['realizedPnl'] for t in exit_trades)
-                                            if trades_total_pnl != 0 or len(exit_trades) > 0:
-                                                binance_pnl = trades_total_pnl
-                                                actual_pnl = trades_total_pnl
-                                                print(f"     🔄 User Trades PnL 사용: ${binance_pnl:+,.2f} (대체)")
-                                    else:
-                                        print(f"     ⚠️ 청산 거래를 찾을 수 없음")
-                                        
+                                    for trade in reversed(trades):  # 최신 순서
+                                        # realizedPnl이 있고 0이 아닌 거래 = 청산 거래
+                                        realized_pnl = float(trade.get('realizedPnl', 0))
+                                        if realized_pnl != 0:
+                                            exit_price = float(trade.get('price', 0))
+                                            print(f"     💰 청산가 발견: ${exit_price:,.4f}")
+                                            break
                             except Exception as trade_err:
-                                print(f"     ❌ User Trades 조회 실패: {trade_err}")
+                                print(f"     ⚠️ 거래 내역 조회 실패: {trade_err}")
                             
                     except Exception as e:
                         print(f"     ⚠️ 바이낸스 데이터 조회 실패: {e}")
@@ -1387,6 +1356,16 @@ def setup_database():
             pass
         else:
             print(f"⚠️ DB 마이그레이션 오류: {e}")
+    
+    # 🆕 트레일링 스탑용 highest_price 컬럼 추가
+    try:
+        c.execute("ALTER TABLE trades ADD COLUMN highest_price REAL DEFAULT 0")
+        print("✅ highest_price 컬럼이 추가되었습니다 (트레일링 스탑용).")
+    except sqlite3.OperationalError as e:
+        if "duplicate column name" in str(e):
+            pass
+        else:
+            print(f"⚠️ highest_price 컬럼 추가 오류: {e}")
     
     # AI 결정 테이블
     c.execute('''
@@ -3541,6 +3520,235 @@ def display_manual_trades_status():
     print(f"   🔴 종료됨: {closed_count}개")
     print(f"{'='*80}")
 
+# ===== 트레일링 스탑 기능 =====
+
+def update_highest_price(trade_id: int, current_price: float, coin_symbol: str) -> float:
+    """
+    최고가 업데이트 및 반환
+    
+    Args:
+        trade_id: 거래 ID
+        current_price: 현재가
+        coin_symbol: 코인 심볼 (로깅용)
+    
+    Returns:
+        업데이트된 최고가
+    """
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        
+        # 현재 최고가 조회
+        c.execute("SELECT highest_price, entry_price FROM trades WHERE id = ?", (trade_id,))
+        result = c.fetchone()
+        
+        if not result:
+            conn.close()
+            return current_price
+        
+        stored_highest, entry_price = result
+        
+        # 최고가 초기화 (0이거나 None인 경우)
+        if stored_highest is None or stored_highest == 0:
+            stored_highest = max(entry_price, current_price)
+        
+        # 현재가가 더 높으면 업데이트
+        if current_price > stored_highest:
+            c.execute("""
+                UPDATE trades 
+                SET highest_price = ? 
+                WHERE id = ?
+            """, (current_price, trade_id))
+            conn.commit()
+            
+            # 새 최고가 갱신 로그
+            profit_from_entry = (current_price - entry_price) / entry_price * 100
+            print(f"      📈 {coin_symbol} 최고가 갱신: ${stored_highest:.4f} → ${current_price:.4f} (+{profit_from_entry:.1f}%)")
+            
+            conn.close()
+            return current_price
+        
+        conn.close()
+        return stored_highest
+        
+    except Exception as e:
+        print(f"      ⚠️ 최고가 업데이트 오류 (무시하고 계속): {e}")
+        return current_price
+
+def check_trailing_stop(trade: Dict, current_price: float) -> Tuple[bool, str]:
+    """
+    트레일링 스탑 조건 확인
+    
+    Args:
+        trade: 거래 정보 딕셔너리
+        current_price: 현재가
+    
+    Returns:
+        (청산여부, 청산사유)
+    """
+    try:
+        # 설정 확인
+        if not LIVE_TRADING_CONFIG.get("TRAILING_STOP_ENABLED", False):
+            return False, None
+        
+        trade_id = trade['id']
+        coin_symbol = trade['coin_symbol']
+        action = trade['action']
+        entry_price = trade['entry_price']
+        highest_price = trade.get('highest_price', 0)
+        
+        # 최고가 초기화
+        if highest_price is None or highest_price == 0:
+            highest_price = max(entry_price, current_price)
+        
+        # 롱 포지션만 지원 (숏은 다른 로직 필요)
+        if action != 'long':
+            return False, None
+        
+        # 현재 수익률 계산
+        profit_pct = (current_price - entry_price) / entry_price * 100
+        
+        # 활성화 기준 미달
+        activation_threshold = LIVE_TRADING_CONFIG.get("TRAILING_STOP_ACTIVATION", 15)
+        if profit_pct < activation_threshold:
+            return False, None
+        
+        # 최고가 대비 하락률 계산
+        drop_from_high_pct = (highest_price - current_price) / highest_price * 100
+        
+        # 트레일링 스탑 거리
+        trailing_distance = LIVE_TRADING_CONFIG.get("TRAILING_STOP_DISTANCE", 5)
+        
+        # 트레일링 스탑 발동 조건
+        if drop_from_high_pct >= trailing_distance:
+            reason = (
+                f"트레일링 스탑 발동: 최고가 ${highest_price:.4f} → 현재가 ${current_price:.4f} "
+                f"(-{drop_from_high_pct:.1f}% from high, +{profit_pct:.1f}% from entry)"
+            )
+            return True, reason
+        
+        # 트레일링 스탑 대기 중 로그 (활성화되었지만 아직 발동 안됨)
+        if profit_pct >= activation_threshold:
+            trailing_stop_price = highest_price * (1 - trailing_distance / 100)
+            print(f"      🎯 {coin_symbol} 트레일링 스탑 활성: 익절라인 ${trailing_stop_price:.4f} (최고가 대비 -{trailing_distance}%)")
+        
+        return False, None
+        
+    except Exception as e:
+        print(f"      ⚠️ 트레일링 스탑 체크 오류 (무시하고 계속): {e}")
+        return False, None
+
+def trailing_stop_monitor():
+    """
+    트레일링 스탑 모니터링 루프 (별도 스레드에서 실행)
+    1분마다 모든 포지션을 체크하여 빠른 대응
+    """
+    print(f"\n🎯 트레일링 스탑 모니터 시작 (체크 주기: {LIVE_TRADING_CONFIG.get('TRAILING_STOP_CHECK_INTERVAL', 60)}초)")
+    
+    while True:
+        try:
+            if not LIVE_TRADING_CONFIG.get("TRAILING_STOP_ENABLED", False):
+                time.sleep(60)
+                continue
+            
+            # DB에서 오픈 포지션 조회
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute("""
+                SELECT id, coin_symbol, action, entry_price, amount, leverage, 
+                       investment_amount, highest_price, manual_trade
+                FROM trades 
+                WHERE status = 'OPEN'
+            """)
+            trades = c.fetchall()
+            conn.close()
+            
+            if not trades:
+                time.sleep(LIVE_TRADING_CONFIG.get('TRAILING_STOP_CHECK_INTERVAL', 60))
+                continue
+            
+            # 각 포지션 체크
+            for trade_data in trades:
+                try:
+                    trade_id, coin, action, entry_price, amount, leverage, investment, highest_price, manual_trade = trade_data
+                    
+                    # 수동거래는 스킵
+                    if manual_trade == 1:
+                        continue
+                    
+                    # 현재가 조회
+                    symbol = f"{coin}/USDT:USDT"
+                    ticker = exchange.fetch_ticker(symbol)
+                    current_price = ticker['last']
+                    
+                    # 최고가 업데이트
+                    highest_price = update_highest_price(trade_id, current_price, coin)
+                    
+                    # 트레일링 스탑 체크
+                    trade_dict = {
+                        'id': trade_id,
+                        'coin_symbol': coin,
+                        'action': action,
+                        'entry_price': entry_price,
+                        'amount': amount,
+                        'leverage': leverage,
+                        'investment_amount': investment,
+                        'highest_price': highest_price
+                    }
+                    
+                    should_close, reason = check_trailing_stop(trade_dict, current_price)
+                    
+                    if should_close:
+                        print(f"\n   💰 {coin} {reason}")
+                        print(f"   🔄 트레일링 스탑 청산 실행 중...")
+                        
+                        # 포지션 청산
+                        close_result = close_position(symbol, action, amount)
+                        
+                        if close_result and close_result.get('order'):
+                            # DB 업데이트
+                            conn = sqlite3.connect(DB_FILE)
+                            c = conn.cursor()
+                            
+                            exit_price = close_result.get('close_price', current_price)
+                            pnl = close_result.get('pnl', 0)
+                            
+                            # PnL 계산
+                            if action == 'long':
+                                price_change_pct = (exit_price - entry_price) / entry_price
+                            else:
+                                price_change_pct = (entry_price - exit_price) / entry_price
+                            
+                            calculated_pnl = investment * price_change_pct * leverage
+                            pnl_pct = price_change_pct * leverage * 100
+                            
+                            c.execute("""
+                                UPDATE trades
+                                SET status = 'CLOSED',
+                                    exit_price = ?,
+                                    pnl = ?,
+                                    pnl_percentage = ?,
+                                    close_timestamp = CURRENT_TIMESTAMP,
+                                    ai_reasoning = COALESCE(ai_reasoning, '') || ?
+                                WHERE id = ?
+                            """, (exit_price, calculated_pnl, pnl_pct, f'\n[청산 이유] {reason}', trade_id))
+                            
+                            conn.commit()
+                            conn.close()
+                            
+                            print(f"   ✅ 트레일링 스탑 청산 완료: {coin} PnL=${calculated_pnl:+,.2f} ({pnl_pct:+.1f}%)")
+                        
+                except Exception as pos_err:
+                    print(f"   ⚠️ {coin if 'coin' in locals() else 'Unknown'} 트레일링 스탑 처리 오류: {pos_err}")
+                    continue
+            
+            # 다음 체크까지 대기
+            time.sleep(LIVE_TRADING_CONFIG.get('TRAILING_STOP_CHECK_INTERVAL', 60))
+            
+        except Exception as e:
+            print(f"   ❌ 트레일링 스탑 모니터 오류: {e}")
+            time.sleep(60)
+
 # 🆕 수동거래 쉬운 사용을 위한 전역 함수들
 def add_manual_long(coin: str, price: float, amount: float, leverage: int = 1):
     """수동 롱 포지션 등록"""
@@ -4421,6 +4629,21 @@ def main():
     print(f"🚀 실거래 봇 자동 시작")
     print(f"   Ctrl+C를 눌러 안전하게 종료할 수 있습니다.")
     print(f"{'='*80}\n")
+    
+    # 🆕 트레일링 스탑 모니터 시작 (별도 스레드)
+    if LIVE_TRADING_CONFIG.get("TRAILING_STOP_ENABLED", False):
+        print(f"🎯 트레일링 스탑 활성화:")
+        print(f"   ✅ 활성화 기준: +{LIVE_TRADING_CONFIG['TRAILING_STOP_ACTIVATION']}% 이익")
+        print(f"   ✅ 익절 거리: 최고가 대비 -{LIVE_TRADING_CONFIG['TRAILING_STOP_DISTANCE']}%")
+        print(f"   ✅ 체크 주기: {LIVE_TRADING_CONFIG['TRAILING_STOP_CHECK_INTERVAL']}초\n")
+        
+        trailing_stop_thread = threading.Thread(
+            target=trailing_stop_monitor,
+            daemon=True,  # 메인 스레드 종료 시 함께 종료
+            name="TrailingStopMonitor"
+        )
+        trailing_stop_thread.start()
+        time.sleep(1)  # 스레드 시작 대기
     
     # 3초 후 자동 시작
     print("3초 후 자동 시작...")
