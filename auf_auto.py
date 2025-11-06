@@ -471,11 +471,16 @@ def get_open_positions() -> List[dict]:
         return []
 
 def close_position(symbol: str, side: str) -> bool:
-    """포지션 청산 (시장가 주문)"""
+    """
+    포지션 청산 (시장가 주문) - 단순 청산만
+    
+    주의: 이 함수는 PnL을 반환하지 않습니다.
+    PnL이 필요한 경우 close_position_and_get_pnl()을 사용하세요.
+    """
     try:
         print(f"   🔄 {symbol} {side} 포지션 청산 중...")
         
-        # 🆕 미체결 주문 먼저 정리
+        # 미체결 주문 먼저 정리
         cancel_all_pending_orders(symbol)
         
         # 포지션 정보 조회
@@ -525,6 +530,130 @@ def close_position(symbol: str, side: str) -> bool:
     except Exception as e:
         print(f"      ❌ 청산 실패: {e}")
         return False
+
+def close_position_and_get_pnl(symbol: str, side: str, trade_info: dict) -> Tuple[bool, float, float, float]:
+    """
+    🆕 포지션 청산 + 즉시 실제 PnL 조회
+    
+    Args:
+        symbol: 거래 심볼 (예: "ZEC/USDT:USDT")
+        side: 'LONG' 또는 'SHORT'
+        trade_info: DB 거래 정보 (position_size, leverage, entry_price 포함)
+    
+    Returns:
+        (success, exit_price, realized_pnl, pnl_percentage)
+    """
+    try:
+        print(f"   🔄 {symbol} {side} 포지션 청산 중...")
+        
+        # 1. 미체결 주문 정리
+        cancel_all_pending_orders(symbol)
+        
+        # 2. 포지션 정보 조회
+        positions = exchange.fetch_positions([symbol])
+        target_position = None
+        
+        for pos in positions:
+            if abs(float(pos['contracts'])) > 0:
+                target_position = pos
+                break
+        
+        if not target_position:
+            print(f"      ⚠️ 청산할 포지션 없음")
+            return True, 0.0, 0.0, 0.0  # 이미 청산됨
+        
+        # 3. 청산 전 현재가 기록 (fallback용)
+        try:
+            ticker = exchange.fetch_ticker(symbol)
+            current_price = float(ticker['last'])
+        except:
+            current_price = float(target_position['markPrice'])
+        
+        # 4. 청산 주문 생성
+        position_side = target_position['side']
+        contracts = abs(float(target_position['contracts']))
+        
+        if position_side == 'long':
+            order_side = 'sell'
+        else:
+            order_side = 'buy'
+        
+        order = exchange.create_market_order(
+            symbol=symbol,
+            side=order_side,
+            amount=contracts,
+            params={'reduceOnly': True}
+        )
+        
+        print(f"      ✅ 청산 주문 체결 (ID: {order.get('id', 'N/A')})")
+        
+        # 5. 청산 확인 (최대 3초 대기)
+        close_confirmed = False
+        for i in range(3):
+            time.sleep(1)
+            positions = exchange.fetch_positions([symbol])
+            has_position = any(abs(float(pos['contracts'])) > 0 for pos in positions)
+            
+            if not has_position:
+                print(f"      ✅ 포지션 청산 확인")
+                close_confirmed = True
+                break
+        
+        if not close_confirmed:
+            print(f"      ⚠️ 청산 확인 실패 (시간 초과)")
+            # 그래도 PnL 조회는 시도
+        
+        # 6. 🆕🆕🆕 즉시 바이낸스 실제 PnL 조회 (가장 중요!)
+        print(f"      🔍 바이낸스 실제 PnL 조회 중...")
+        time.sleep(0.5)  # API 동기화 대기
+        
+        pnl_data = get_realized_pnl_from_binance(symbol, start_time=None)
+        
+        if pnl_data and pnl_data['realized_pnl'] != 0:
+            # ✅ 실제 PnL 조회 성공!
+            realized_pnl = pnl_data['realized_pnl']
+            commission = pnl_data['commission']
+            
+            # 실제 청산가 역산 (근사)
+            entry_price = trade_info['entry_price']
+            leverage = trade_info['leverage']
+            position_size = trade_info['position_size']
+            
+            if side.upper() == 'LONG':
+                pnl_pct = (realized_pnl / position_size) * 100
+                price_move_pct = pnl_pct / leverage
+                exit_price = entry_price * (1 + price_move_pct / 100)
+            else:
+                pnl_pct = (realized_pnl / position_size) * 100
+                price_move_pct = pnl_pct / leverage
+                exit_price = entry_price * (1 - price_move_pct / 100)
+            
+            print(f"      ✅ 바이낸스 실제 PnL: ${realized_pnl:+.2f} ({pnl_pct:+.2f}%)")
+            print(f"      💰 수수료: ${commission:.4f}")
+            print(f"      📍 실제 청산가: ${exit_price:,.4f}")
+            
+            return True, exit_price, realized_pnl, pnl_pct
+        
+        else:
+            # ⚠️ 조회 실패 -> fallback: 추정 계산
+            print(f"      ⚠️ 바이낸스 PnL 조회 실패 - 추정 계산 사용")
+            
+            realized_pnl, pnl_pct = calculate_pnl_from_price(
+                trade_info['entry_price'], 
+                current_price,
+                trade_info['position_size'], 
+                side, 
+                trade_info['leverage']
+            )
+            
+            print(f"      📊 추정 PnL: ${realized_pnl:+.2f} ({pnl_pct:+.2f}%)")
+            print(f"      ⚠️ 실제 값과 다를 수 있음")
+            
+            return True, current_price, realized_pnl, pnl_pct
+        
+    except Exception as e:
+        print(f"      ❌ 청산 실패: {e}")
+        return False, 0.0, 0.0, 0.0
 
 def calculate_pnl_from_price(entry_price: float, exit_price: float, position_size: float, side: str, leverage: int) -> Tuple[float, float]:
     """
@@ -1595,12 +1724,12 @@ def execute_live_trade(coin_data: dict, ai_decision: dict, available_balance: fl
 
 def manage_live_positions():
     """
-    🔧 AI 포지션 모니터링 (트레일링 스탑 활용시 청산 로직 제거)
+    🔧 AI 포지션 모니터링 (실제 PnL 조회 추가)
     
     변경사항:
-    - 트레일링 스탑이 익절과 손절을 모두 담당
-    - AI는 포지션 상태 모니터링 및 정보 제공만 수행
-    - 응급상황에서만 수동 개입 가능
+    - 청산 시 즉시 바이낸스 실제 PnL 조회
+    - close_position_and_get_pnl() 사용
+    - 트레일링 스탑 활용 및 추세 반전 감지
     """
     print(f"\n{'='*80}")
     print(f"📊 AI 포지션 모니터링 (트레일링 스탑 관리)")
@@ -1699,22 +1828,21 @@ def manage_live_positions():
                 print(f"      🔄 수익 보호 청산 시도...")
                 print(f"      📝 반전 신호: {reversal_reason}")
                 
-                # 즉시 청산
-                if close_position(symbol, side):
-                    # 청산 후 PnL 계산
-                    actual_pnl, actual_pnl_pct = calculate_pnl_from_price(
-                        entry_price, current_price, trade['position_size'], side, trade['leverage']
-                    )
-                    
+                # 🆕 즉시 청산 + 실제 PnL 조회
+                success, exit_price, realized_pnl, pnl_percentage = close_position_and_get_pnl(
+                    symbol, side, trade
+                )
+                
+                if success:
                     print(f"      ✅ 추세 반전 청산 완료")
-                    print(f"      📊 최종 PnL: ${actual_pnl:+.2f} ({actual_pnl_pct:+.2f}%)")
+                    print(f"      📊 최종 PnL: ${realized_pnl:+.2f} ({pnl_percentage:+.2f}%)")
                     
                     # DB 업데이트
                     update_trade_exit(
                         trade_id=trade_id,
-                        exit_price=current_price,
-                        pnl=actual_pnl,
-                        pnl_percent=actual_pnl_pct,
+                        exit_price=exit_price,
+                        pnl=realized_pnl,
+                        pnl_percent=pnl_percentage,
                         reason=f"AI 추세 반전 감지 청산 (강도 {signal_strength}/10): {reversal_reason}"
                     )
                     continue  # 다음 포지션으로
@@ -1732,20 +1860,20 @@ def manage_live_positions():
             print(f"      🚨 응급상황: 트레일링 스탑 없이 {pnl_pct:+.2f}% 손실!")
             print(f"      🔄 응급 청산 시도...")
             
-            if close_position(symbol, side):
-                # 청산 후 가격 기반 PnL 계산
-                actual_pnl, actual_pnl_pct = calculate_pnl_from_price(
-                    entry_price, current_price, trade['position_size'], side, trade['leverage']
-                )
-                
-                print(f"      📊 응급청산 PnL: ${actual_pnl:+.2f} ({actual_pnl_pct:+.2f}%)")
+            # 🆕 즉시 청산 + 실제 PnL 조회
+            success, exit_price, realized_pnl, pnl_percentage = close_position_and_get_pnl(
+                symbol, side, trade
+            )
+            
+            if success:
+                print(f"      📊 응급청산 PnL: ${realized_pnl:+.2f} ({pnl_percentage:+.2f}%)")
                 
                 # DB 업데이트
                 update_trade_exit(
                     trade_id=trade_id,
-                    exit_price=current_price,
-                    pnl=actual_pnl,
-                    pnl_percent=actual_pnl_pct,
+                    exit_price=exit_price,
+                    pnl=realized_pnl,
+                    pnl_percent=pnl_percentage,
                     reason=f"AI 응급청산: 트레일링 스탑 없이 {pnl_pct:+.2f}% 손실"
                 )
                 print(f"      ✅ 응급 청산 완료")
