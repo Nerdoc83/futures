@@ -152,8 +152,8 @@ LIVE_TRADING_CONFIG = {
     
     # 🆕 트레일링 스탑 설정 (처음부터 활성화)
     "TRAILING_STOP_ENABLED": True,              # 트레일링 스탑 활성화
-    "TRAILING_STOP_MIN_PROFIT_PCT": 7.0,        # 최소 확보 수익률 (%) - 레버리지 고려하여 자동 계산됨
-                                                  # 예: 7% 수익 확보 + 10배 레버리지 = 0.7% 콜백
+    "TRAILING_STOP_MIN_PROFIT_PCT": 8.0,        # 최소 확보 수익률 (%) - 레버리지 고려하여 자동 계산됨
+                                                  # 예: 8% 수익 확보 + 10배 레버리지 = 0.8% 콜백
     
     # 🔧 자금 관리 설정 (동적 균등 분할)
     "MAX_POSITION_SIZE_PCT": 100,  # 안전장치: 가용 자금의 최대 100% (동적 균등 분할 활용)
@@ -259,6 +259,17 @@ def set_trailing_stop_order(symbol: str, side: str, leverage: int, position_size
     print(f"      - 목표 수익률: {min_profit_pct}%")
     print(f"      - 기본 콜백: {base_callback_rate:.2f}%")
     
+    # 코인별 최소 콜백 비율 설정 (경험적 데이터)
+    coin_name = symbol.split('/')[0]
+    min_callback_rates = {
+        'BTC': 0.3, 'ETH': 0.3, 'BNB': 0.5, 'SOL': 0.5, 'XRP': 0.5,
+        'ADA': 0.8, 'DOGE': 1.0, 'MMT': 1.2, 'ALPACA': 1.0, 
+        'ASTER': 1.0, 'GIGGLE': 0.8
+    }
+    
+    min_callback = min_callback_rates.get(coin_name, 1.0)  # 기본값 1.0%
+    print(f"      - {coin_name} 최소 콜백: {min_callback}%")
+    
     for attempt in range(1, max_retries + 1):
         try:
             print(f"   🔄 시도 {attempt}/{max_retries}...")
@@ -269,14 +280,18 @@ def set_trailing_stop_order(symbol: str, side: str, leverage: int, position_size
                 print(f"      ⏱️ {wait_time}초 대기 후 재시도...")
                 time.sleep(wait_time)
             
-            # 콜백 비율 조정 (재시도시 약간 증가하여 성공률 높임)
-            callback_adjustment = (attempt - 1) * 0.1
-            callback_rate = base_callback_rate + callback_adjustment
+            # 콜백 비율 조정 (코인별 최소값 적용)
+            if attempt == 1:
+                callback_rate = max(min_callback, base_callback_rate)
+            elif attempt == 2:
+                callback_rate = max(min_callback + 0.3, base_callback_rate + 0.3)
+            else:
+                callback_rate = max(min_callback + 0.6, base_callback_rate + 0.6)
             
-            # 바이낸스 콜백 비율 범위 제한 (0.1% ~ 5.0%)
-            callback_rate = max(0.1, min(5.0, callback_rate))
+            # 최대 5% 제한
+            callback_rate = min(5.0, callback_rate)
             
-            print(f"      📏 콜백 비율: {callback_rate:.2f}%")
+            print(f"      📏 콜백 비율: {callback_rate:.2f}% ({coin_name} 최적화)")
             
             # 포지션 정보 조회
             positions = exchange.fetch_positions([symbol])
@@ -295,28 +310,32 @@ def set_trailing_stop_order(symbol: str, side: str, leverage: int, position_size
                     print(f"   ❌ 최종 실패: 포지션 없음")
                     return None
             
-            # 포지션 수량 가져오기
+            # 포지션 수량 확인
             position_contracts = abs(float(current_position['contracts']))
             
-            # 트레일링 스탑 주문 방향 (포지션과 반대)
-            order_side = 'sell' if side.upper() == 'LONG' else 'buy'
+            print(f"      🔍 포지션 확인:")
+            print(f"         - 수량: {position_contracts:.2f}")
+            print(f"         - 방향: {side.upper()}")
             
-            # 트레일링 스탑 파라미터
+            # 트레일링 스탑 파라미터 (바이낸스 선물 표준)
+            # activationPrice 없이 설정하면 현재가에서 즉시 활성화
             params = {
-                'trailingPercent': callback_rate,
+                'callbackRate': callback_rate,
                 'reduceOnly': True,
+                'workingType': 'CONTRACT_PRICE'
             }
             
-            print(f"      🔧 주문 생성...")
-            print(f"         - 수량: {position_contracts}")
-            print(f"         - 방향: {order_side}")
+            print(f"      🔧 트레일링 스탑 주문:")
+            print(f"         - 콜백 비율: {callback_rate}%")
+            print(f"         - 활성화: 즉시 (현재가)")
+            print(f"         - 수량: {position_contracts:.2f}")
             
-            # CCXT 트레일링 주문 생성
+            # 트레일링 스탑 마켓 주문 생성
             order = exchange.create_order(
                 symbol=symbol,
-                type='market',
-                side=order_side,
-                amount=position_contracts,
+                type='TRAILING_STOP_MARKET',  # 트레일링 스탑 주문
+                side='sell' if side.upper() == 'LONG' else 'buy',  # 청산 방향
+                amount=position_contracts,  # 실제 포지션 수량
                 price=None,
                 params=params
             )
@@ -486,11 +505,62 @@ def get_top_volume_coins(limit: int = 10) -> List[dict]:
         print(f"❌ 코인 목록 조회 실패: {e}")
         return []
 
-def fetch_comprehensive_market_data(symbol: str) -> Dict:
-    """포괄적 시장 데이터 수집"""
+def fetch_futures_market_indicators(symbol: str) -> Dict:
+    """선물 특화 지표: 펀딩비 + OI"""
+    indicators = {
+        'funding_rate': None,
+        'funding_rate_status': 'neutral',
+        'open_interest': None,
+        'oi_status': 'neutral',
+    }
+    
     try:
-        # 멀티 타임프레임 OHLCV
-        timeframes = ['1m', '5m', '15m', '1h', '4h', '1d']
+        # 1. 펀딩 비율 (Funding Rate)
+        funding_info = exchange.fetch_funding_rate(symbol)
+        if funding_info and 'fundingRate' in funding_info:
+            fr = float(funding_info['fundingRate']) * 100  # 퍼센트로 변환
+            indicators['funding_rate'] = fr
+            
+            # 펀딩비 상태 분류
+            if fr > 0.05:
+                indicators['funding_rate_status'] = 'long_overheated'  # 롱 과열
+            elif fr > 0.01:
+                indicators['funding_rate_status'] = 'bullish'  # 롱 우세
+            elif fr < -0.05:
+                indicators['funding_rate_status'] = 'short_overheated'  # 숏 과열
+            elif fr < -0.01:
+                indicators['funding_rate_status'] = 'bearish'  # 숏 우세
+            else:
+                indicators['funding_rate_status'] = 'neutral'  # 중립
+    except Exception as e:
+        print(f"   ⚠️ 펀딩비 조회 실패: {e}")
+    
+    try:
+        # 2. 미결제 약정 (Open Interest)
+        oi_data = exchange.fetch_open_interest(symbol)
+        if oi_data and 'openInterestAmount' in oi_data:
+            oi = float(oi_data['openInterestAmount'])
+            indicators['open_interest'] = oi
+            
+            # OI 상태 분류 (간단한 기준)
+            if oi > 100000000:  # 1억 이상
+                indicators['oi_status'] = 'very_high'
+            elif oi > 50000000:  # 5천만 이상
+                indicators['oi_status'] = 'high'
+            elif oi > 10000000:  # 1천만 이상
+                indicators['oi_status'] = 'medium'
+            else:
+                indicators['oi_status'] = 'low'
+    except Exception as e:
+        print(f"   ⚠️ OI 조회 실패: {e}")
+    
+    return indicators
+
+def fetch_comprehensive_market_data(symbol: str) -> Dict:
+    """포괄적 시장 데이터 수집 (기술적 지표 + 선물 특화 지표)"""
+    try:
+        # 멀티 타임프레임 OHLCV (7개)
+        timeframes = ['1m', '3m', '5m', '15m', '1h', '1d', '1w']
         ohlcv_data = {}
         
         for tf in timeframes:
@@ -499,15 +569,87 @@ def fetch_comprehensive_market_data(symbol: str) -> Dict:
                 df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
                 
-                # 기술적 지표 추가
-                df['rsi'] = ta.rsi(df['close'])
-                df['bb_upper'], df['bb_middle'], df['bb_lower'] = ta.bbands(df['close'])
-                df['macd'], df['macd_signal'], df['macd_hist'] = ta.macd(df['close'])
-                df['ema_20'] = ta.ema(df['close'], 20)
-                df['ema_50'] = ta.ema(df['close'], 50)
+                # 기술적 지표 추가 (안전한 방식)
+                close_series = df['close']
+                high_series = df['high']
+                low_series = df['low']
+                
+                # 1. RSI
+                try:
+                    rsi_result = ta.rsi(close_series, length=14)
+                    df['rsi'] = rsi_result if rsi_result is not None else 50.0
+                except:
+                    df['rsi'] = 50.0
+                
+                # 2. 볼린저밴드
+                try:
+                    bb_result = ta.bbands(close_series, length=20, std=2)
+                    if bb_result is not None and isinstance(bb_result, pd.DataFrame):
+                        # pandas_ta bbands 반환: BBL_20_2.0, BBM_20_2.0, BBU_20_2.0, BBB_20_2.0, BBP_20_2.0
+                        cols = bb_result.columns.tolist()
+                        if len(cols) >= 3:
+                            df['bb_lower'] = bb_result.iloc[:, 0]  # BBL
+                            df['bb_middle'] = bb_result.iloc[:, 1]  # BBM
+                            df['bb_upper'] = bb_result.iloc[:, 2]  # BBU
+                        else:
+                            df['bb_lower'] = close_series
+                            df['bb_middle'] = close_series
+                            df['bb_upper'] = close_series
+                    else:
+                        df['bb_lower'] = close_series
+                        df['bb_middle'] = close_series
+                        df['bb_upper'] = close_series
+                except Exception as e:
+                    df['bb_lower'] = close_series
+                    df['bb_middle'] = close_series
+                    df['bb_upper'] = close_series
+                
+                # 3. MACD
+                try:
+                    macd_result = ta.macd(close_series, fast=12, slow=26, signal=9)
+                    if macd_result is not None and isinstance(macd_result, pd.DataFrame):
+                        cols = macd_result.columns.tolist()
+                        if len(cols) >= 3:
+                            df['macd'] = macd_result.iloc[:, 0]
+                            df['macd_signal'] = macd_result.iloc[:, 1]
+                            df['macd_hist'] = macd_result.iloc[:, 2]
+                        else:
+                            df['macd'] = 0.0
+                            df['macd_signal'] = 0.0
+                            df['macd_hist'] = 0.0
+                    else:
+                        df['macd'] = 0.0
+                        df['macd_signal'] = 0.0
+                        df['macd_hist'] = 0.0
+                except:
+                    df['macd'] = 0.0
+                    df['macd_signal'] = 0.0
+                    df['macd_hist'] = 0.0
+                
+                # 4. EMA
+                try:
+                    ema_20 = ta.ema(close_series, length=20)
+                    df['ema_20'] = ema_20 if ema_20 is not None else close_series
+                except:
+                    df['ema_20'] = close_series
+                
+                try:
+                    ema_50 = ta.ema(close_series, length=50)
+                    df['ema_50'] = ema_50 if ema_50 is not None else close_series
+                except:
+                    df['ema_50'] = close_series
+                
+                # 5. ATR
+                try:
+                    atr_result = ta.atr(high_series, low_series, close_series, length=14)
+                    df['atr'] = atr_result if atr_result is not None else (high_series - low_series).mean()
+                except:
+                    df['atr'] = (high_series - low_series).mean()
                 
                 ohlcv_data[tf] = df
-            except:
+                
+            except Exception as e:
+                print(f"   ⚠️ {tf} 타임프레임 수집 실패: {e}")
                 continue
         
         # 현재 가격
@@ -522,9 +664,13 @@ def fetch_comprehensive_market_data(symbol: str) -> Dict:
             'low_24h': float(ticker['low'])
         }
         
+        # 🆕 선물 특화 지표 추가
+        futures_indicators = fetch_futures_market_indicators(symbol)
+        
         return {
             'ohlcv': ohlcv_data,
             'current': stats_24h,
+            'futures_indicators': futures_indicators,
             'symbol': symbol
         }
         
@@ -533,7 +679,7 @@ def fetch_comprehensive_market_data(symbol: str) -> Dict:
         return {}
 
 def ai_comprehensive_analysis(coin_data: dict, market_data: dict, performance_history: dict) -> dict:
-    """AI 종합 분석"""
+    """AI 종합 분석 (모든 타임프레임 + 선물 특화 지표)"""
     global last_api_call_time
     
     try:
@@ -548,18 +694,82 @@ def ai_comprehensive_analysis(coin_data: dict, market_data: dict, performance_hi
         # 시장 데이터 요약
         current = market_data.get('current', {})
         ohlcv = market_data.get('ohlcv', {})
+        futures_indicators = market_data.get('futures_indicators', {})
         
-        # 최신 기술적 지표 (1시간봉)
-        hourly_data = ohlcv.get('1h')
-        if hourly_data is not None and len(hourly_data) > 0:
-            latest = hourly_data.iloc[-1]
-            rsi = latest['rsi']
-            bb_position = (latest['close'] - latest['bb_lower']) / (latest['bb_upper'] - latest['bb_lower']) * 100
-            ema_trend = "상승" if latest['close'] > latest['ema_20'] else "하락"
-        else:
-            rsi = 50
-            bb_position = 50
-            ema_trend = "중립"
+        # 🆕 모든 타임프레임의 기술적 지표 정리 (7개)
+        timeframe_analysis = []
+        for tf in ['1m', '3m', '5m', '15m', '1h', '1d', '1w']:
+            tf_data = ohlcv.get(tf)
+            if tf_data is not None and len(tf_data) > 0:
+                latest = tf_data.iloc[-1]
+                
+                # RSI (안전하게 접근)
+                rsi = float(latest.get('rsi', 50)) if 'rsi' in latest and not pd.isna(latest['rsi']) else 50.0
+                
+                # 볼린저밴드 위치 (안전하게 접근)
+                bb_position = 50.0
+                if 'bb_upper' in latest and 'bb_lower' in latest and 'close' in latest:
+                    if not pd.isna(latest['bb_upper']) and not pd.isna(latest['bb_lower']):
+                        bb_range = latest['bb_upper'] - latest['bb_lower']
+                        if bb_range > 0:
+                            bb_position = (latest['close'] - latest['bb_lower']) / bb_range * 100
+                
+                # EMA 추세 (안전하게 접근)
+                ema_trend = "중립"
+                if 'ema_20' in latest and 'close' in latest and not pd.isna(latest['ema_20']):
+                    ema_trend = "상승" if latest['close'] > latest['ema_20'] else "하락"
+                
+                # MACD (안전하게 접근)
+                macd_signal = "중립"
+                if 'macd' in latest and 'macd_signal' in latest:
+                    if not pd.isna(latest['macd']) and not pd.isna(latest['macd_signal']):
+                        macd_signal = "매수" if latest['macd'] > latest['macd_signal'] else "매도"
+                
+                # ATR (변동성) (안전하게 접근)
+                atr = 0.0
+                atr_pct = 0.0
+                if 'atr' in latest and 'close' in latest and not pd.isna(latest['atr']):
+                    atr = float(latest['atr'])
+                    if latest['close'] > 0:
+                        atr_pct = (atr / latest['close']) * 100
+                
+                timeframe_analysis.append(f"""
+  [{tf}] RSI: {rsi:.1f} | BB위치: {bb_position:.0f}% | EMA추세: {ema_trend} | MACD: {macd_signal} | 변동성: {atr_pct:.2f}%""")
+        
+        # 🆕 선물 특화 지표 텍스트
+        futures_text = "\n【선물 특화 지표 - 매우 중요】\n"
+        futures_text += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        
+        # 펀딩 비율
+        if futures_indicators.get('funding_rate') is not None:
+            fr = futures_indicators['funding_rate']
+            fr_status = futures_indicators['funding_rate_status']
+            
+            fr_emoji = "🔥" if abs(fr) > 0.05 else "⚠️" if abs(fr) > 0.01 else "✅"
+            futures_text += f"{fr_emoji} 펀딩 비율 (Funding Rate): {fr:+.4f}% ({fr_status})\n"
+            
+            if fr_status == 'long_overheated':
+                futures_text += "   💡 롱 과열! 펀딩비 매우 높음 → SHORT 기회 or 롱 진입 회피\n"
+            elif fr_status == 'short_overheated':
+                futures_text += "   💡 숏 과열! 펀딩비 매우 낮음 → LONG 기회 or 숏 진입 회피\n"
+            elif fr_status == 'bullish':
+                futures_text += "   💡 롱 우세 → 상승 추세 가능성, 숏 신중\n"
+            elif fr_status == 'bearish':
+                futures_text += "   💡 숏 우세 → 하락 추세 가능성, 롱 신중\n"
+            else:
+                futures_text += "   💡 중립적 펀딩비 → 방향성 판단 어려움\n"
+        
+        # 미결제 약정
+        if futures_indicators.get('open_interest') is not None:
+            oi = futures_indicators['open_interest']
+            oi_status = futures_indicators['oi_status']
+            
+            futures_text += f"\n📊 미결제 약정 (Open Interest): {oi:,.0f} ({oi_status})\n"
+            futures_text += "   💡 OI 증가 + 가격 상승 = 강한 상승 추세\n"
+            futures_text += "   💡 OI 증가 + 가격 하락 = 강한 하락 추세\n"
+            futures_text += "   💡 OI 감소 = 포지션 청산 중, 추세 약화\n"
+        
+        futures_text += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         
         # 프롬프트 작성
         prompt = f"""
@@ -571,10 +781,10 @@ def ai_comprehensive_analysis(coin_data: dict, market_data: dict, performance_hi
 - 24h 변동: {current.get('change_24h', 0):+.2f}%
 - 24h 거래량: ${current.get('volume_24h', 0):,.0f}
 
-**기술적 분석:**
-- RSI (1h): {rsi:.1f}
-- 볼린저밴드 위치: {bb_position:.1f}% (0%=하단, 100%=상단)
-- EMA 추세: {ema_trend}
+**멀티 타임프레임 기술적 분석:**
+{''.join(timeframe_analysis)}
+
+{futures_text}
 
 **AI 과거 성과:**
 - 최근 {performance_history.get('days', 0)}일 거래: {performance_history.get('total_trades', 0)}회
@@ -587,13 +797,30 @@ def ai_comprehensive_analysis(coin_data: dict, market_data: dict, performance_hi
 - 트레일링 스탑 활용 (7% 최소 확보)
 
 **분석 방향:**
-1. LONG 기회: 상승 추세, 지지선 반등, 과매도 반등 등
-2. SHORT 기회: 하락 추세, 저항선 거부, 과매수 조정 등
-3. 특히 다음 상황에서 SHORT 적극 고려:
+1. 추세 순응 거래 (With the Trend):
+   - 단기 시그널(1m~15m)이 장기 추세(1d, 1w)와 일치
+   - 높은 확신도, 더 큰 익절 목표 (ATR x 3.0+)
+   - 예: 주봉 상승추세 + 3분봉 매수신호 = 강한 LONG
+
+2. 역추세 거래 (Counter-Trend):
+   - 단기 시그널이 장기 추세와 반대
+   - 단기 조정 노림, 빠른 익절 (ATR x 1.5~2.0)
+   - 예: 주봉 상승추세 + 3분봉 매도신호 = 짧은 SHORT
+
+3. LONG 기회:
+   - 과매도 반등 (RSI < 30)
+   - 지지선 테스트 후 반등
+   - 볼린저밴드 하단 근처 + 매수 시그널
+   - 🔥 펀딩비 숏 과열 (<-0.05%)
+   - 주봉/일봉 상승추세 중 단기 되돌림
+
+4. SHORT 기회:
    - 급등(+50% 이상) 후 모멘텀 약화
    - RSI 70 이상 과매수 + 볼린저밴드 상단 근처
    - 대량 거래량 후 매수세 소진 징후
    - 저항선에서 거부 패턴
+   - 🔥 펀딩비 롱 과열 (>0.05%)
+   - 주봉/일봉 하락추세 중 단기 반등
 
 다음 형식으로 JSON 응답해주세요:
 {{
@@ -601,16 +828,20 @@ def ai_comprehensive_analysis(coin_data: dict, market_data: dict, performance_hi
     "direction": "LONG" 또는 "SHORT",
     "confidence": 0-100,
     "leverage": 10-15,
-    "reasoning": "LONG과 SHORT 모두 검토한 상세한 분석 근거"
+    "reasoning": "멀티 타임프레임과 선물 특화 지표(펀딩비, OI)를 모두 고려한 상세 분석"
 }}
 
 주의사항:
 1. 70% 이상 확신할 때만 거래 추천
 2. LONG과 SHORT 양방향 모두 검토 (편향 금지)
-3. 과매수 상황에서는 SHORT 우선 고려
-4. 급등/급락 후 역추세 기회 적극 평가
-5. 불분명한 상황에서는 관망 선택
-6. 리스크 관리 우선, 확실한 기회만 공략
+3. 🔥 펀딩비 과열 상황 반드시 고려
+4. OI 증가/감소 추세를 가격 변동과 함께 분석
+5. ⭐ 주봉/일봉 장기 추세와 단기 시그널(1m~15m) 방향성 확인
+6. 추세 순응 거래 > 역추세 거래 (확신도 차이)
+7. 여러 타임프레임의 시그널이 일치할수록 신뢰도 높음
+8. 급등/급락 후 역추세 기회 적극 평가
+9. 불분명한 상황에서는 관망 선택
+10. 리스크 관리 우선, 확실한 기회만 공략
 """
         
         # AI 호출
@@ -810,31 +1041,52 @@ def update_closed_trades_pnl_from_history():
             start_time = int((trade_time - timedelta(hours=1)).timestamp() * 1000)
             end_time = int((trade_time + timedelta(hours=6)).timestamp() * 1000)
             
-            # Position History API 호출
-            position_history = exchange.fapiPrivate_get_positionhistory({
-                'symbol': symbol,
-                'startTime': start_time,
-                'endTime': end_time,
-                'limit': 50
-            })
-            
-            # 해당 거래와 매칭되는 실현손익 찾기
-            best_match_pnl = None
-            
-            for pos_record in position_history:
-                pos_pnl = float(pos_record.get('realizedPnl', 0))
-                pos_time = int(pos_record.get('updateTime', 0))
+            # 바이낸스 계정 거래 내역에서 해당 심볼의 최근 거래 조회
+            try:
+                # fetchMyTrades로 해당 심볼의 최근 거래 내역 조회
+                trades = exchange.fetchMyTrades(f"{coin}/USDT:USDT", since=start_time, limit=50)
                 
-                # 의미있는 PnL이고 시간대가 맞는지 확인
-                if abs(pos_pnl) > 0.1:  # 0.1달러 이상
-                    time_diff = abs(pos_time - int(trade_time.timestamp() * 1000))
+                # 해당 거래 시간대와 매칭되는 거래들 찾기
+                realized_pnl = None
+                total_pnl = 0
+                trade_count = 0
+                
+                for trade_record in trades:
+                    trade_timestamp = trade_record['timestamp']
+                    trade_amount = trade_record['amount']
+                    trade_price = trade_record['price']
+                    trade_side = trade_record['side']
+                    trade_fee = trade_record['fee']['cost'] if trade_record['fee'] else 0
+                    
+                    # 거래 시간이 우리 거래 시간 근처인지 확인 (6시간 이내)
+                    time_diff = abs(trade_timestamp - int(trade_time.timestamp() * 1000))
                     if time_diff < 6 * 60 * 60 * 1000:  # 6시간 이내
-                        best_match_pnl = pos_pnl
-                        break
-            
-            if best_match_pnl is not None:
+                        # 간단한 PnL 추정 (정확하지 않지만 근사값)
+                        if trade_side == 'sell' and side.upper() == 'LONG':
+                            pnl_estimate = (trade_price - entry_price) * trade_amount - trade_fee
+                        elif trade_side == 'buy' and side.upper() == 'SHORT':
+                            pnl_estimate = (entry_price - trade_price) * trade_amount - trade_fee
+                        else:
+                            pnl_estimate = 0
+                        
+                        total_pnl += pnl_estimate * leverage
+                        trade_count += 1
+                
+                if trade_count > 0:
+                    realized_pnl = total_pnl
+                    pnl_pct = (realized_pnl / position_size) * 100 if position_size > 0 else 0
+                    print(f"      ✅ 거래 내역 기반 PnL: ${realized_pnl:+.2f} ({pnl_pct:+.2f}%)")
+                else:
+                    print(f"      ⚠️ 매칭되는 거래 내역 없음 - 건너뜀")
+                    continue
+                    
+            except Exception as trades_error:
+                print(f"      ❌ 거래 내역 조회 실패: {trades_error}")
+                print(f"      ⚠️ 해당 거래 건너뜀")
+                continue
+            if realized_pnl is not None:
                 # 수익률 계산
-                pnl_pct = (best_match_pnl / position_size) * 100 if position_size > 0 else 0
+                pnl_pct = (realized_pnl / position_size) * 100 if position_size > 0 else 0
                 
                 # DB 업데이트
                 conn = sqlite3.connect(DB_FILE)
@@ -844,15 +1096,15 @@ def update_closed_trades_pnl_from_history():
                     UPDATE trades 
                     SET pnl = ?, pnl_percent = ?
                     WHERE id = ?
-                ''', (best_match_pnl, pnl_pct, trade_id))
+                ''', (realized_pnl, pnl_pct, trade_id))
                 
                 conn.commit()
                 conn.close()
                 
-                print(f"      ✅ PnL 정정: ${best_match_pnl:+.2f} ({pnl_pct:+.2f}%)")
+                print(f"      ✅ PnL 정정 완료: ${realized_pnl:+.2f} ({pnl_pct:+.2f}%)")
                 updated_count += 1
             else:
-                print(f"      ⚠️ Position History에서 매칭되는 기록 없음")
+                print(f"      ⚠️ PnL 계산 불가")
                 
         except Exception as e:
             print(f"      ❌ PnL 정정 실패: {e}")
@@ -1096,47 +1348,12 @@ def manage_live_positions():
             print(f"      🔄 응급 청산 시도...")
             
             if close_position(symbol, side):
-                # 🔧 Position History에서 실제 실현손익 조회
-                try:
-                    # 청산 후 잠깐 대기
-                    time.sleep(2)
-                    
-                    # Position History에서 최신 실현손익 조회
-                    end_time = int(time.time() * 1000)
-                    start_time = end_time - (60 * 60 * 1000)  # 1시간 전
-                    
-                    position_history = exchange.fapiPrivate_get_positionhistory({
-                        'symbol': symbol.replace('/USDT:USDT', 'USDT'),
-                        'startTime': start_time,
-                        'endTime': end_time,
-                        'limit': 10
-                    })
-                    
-                    # 가장 최근 실현손익 찾기
-                    actual_pnl = None
-                    for pos_record in sorted(position_history, key=lambda x: x.get('updateTime', 0), reverse=True):
-                        pos_pnl = float(pos_record.get('realizedPnl', 0))
-                        if abs(pos_pnl) > 0.01:
-                            actual_pnl = pos_pnl
-                            break
-                    
-                    if actual_pnl is not None:
-                        actual_pnl_pct = (actual_pnl / trade['position_size']) * 100 if trade['position_size'] > 0 else 0
-                        print(f"      ✅ Position History PnL: ${actual_pnl:+.2f} ({actual_pnl_pct:+.2f}%)")
-                    else:
-                        # Fallback to price calculation
-                        actual_pnl, actual_pnl_pct = calculate_pnl_from_price(
-                            entry_price, current_price, trade['position_size'], side, trade['leverage']
-                        )
-                        print(f"      📊 Fallback PnL: ${actual_pnl:+.2f} ({actual_pnl_pct:+.2f}%)")
-                        
-                except Exception as pos_error:
-                    print(f"      ❌ Position History 조회 실패: {pos_error}")
-                    # Fallback to price calculation
-                    actual_pnl, actual_pnl_pct = calculate_pnl_from_price(
-                        entry_price, current_price, trade['position_size'], side, trade['leverage']
-                    )
-                    print(f"      📊 Fallback PnL: ${actual_pnl:+.2f} ({actual_pnl_pct:+.2f}%)")
+                # 청산 후 가격 기반 PnL 계산
+                actual_pnl, actual_pnl_pct = calculate_pnl_from_price(
+                    entry_price, current_price, trade['position_size'], side, trade['leverage']
+                )
+                
+                print(f"      📊 응급청산 PnL: ${actual_pnl:+.2f} ({actual_pnl_pct:+.2f}%)")
                 
                 # DB 업데이트
                 update_trade_exit(
@@ -1196,63 +1413,27 @@ def sync_db_with_binance() -> int:
             print(f"   ⚠️ {coin} (ID: {trade_id}): 바이낸스에 포지션 없음 - DB 정리")
             
             try:
-                # 🔧 Position History에서 실제 실현손익 조회
-                print(f"      🔍 Position History에서 실현손익 조회 중...")
+                # 바이낸스 포지션에서 실제 unrealizedPnl 조회
+                live_positions = get_open_positions()
+                live_position_map = {pos['symbol']: pos for pos in live_positions}
                 
-                # Position History 조회
-                try:
-                    # 최근 24시간 Position History 조회
-                    end_time = int(time.time() * 1000)
-                    start_time = end_time - (24 * 60 * 60 * 1000)  # 24시간 전
-                    
-                    # 바이낸스 Position History API 호출
-                    position_history = exchange.fapiPrivate_get_positionhistory({
-                        'symbol': symbol.replace('/USDT:USDT', 'USDT'),
-                        'startTime': start_time,
-                        'endTime': end_time,
-                        'limit': 100
-                    })
-                    
-                    # 해당 거래와 매칭되는 Position History 찾기
-                    realized_pnl = None
-                    pnl_pct = None
-                    
-                    for pos_record in position_history:
-                        pos_side = pos_record.get('positionSide', 'BOTH')
-                        pos_pnl = float(pos_record.get('realizedPnl', 0))
-                        
-                        # 포지션 방향과 시간대 매칭 확인
-                        if abs(pos_pnl) > 0.01:  # 무의미한 수수료만 있는 기록 제외
-                            realized_pnl = pos_pnl
-                            # 수익률 계산 (실제 투자금 기준)
-                            investment = trade['position_size']
-                            pnl_pct = (realized_pnl / investment) * 100 if investment > 0 else 0
-                            print(f"      ✅ Position History PnL: ${realized_pnl:+.2f} ({pnl_pct:+.2f}%)")
-                            break
-                    
-                    # Position History에서 찾지 못한 경우 가격 기반 계산으로 fallback
-                    if realized_pnl is None:
-                        print(f"      ⚠️ Position History에서 해당 거래 없음 - 가격 기반 계산 사용")
-                        ticker = exchange.fetch_ticker(symbol)
-                        current_price = float(ticker['last'])
-                        
-                        realized_pnl, pnl_pct = calculate_pnl_from_price(
-                            entry_price, current_price, trade['position_size'], side, trade['leverage']
-                        )
-                        print(f"      📊 가격 기반 PnL: ${realized_pnl:+.2f} ({pnl_pct:+.2f}%)")
+                # 해당 심볼의 포지션이 있었는지 확인
+                binance_symbol = f"{coin}/USDT:USDT"
+                if binance_symbol in live_position_map:
+                    # 아직 포지션이 있다면 스킵 (아직 청산 안됨)
+                    print(f"      ℹ️ 바이낸스에 포지션 여전히 존재 - 스킵")
+                    continue
                 
-                except Exception as pos_error:
-                    print(f"      ❌ Position History 조회 실패: {pos_error}")
-                    print(f"      🔄 가격 기반 계산으로 fallback...")
-                    
-                    # Fallback: 가격 기반 계산
-                    ticker = exchange.fetch_ticker(symbol)
-                    current_price = float(ticker['last'])
-                    
-                    realized_pnl, pnl_pct = calculate_pnl_from_price(
-                        entry_price, current_price, trade['position_size'], side, trade['leverage']
-                    )
-                    print(f"      📊 Fallback PnL: ${realized_pnl:+.2f} ({pnl_pct:+.2f}%)")
+                # 포지션이 없으면 현재가 기준으로 계산 (트레일링 스탑으로 청산되었을 것)
+                ticker = exchange.fetch_ticker(symbol)
+                current_price = float(ticker['last'])
+                
+                # 가격 기반 PnL 계산 (실제와 가장 근사한 값)
+                realized_pnl, pnl_pct = calculate_pnl_from_price(
+                    entry_price, current_price, trade['position_size'], side, trade['leverage']
+                )
+                
+                print(f"      📊 추정 PnL (트레일링 스탑 청산): ${realized_pnl:+.2f} ({pnl_pct:+.2f}%)")
                 
                 # 🔧 안전한 DB 업데이트 (exit_reason 컬럼 확인)
                 conn = sqlite3.connect(DB_FILE)
@@ -1429,13 +1610,6 @@ def main():
     print(f"🚀 AI 실거래 봇 시작")
     print(f"{'='*80}")
     
-    # 🔧 기존 청산 거래들의 PnL을 Position History로 정정 (최초 1회)
-    try:
-        update_closed_trades_pnl_from_history()
-    except Exception as e:
-        print(f"⚠️ PnL 정정 중 오류: {e}")
-        print(f"   기존 PnL 값으로 계속 진행합니다...\n")
-    
     # 잔고 확인
     balance = get_available_balance()
     min_balance = LIVE_TRADING_CONFIG['MIN_CAPITAL_THRESHOLD']
@@ -1456,7 +1630,7 @@ def main():
     
     # 🆕 트레일링 스탑 설정 출력
     if LIVE_TRADING_CONFIG.get("TRAILING_STOP_ENABLED", False):
-        min_profit = LIVE_TRADING_CONFIG.get("TRAILING_STOP_MIN_PROFIT_PCT", 7.0)
+        min_profit = LIVE_TRADING_CONFIG.get("TRAILING_STOP_MIN_PROFIT_PCT", 8.0)
         print(f"🎯 트레일링 스탑 (전체 관리):")
         print(f"   ✅ 활성화됨 (진입 즉시)")
         print(f"   ✅ 최소 확보 수익률: {min_profit}%")
@@ -1562,7 +1736,22 @@ def main():
                                 print(f"   ⚠️ 시장 데이터 없음")
                                 continue
                             
-                            print(f"   ✅ {len(market_data)}개 타임프레임 데이터 수집 완료")
+                            # 수집된 타임프레임 개수
+                            ohlcv_count = len(market_data.get('ohlcv', {}))
+                            futures_ind = market_data.get('futures_indicators', {})
+                            
+                            print(f"   ✅ {ohlcv_count}개 타임프레임 데이터 수집 완료")
+                            
+                            # 🆕 선물 지표 간단히 표시
+                            if futures_ind.get('funding_rate') is not None:
+                                fr = futures_ind['funding_rate']
+                                fr_status = futures_ind['funding_rate_status']
+                                print(f"   🔥 펀딩비: {fr:+.4f}% ({fr_status})")
+                            
+                            if futures_ind.get('open_interest') is not None:
+                                oi = futures_ind['open_interest']
+                                oi_status = futures_ind['oi_status']
+                                print(f"   📊 OI: {oi:,.0f} ({oi_status})")
                             
                             performance_history = get_recent_performance(7)
                             print(f"   🤖 AI 분석 중...")
