@@ -240,7 +240,7 @@ def cancel_all_pending_orders(symbol: str) -> bool:
 
 def set_trailing_stop_order(symbol: str, side: str, leverage: int, position_size: float) -> Optional[dict]:
     """
-    🔧 CCXT 방식으로 수정된 트레일링 스탑 설정
+    🔧 트레일링 스탑 설정 (재시도 로직 포함)
     
     Args:
         symbol: 거래 심볼 (예: BTC/USDT:USDT)
@@ -248,119 +248,113 @@ def set_trailing_stop_order(symbol: str, side: str, leverage: int, position_size
         leverage: 레버리지
         position_size: 포지션 크기 (USDT)
     """
-    try:
-        print(f"   🎯 트레일링 스탑 설정 중...")
-        
-        # 최소 확보 수익률 (레버리지 고려)
-        min_profit_pct = LIVE_TRADING_CONFIG.get("TRAILING_STOP_MIN_PROFIT_PCT", 7.0)
-        callback_rate = min_profit_pct / leverage  # 콜백 비율 (가격 기준)
-        
-        # 🆕 바이낸스 콜백 비율 범위 제한 (0.1% ~ 10.0%)
-        callback_rate = max(0.1, min(10.0, callback_rate))
-        
-        print(f"   📏 콜백 비율 계산:")
-        print(f"      - 목표 수익률: {min_profit_pct}%")
-        print(f"      - 레버리지: {leverage}x")
-        print(f"      - 계산된 콜백: {min_profit_pct / leverage:.2f}%")
-        print(f"      - 적용된 콜백: {callback_rate:.2f}% (0.1~10.0% 범위 내)")
-        
-        # 포지션 정보 조회
-        positions = exchange.fetch_positions([symbol])
-        current_position = None
-        
-        for pos in positions:
-            if abs(float(pos['contracts'])) > 0:
-                current_position = pos
-                break
-        
-        if not current_position:
-            print(f"   ❌ 활성 포지션 없음")
-            return None
-        
-        # 포지션 수량 가져오기
-        position_contracts = abs(float(current_position['contracts']))
-        
-        # 트레일링 스탑 주문 방향 (포지션과 반대)
-        if side.upper() == 'LONG':
-            order_side = 'sell'  # 롱 포지션 -> 매도 주문
-        else:
-            order_side = 'buy'   # 숏 포지션 -> 매수 주문
-        
-        # 🔧 CCXT 방식: market 타입 + trailingPercent 파라미터
-        params = {
-            'trailingPercent': callback_rate,   # 트레일링 퍼센트 (CCXT 표준)
-            'reduceOnly': True,                 # 포지션 감소만 허용
-        }
-        
-        # CCXT 트레일링 주문 생성
-        print(f"   🔧 주문 파라미터:")
-        print(f"      - Symbol: {symbol}")
-        print(f"      - Type: market (with trailingPercent)")
-        print(f"      - Side: {order_side}")
-        print(f"      - Amount: {position_contracts}")
-        print(f"      - Params: {params}")
-        
-        order = exchange.create_order(
-            symbol=symbol,
-            type='market',                      # 🔧 market 타입 사용
-            side=order_side,
-            amount=position_contracts,
-            price=None,                         # 마켓 주문이므로 None
-            params=params
-        )
-        
-        # 실제 확보 수익률 계산
-        actual_profit = callback_rate * leverage
-        
-        print(f"   ✅ 트레일링 스탑 설정:")
-        print(f"      - 레버리지: {leverage}x")
-        print(f"      - 콜백 비율: {callback_rate:.2f}%")
-        print(f"      - 실제 확보 수익률: {actual_profit:.1f}%")
-        print(f"      - 주문 수량: {position_contracts}")
-        print(f"      - 주문 ID: {order.get('id', 'N/A')}")
-        return order
-        
-    except Exception as e:
-        print(f"   ❌ 트레일링 스탑 설정 실패: {e}")
-        
-        # 🆕 실패시 fallback: 일반 스탑로스 주문
+    max_retries = 3
+    base_wait_time = 2
+    
+    # 최소 확보 수익률 계산
+    min_profit_pct = LIVE_TRADING_CONFIG.get("TRAILING_STOP_MIN_PROFIT_PCT", 7.0)
+    base_callback_rate = min_profit_pct / leverage
+    
+    print(f"   🎯 트레일링 스탑 설정 시작...")
+    print(f"      - 목표 수익률: {min_profit_pct}%")
+    print(f"      - 기본 콜백: {base_callback_rate:.2f}%")
+    
+    for attempt in range(1, max_retries + 1):
         try:
-            print(f"   🔄 일반 스탑로스로 fallback 시도...")
+            print(f"   🔄 시도 {attempt}/{max_retries}...")
             
-            # 현재가 조회
-            ticker = exchange.fetch_ticker(symbol)
-            current_price = float(ticker['last'])
+            # 포지션 확립 대기 (첫 번째 시도가 아닐 때)
+            if attempt > 1:
+                wait_time = base_wait_time * attempt
+                print(f"      ⏱️ {wait_time}초 대기 후 재시도...")
+                time.sleep(wait_time)
             
-            # 스탑 가격 계산
-            if side.upper() == 'LONG':
-                stop_price = current_price * (1 - callback_rate / 100)
-            else:
-                stop_price = current_price * (1 + callback_rate / 100)
+            # 콜백 비율 조정 (재시도시 약간 증가하여 성공률 높임)
+            callback_adjustment = (attempt - 1) * 0.1
+            callback_rate = base_callback_rate + callback_adjustment
             
-            # 일반 스탑로스 주문
-            fallback_params = {
-                'stopPrice': stop_price,
+            # 바이낸스 콜백 비율 범위 제한 (0.1% ~ 5.0%)
+            callback_rate = max(0.1, min(5.0, callback_rate))
+            
+            print(f"      📏 콜백 비율: {callback_rate:.2f}%")
+            
+            # 포지션 정보 조회
+            positions = exchange.fetch_positions([symbol])
+            current_position = None
+            
+            for pos in positions:
+                if abs(float(pos['contracts'])) > 0:
+                    current_position = pos
+                    break
+            
+            if not current_position:
+                print(f"      ❌ 활성 포지션 없음 - 재시도 필요")
+                if attempt < max_retries:
+                    continue
+                else:
+                    print(f"   ❌ 최종 실패: 포지션 없음")
+                    return None
+            
+            # 포지션 수량 가져오기
+            position_contracts = abs(float(current_position['contracts']))
+            
+            # 트레일링 스탑 주문 방향 (포지션과 반대)
+            order_side = 'sell' if side.upper() == 'LONG' else 'buy'
+            
+            # 트레일링 스탑 파라미터
+            params = {
+                'trailingPercent': callback_rate,
                 'reduceOnly': True,
             }
             
-            fallback_order = exchange.create_order(
+            print(f"      🔧 주문 생성...")
+            print(f"         - 수량: {position_contracts}")
+            print(f"         - 방향: {order_side}")
+            
+            # CCXT 트레일링 주문 생성
+            order = exchange.create_order(
                 symbol=symbol,
-                type='STOP_MARKET',
+                type='market',
                 side=order_side,
                 amount=position_contracts,
                 price=None,
-                params=fallback_params
+                params=params
             )
             
-            print(f"   ✅ 일반 스탑로스 설정 완료:")
-            print(f"      - 스탑 가격: ${stop_price:.4f}")
-            print(f"      - 주문 ID: {fallback_order.get('id', 'N/A')}")
+            # 성공!
+            actual_profit = callback_rate * leverage
+            print(f"   ✅ 트레일링 스탑 설정 성공! (시도 {attempt}/{max_retries})")
+            print(f"      - 콜백 비율: {callback_rate:.2f}%")
+            print(f"      - 확보 수익률: {actual_profit:.1f}%")
+            print(f"      - 주문 ID: {order.get('id', 'N/A')}")
             
-            return fallback_order
+            return order
             
-        except Exception as fallback_error:
-            print(f"   ❌ 스탑로스 fallback도 실패: {fallback_error}")
-            return None
+        except Exception as e:
+            error_msg = str(e)
+            print(f"      ❌ 시도 {attempt} 실패: {error_msg}")
+            
+            # 특정 오류에 대한 대응
+            if 'leverage' in error_msg.lower() and attempt == 1:
+                print(f"      🔧 레버리지 오류 감지 - 레버리지 재설정 시도")
+                try:
+                    reduced_leverage = max(1, leverage // 2)
+                    exchange.set_leverage(reduced_leverage, symbol)
+                    print(f"      ✅ 레버리지 {reduced_leverage}x로 조정")
+                    time.sleep(1)
+                except Exception as lev_e:
+                    print(f"      ❌ 레버리지 조정 실패: {lev_e}")
+            
+            # 마지막 시도가 아니면 계속
+            if attempt < max_retries:
+                print(f"      🔄 재시도 준비 중...")
+            else:
+                print(f"   🚨 트레일링 스탑 설정 최종 실패!")
+                print(f"   ⚠️ 포지션이 보호되지 않음 - 수동 설정 필요")
+                print(f"   💡 권장 설정: {symbol} 트레일링 스탑 {base_callback_rate:.2f}% 콜백")
+                break
+    
+    return None
 
 def get_open_positions() -> List[dict]:
     """바이낸스에서 실제 오픈 포지션 조회"""

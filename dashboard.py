@@ -116,7 +116,7 @@ def load_open_positions():
                 position_size,
                 stop_loss_price,
                 take_profit_price,
-                CASE WHEN manual_trade = 1 THEN 'MANUAL' ELSE 'AUTO' END as trade_type,
+                'AUTO' as trade_type,
                 timestamp,
                 ai_reasoning,
                 ai_confidence
@@ -133,10 +133,8 @@ def load_open_positions():
             # 포지션 값 계산
             df['position_value'] = df['position_size'] * df['leverage']
             
-            # 수동/자동 거래 구분
-            df['trade_source'] = df['trade_type'].apply(
-                lambda x: '🛡️ 수동거래' if x == 'MANUAL' else '🤖 AI거래'
-            )
+            # 거래 소스 (수동거래 보호 제거됨)
+            df['trade_source'] = '🤖 AI거래'
         
         return df
         
@@ -170,7 +168,7 @@ def load_closed_trades(days=30):
                 pnl,
                 pnl_percent,
                 exit_reason,
-                CASE WHEN manual_trade = 1 THEN 'MANUAL' ELSE 'AUTO' END as trade_type,
+                CASE WHEN id > 0 THEN 'AUTO' ELSE 'AUTO' END as trade_type,
                 timestamp as entry_time,
                 ai_reasoning,
                 ai_confidence
@@ -208,10 +206,8 @@ def load_closed_trades(days=30):
             
             df['exit_reason_emoji'] = df['exit_reason'].apply(add_emoji_to_reason)
             
-            # 거래 소스
-            df['trade_source'] = df['trade_type'].apply(
-                lambda x: '🛡️ 수동거래' if x == 'MANUAL' else '🤖 AI거래'
-            )
+            # 거래 소스 (모든 거래는 AI 거래)
+            df['trade_source'] = '🤖 AI거래'
         
         return df
         
@@ -262,10 +258,6 @@ def calculate_statistics(df_closed):
     total_losses = abs(losses.sum()) if len(losses) > 0 else 0
     profit_factor = (total_wins / total_losses) if total_losses > 0 else 0
     
-    # 거래 타입별 분류
-    auto_trades = len(df_closed[df_closed['trade_type'] == 'AUTO'])
-    manual_trades = len(df_closed[df_closed['trade_type'] == 'MANUAL'])
-    
     return {
         'total_trades': total_trades,
         'winning_trades': winning_trades,
@@ -277,9 +269,7 @@ def calculate_statistics(df_closed):
         'largest_win': largest_win,
         'largest_loss': largest_loss,
         'profit_factor': profit_factor,
-        'avg_pnl_percent': avg_pnl_percent,
-        'auto_trades': auto_trades,
-        'manual_trades': manual_trades
+        'avg_pnl_percent': avg_pnl_percent
     }
 
 def get_bot_status():
@@ -326,6 +316,7 @@ def display_bot_control():
         if st.button("⏹️ 봇 정지", disabled=("정지됨" in bot_status)):
             try:
                 if psutil:
+                    bot_found = False
                     for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
                         try:
                             cmdline = proc.info['cmdline']
@@ -334,8 +325,12 @@ def display_bot_control():
                                 st.sidebar.success("봇을 정지했습니다!")
                                 time.sleep(2)
                                 st.rerun()
+                                bot_found = True
                                 break
-                    else:
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            continue
+                    
+                    if not bot_found:
                         st.sidebar.warning("실행 중인 봇을 찾을 수 없습니다.")
                 else:
                     st.sidebar.error("psutil이 설치되지 않아 봇을 정지할 수 없습니다.")
@@ -379,7 +374,7 @@ def display_dashboard():
     with col1:
         st.metric("총 거래", f"{stats['total_trades']}회")
         if stats['total_trades'] > 0:
-            st.caption(f"🤖 AI: {stats['auto_trades']} | 🛡️ 수동: {stats['manual_trades']}")
+            st.caption(f"🤖 AI 거래: {stats['total_trades']}건")
     
     with col2:
         st.metric("승률", f"{stats['win_rate']:.1f}%")
@@ -429,8 +424,6 @@ def display_dashboard():
         # 포지션 요약
         total_positions = len(df_open)
         total_investment = df_open['position_size'].sum()
-        auto_positions = len(df_open[df_open['trade_type'] == 'AUTO'])
-        manual_positions = len(df_open[df_open['trade_type'] == 'MANUAL'])
         
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -438,7 +431,7 @@ def display_dashboard():
         with col2:
             st.metric("총 투자금", f"${total_investment:,.2f}")
         with col3:
-            st.caption(f"🤖 AI: {auto_positions}개 | 🛡️ 수동: {manual_positions}개")
+            st.caption(f"🤖 AI 거래: {total_positions}개")
     else:
         st.info("현재 오픈된 포지션이 없습니다.")
     
@@ -448,11 +441,8 @@ def display_dashboard():
         # 필터 옵션
         col1, col2 = st.columns(2)
         with col1:
-            trade_type_filter = st.selectbox(
-                "거래 타입",
-                options=['전체', 'AI거래', '수동거래'],
-                index=0
-            )
+            # 수동거래 보호 제거됨에 따라 필터 단순화
+            st.info("🤖 모든 거래는 AI 거래입니다")
         with col2:
             result_filter = st.selectbox(
                 "거래 결과",
@@ -463,10 +453,7 @@ def display_dashboard():
         # 필터 적용
         filtered_df = df_closed.copy()
         
-        if trade_type_filter == 'AI거래':
-            filtered_df = filtered_df[filtered_df['trade_type'] == 'AUTO']
-        elif trade_type_filter == '수동거래':
-            filtered_df = filtered_df[filtered_df['trade_type'] == 'MANUAL']
+        # 수동거래 필터 제거 (모든 거래가 AI 거래)
         
         if result_filter == '수익':
             filtered_df = filtered_df[filtered_df['pnl'] > 0]
@@ -548,15 +535,17 @@ def display_dashboard():
                 st.plotly_chart(fig_pie, use_container_width=True)
             
             with col2:
-                # AI vs 수동거래 분포
-                trade_type_dist = df_closed['trade_source']
-                fig_pie2 = px.pie(
-                    values=trade_type_dist.value_counts().values,
-                    names=trade_type_dist.value_counts().index,
-                    title='거래 타입 분포',
-                    color_discrete_map={'🤖 AI거래': '#4CAF50', '🛡️ 수동거래': '#2196F3'}
-                )
-                st.plotly_chart(fig_pie2, use_container_width=True)
+                # 코인별 거래 분포
+                if not df_closed.empty:
+                    coin_dist = df_closed['coin_symbol'].value_counts()
+                    fig_pie2 = px.pie(
+                        values=coin_dist.values,
+                        names=coin_dist.index,
+                        title='코인별 거래 분포'
+                    )
+                    st.plotly_chart(fig_pie2, use_container_width=True)
+                else:
+                    st.info("거래 데이터가 없습니다.")
         
     else:
         st.info(f"최근 {period_days}일 동안의 거래 내역이 없습니다.")
