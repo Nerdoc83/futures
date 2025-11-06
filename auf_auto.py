@@ -766,6 +766,101 @@ def get_all_open_trades() -> List[dict]:
     
     return trades
 
+def update_closed_trades_pnl_from_history():
+    """
+    기존 청산 거래들의 PnL을 Position History에서 가져와 업데이트
+    """
+    print(f"\n{'='*80}")
+    print(f"🔧 청산 거래 PnL 정정 (Position History 기반)")
+    print(f"{'='*80}")
+    
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    
+    # 최근 7일간 청산된 거래 조회
+    since_date = (get_utc_now() - timedelta(days=7)).isoformat()
+    c.execute('''
+        SELECT id, coin_symbol, side, entry_price, position_size, leverage, timestamp
+        FROM trades 
+        WHERE status = 'CLOSED' AND timestamp >= ?
+        ORDER BY timestamp DESC
+    ''', (since_date,))
+    
+    closed_trades = c.fetchall()
+    conn.close()
+    
+    if not closed_trades:
+        print("   📊 업데이트할 청산 거래가 없습니다")
+        print(f"{'='*80}\n")
+        return
+    
+    print(f"   📊 {len(closed_trades)}개 청산 거래 PnL 정정 시작...")
+    
+    updated_count = 0
+    
+    for trade in closed_trades:
+        trade_id, coin, side, entry_price, position_size, leverage, timestamp = trade
+        symbol = f"{coin}USDT"
+        
+        try:
+            print(f"\n   🔍 {coin} (ID: {trade_id}) PnL 정정 중...")
+            
+            # 거래 시간 기준으로 Position History 조회 범위 설정
+            trade_time = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+            start_time = int((trade_time - timedelta(hours=1)).timestamp() * 1000)
+            end_time = int((trade_time + timedelta(hours=6)).timestamp() * 1000)
+            
+            # Position History API 호출
+            position_history = exchange.fapiPrivate_get_positionhistory({
+                'symbol': symbol,
+                'startTime': start_time,
+                'endTime': end_time,
+                'limit': 50
+            })
+            
+            # 해당 거래와 매칭되는 실현손익 찾기
+            best_match_pnl = None
+            
+            for pos_record in position_history:
+                pos_pnl = float(pos_record.get('realizedPnl', 0))
+                pos_time = int(pos_record.get('updateTime', 0))
+                
+                # 의미있는 PnL이고 시간대가 맞는지 확인
+                if abs(pos_pnl) > 0.1:  # 0.1달러 이상
+                    time_diff = abs(pos_time - int(trade_time.timestamp() * 1000))
+                    if time_diff < 6 * 60 * 60 * 1000:  # 6시간 이내
+                        best_match_pnl = pos_pnl
+                        break
+            
+            if best_match_pnl is not None:
+                # 수익률 계산
+                pnl_pct = (best_match_pnl / position_size) * 100 if position_size > 0 else 0
+                
+                # DB 업데이트
+                conn = sqlite3.connect(DB_FILE)
+                c = conn.cursor()
+                
+                c.execute('''
+                    UPDATE trades 
+                    SET pnl = ?, pnl_percent = ?
+                    WHERE id = ?
+                ''', (best_match_pnl, pnl_pct, trade_id))
+                
+                conn.commit()
+                conn.close()
+                
+                print(f"      ✅ PnL 정정: ${best_match_pnl:+.2f} ({pnl_pct:+.2f}%)")
+                updated_count += 1
+            else:
+                print(f"      ⚠️ Position History에서 매칭되는 기록 없음")
+                
+        except Exception as e:
+            print(f"      ❌ PnL 정정 실패: {e}")
+    
+    print(f"\n   📊 정정 완료: {updated_count}/{len(closed_trades)}개 거래")
+    print(f"   ✅ AI 피드백이 이제 정확한 손익 기반으로 동작합니다")
+    print(f"{'='*80}\n")
+
 def get_recent_performance(days: int = 7) -> dict:
     """최근 성과 조회"""
     conn = sqlite3.connect(DB_FILE)
@@ -1001,10 +1096,47 @@ def manage_live_positions():
             print(f"      🔄 응급 청산 시도...")
             
             if close_position(symbol, side):
-                # 응급 청산 PnL 계산
-                actual_pnl, actual_pnl_pct = calculate_pnl_from_price(
-                    entry_price, current_price, trade['position_size'], side, trade['leverage']
-                )
+                # 🔧 Position History에서 실제 실현손익 조회
+                try:
+                    # 청산 후 잠깐 대기
+                    time.sleep(2)
+                    
+                    # Position History에서 최신 실현손익 조회
+                    end_time = int(time.time() * 1000)
+                    start_time = end_time - (60 * 60 * 1000)  # 1시간 전
+                    
+                    position_history = exchange.fapiPrivate_get_positionhistory({
+                        'symbol': symbol.replace('/USDT:USDT', 'USDT'),
+                        'startTime': start_time,
+                        'endTime': end_time,
+                        'limit': 10
+                    })
+                    
+                    # 가장 최근 실현손익 찾기
+                    actual_pnl = None
+                    for pos_record in sorted(position_history, key=lambda x: x.get('updateTime', 0), reverse=True):
+                        pos_pnl = float(pos_record.get('realizedPnl', 0))
+                        if abs(pos_pnl) > 0.01:
+                            actual_pnl = pos_pnl
+                            break
+                    
+                    if actual_pnl is not None:
+                        actual_pnl_pct = (actual_pnl / trade['position_size']) * 100 if trade['position_size'] > 0 else 0
+                        print(f"      ✅ Position History PnL: ${actual_pnl:+.2f} ({actual_pnl_pct:+.2f}%)")
+                    else:
+                        # Fallback to price calculation
+                        actual_pnl, actual_pnl_pct = calculate_pnl_from_price(
+                            entry_price, current_price, trade['position_size'], side, trade['leverage']
+                        )
+                        print(f"      📊 Fallback PnL: ${actual_pnl:+.2f} ({actual_pnl_pct:+.2f}%)")
+                        
+                except Exception as pos_error:
+                    print(f"      ❌ Position History 조회 실패: {pos_error}")
+                    # Fallback to price calculation
+                    actual_pnl, actual_pnl_pct = calculate_pnl_from_price(
+                        entry_price, current_price, trade['position_size'], side, trade['leverage']
+                    )
+                    print(f"      📊 Fallback PnL: ${actual_pnl:+.2f} ({actual_pnl_pct:+.2f}%)")
                 
                 # DB 업데이트
                 update_trade_exit(
@@ -1064,16 +1196,63 @@ def sync_db_with_binance() -> int:
             print(f"   ⚠️ {coin} (ID: {trade_id}): 바이낸스에 포지션 없음 - DB 정리")
             
             try:
-                # 현재가 조회하여 PnL 계산
-                ticker = exchange.fetch_ticker(symbol)
-                current_price = float(ticker['last'])
+                # 🔧 Position History에서 실제 실현손익 조회
+                print(f"      🔍 Position History에서 실현손익 조회 중...")
                 
-                # 🆕 가격 기반 PnL 계산
-                realized_pnl, pnl_pct = calculate_pnl_from_price(
-                    entry_price, current_price, trade['position_size'], side, trade['leverage']
-                )
+                # Position History 조회
+                try:
+                    # 최근 24시간 Position History 조회
+                    end_time = int(time.time() * 1000)
+                    start_time = end_time - (24 * 60 * 60 * 1000)  # 24시간 전
+                    
+                    # 바이낸스 Position History API 호출
+                    position_history = exchange.fapiPrivate_get_positionhistory({
+                        'symbol': symbol.replace('/USDT:USDT', 'USDT'),
+                        'startTime': start_time,
+                        'endTime': end_time,
+                        'limit': 100
+                    })
+                    
+                    # 해당 거래와 매칭되는 Position History 찾기
+                    realized_pnl = None
+                    pnl_pct = None
+                    
+                    for pos_record in position_history:
+                        pos_side = pos_record.get('positionSide', 'BOTH')
+                        pos_pnl = float(pos_record.get('realizedPnl', 0))
+                        
+                        # 포지션 방향과 시간대 매칭 확인
+                        if abs(pos_pnl) > 0.01:  # 무의미한 수수료만 있는 기록 제외
+                            realized_pnl = pos_pnl
+                            # 수익률 계산 (실제 투자금 기준)
+                            investment = trade['position_size']
+                            pnl_pct = (realized_pnl / investment) * 100 if investment > 0 else 0
+                            print(f"      ✅ Position History PnL: ${realized_pnl:+.2f} ({pnl_pct:+.2f}%)")
+                            break
+                    
+                    # Position History에서 찾지 못한 경우 가격 기반 계산으로 fallback
+                    if realized_pnl is None:
+                        print(f"      ⚠️ Position History에서 해당 거래 없음 - 가격 기반 계산 사용")
+                        ticker = exchange.fetch_ticker(symbol)
+                        current_price = float(ticker['last'])
+                        
+                        realized_pnl, pnl_pct = calculate_pnl_from_price(
+                            entry_price, current_price, trade['position_size'], side, trade['leverage']
+                        )
+                        print(f"      📊 가격 기반 PnL: ${realized_pnl:+.2f} ({pnl_pct:+.2f}%)")
                 
-                print(f"      ⚠️ 수동 계산 PnL: ${realized_pnl:+.2f} ({pnl_pct:+.2f}%)")
+                except Exception as pos_error:
+                    print(f"      ❌ Position History 조회 실패: {pos_error}")
+                    print(f"      🔄 가격 기반 계산으로 fallback...")
+                    
+                    # Fallback: 가격 기반 계산
+                    ticker = exchange.fetch_ticker(symbol)
+                    current_price = float(ticker['last'])
+                    
+                    realized_pnl, pnl_pct = calculate_pnl_from_price(
+                        entry_price, current_price, trade['position_size'], side, trade['leverage']
+                    )
+                    print(f"      📊 Fallback PnL: ${realized_pnl:+.2f} ({pnl_pct:+.2f}%)")
                 
                 # 🔧 안전한 DB 업데이트 (exit_reason 컬럼 확인)
                 conn = sqlite3.connect(DB_FILE)
@@ -1249,6 +1428,13 @@ def main():
     print(f"{'='*80}")
     print(f"🚀 AI 실거래 봇 시작")
     print(f"{'='*80}")
+    
+    # 🔧 기존 청산 거래들의 PnL을 Position History로 정정 (최초 1회)
+    try:
+        update_closed_trades_pnl_from_history()
+    except Exception as e:
+        print(f"⚠️ PnL 정정 중 오류: {e}")
+        print(f"   기존 PnL 값으로 계속 진행합니다...\n")
     
     # 잔고 확인
     balance = get_available_balance()
