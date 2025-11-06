@@ -236,12 +236,14 @@ def get_coin_precision(symbol: str) -> dict:
     try:
         market = exchange.market(symbol)
         return {
-            'price': market['precision']['price'],
-            'amount': market['precision']['amount'],
+            # **수정: price와 amount 정밀도를 가져올 때 명시적으로 int()로 변환**
+            'price': int(market['precision']['price']),
+            'amount': int(market['precision']['amount']),
             'min_amount': market['limits']['amount']['min']
         }
     except Exception as e:
         print(f"   ⚠️ 정밀도 조회 실패: {e}, 기본값 사용")
+        # 기본값도 정수형으로 반환되도록 수정
         return {'price': 2, 'amount': 3, 'min_amount': 0.001}
 
 def set_leverage(symbol: str, leverage: int) -> bool:
