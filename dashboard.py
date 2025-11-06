@@ -344,9 +344,13 @@ def display_dashboard():
     # 사이드바 설정
     st.sidebar.header("⚙️ 설정")
     
-    # 자동 새로고침
-    auto_refresh = st.sidebar.checkbox("자동 새로고침 (30초)", value=False)
-    refresh_interval = st.sidebar.slider("새로고침 간격 (초)", 10, 300, 30)
+    # 자동 새로고침 설정 (개선됨)
+    auto_refresh = st.sidebar.checkbox("자동 새로고침", value=False)
+    if auto_refresh:
+        refresh_interval = st.sidebar.slider("새로고침 간격 (초)", 10, 300, 30)
+        # 자동 새로고침을 위한 placeholder
+        placeholder = st.sidebar.empty()
+        countdown = st.sidebar.empty()
     
     # 기간 선택
     period_days = st.sidebar.selectbox(
@@ -358,6 +362,32 @@ def display_dashboard():
     
     # 봇 제어 패널
     display_bot_control()
+    
+    # === 탭 구성 ===
+    tab1, tab2, tab3 = st.tabs(["📊 대시보드", "📋 로그", "⚙️ 설정"])
+    
+    with tab1:
+        display_main_dashboard(period_days)
+    
+    with tab2:
+        display_log_tab()
+    
+    with tab3:
+        display_settings_tab()
+    
+    # 자동 새로고침 처리 (가장 마지막에)
+    if auto_refresh:
+        # 카운트다운 표시
+        for i in range(refresh_interval, 0, -1):
+            countdown.info(f"🔄 {i}초 후 새로고침...")
+            time.sleep(1)
+        
+        countdown.empty()
+        placeholder.info("🔄 새로고침 중...")
+        st.rerun()
+
+def display_main_dashboard(period_days):
+    """메인 대시보드 내용"""
     
     # 데이터 로드
     df_open = load_open_positions()
@@ -549,25 +579,240 @@ def display_dashboard():
         
     else:
         st.info(f"최근 {period_days}일 동안의 거래 내역이 없습니다.")
+
+def display_log_tab():
+    """로그 탭 내용"""
+    st.header("📋 로그 관리")
     
-    # === 로그 확인 ===
-    with st.expander("📋 최근 로그 (최근 50줄)", expanded=False):
-        if os.path.exists(LOG_FILE):
+    # 상단 제어 버튼들
+    col1, col2, col3 = st.columns([2, 1, 1])
+    
+    with col2:
+        if st.button("🔄 로그 새로고침", use_container_width=True):
+            st.rerun()
+    
+    with col3:
+        if st.button("🗑️ 로그 정리", use_container_width=True):
             try:
-                with open(LOG_FILE, 'r', encoding='utf-8') as f:
-                    lines = f.readlines()
-                    recent_lines = lines[-50:] if len(lines) > 50 else lines
-                    log_content = ''.join(recent_lines)
-                    st.text_area("로그 내용", value=log_content, height=300)
+                if os.path.exists(LOG_FILE):
+                    os.remove(LOG_FILE)
+                    st.success("✅ 로그 파일이 삭제되었습니다!")
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.info("삭제할 로그 파일이 없습니다.")
             except Exception as e:
-                st.error(f"로그 파일 읽기 오류: {e}")
-        else:
-            st.info("로그 파일이 없습니다.")
+                st.error(f"❌ 로그 삭제 실패: {e}")
     
-    # 자동 새로고침
+    # 로그 설정
+    log_lines = st.selectbox(
+        "표시할 로그 줄 수",
+        options=[50, 100, 200, 500],
+        index=0
+    )
+    
+    st.markdown("---")
+    
+    # 로그 내용 표시
+    if os.path.exists(LOG_FILE):
+        try:
+            # 여러 인코딩을 시도해서 읽기
+            encodings = ['utf-8', 'cp949', 'euc-kr', 'latin-1', 'utf-8-sig']
+            log_content = None
+            used_encoding = None
+            
+            for encoding in encodings:
+                try:
+                    with open(LOG_FILE, 'r', encoding=encoding) as f:
+                        lines = f.readlines()
+                        recent_lines = lines[-log_lines:] if len(lines) > log_lines else lines
+                        log_content = ''.join(recent_lines)
+                        used_encoding = encoding
+                        break
+                except UnicodeDecodeError:
+                    continue
+            
+            if log_content:
+                # 인코딩 정보 표시
+                if used_encoding != 'utf-8':
+                    st.warning(f"⚠️ 로그 파일이 {used_encoding} 인코딩으로 읽혔습니다. UTF-8이 아닙니다.")
+                else:
+                    st.success(f"✅ UTF-8 인코딩으로 정상 읽기됨")
+                
+                # 로그 통계
+                total_lines = len(open(LOG_FILE, 'rb').readlines())
+                st.info(f"📊 총 {total_lines}줄 중 최근 {len(recent_lines)}줄 표시")
+                
+                # 로그 내용 (스크롤 가능)
+                st.text_area(
+                    "로그 내용", 
+                    value=log_content, 
+                    height=500,
+                    help="로그 내용을 스크롤하여 확인하세요"
+                )
+                
+            else:
+                # 모든 인코딩 실패시 바이너리로 읽기
+                try:
+                    with open(LOG_FILE, 'rb') as f:
+                        binary_content = f.read()
+                        # 바이너리를 UTF-8로 디코딩하되 에러는 무시
+                        text_content = binary_content.decode('utf-8', errors='ignore')
+                        lines = text_content.splitlines()
+                        recent_lines = lines[-log_lines:] if len(lines) > log_lines else lines
+                        log_content = '\n'.join(recent_lines)
+                        
+                        st.warning("⚠️ 인코딩 문제로 일부 문자가 누락될 수 있습니다.")
+                        st.text_area(
+                            "로그 내용 (일부 문자 누락 가능)", 
+                            value=log_content, 
+                            height=500
+                        )
+                        st.info("💡 '🗑️ 로그 정리' 버튼을 눌러 새로 시작하는 것을 권장합니다.")
+                        
+                except Exception as binary_e:
+                    st.error(f"❌ 로그 파일을 바이너리로도 읽을 수 없습니다: {binary_e}")
+                    st.info("💡 '🗑️ 로그 정리' 버튼을 눌러 로그 파일을 삭제하세요.")
+                    
+        except Exception as e:
+            st.error(f"❌ 로그 파일 읽기 오류: {e}")
+            st.info("💡 '🗑️ 로그 정리' 버튼을 눌러 로그 파일을 삭제하세요.")
+    else:
+        st.info("📄 로그 파일이 없습니다. 봇이 실행되면 새 로그가 생성됩니다.")
+
+def display_settings_tab():
+    """설정 탭 내용"""
+    st.header("⚙️ 시스템 설정")
+    
+    # 파일 정보
+    st.subheader("📁 파일 정보")
+    
+    files_info = [
+        ("거래 데이터베이스", DB_FILE),
+        ("로그 파일", LOG_FILE),
+        ("봇 스크립트", BOT_SCRIPT)
+    ]
+    
+    for name, filepath in files_info:
+        col1, col2, col3 = st.columns([2, 2, 1])
+        with col1:
+            st.text(name)
+        with col2:
+            if os.path.exists(filepath):
+                size = os.path.getsize(filepath)
+                size_str = f"{size:,} bytes"
+                if size > 1024:
+                    size_str += f" ({size/1024:.1f} KB)"
+                if size > 1024*1024:
+                    size_str += f" ({size/(1024*1024):.1f} MB)"
+                st.text(f"✅ {size_str}")
+            else:
+                st.text("❌ 파일 없음")
+        with col3:
+            if name == "로그 파일" and os.path.exists(filepath):
+                if st.button("🗑️", key=f"del_{name}"):
+                    try:
+                        os.remove(filepath)
+                        st.success(f"{name} 삭제됨")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"삭제 실패: {e}")
+    
+    st.markdown("---")
+    
+    # 시스템 정보
+    st.subheader("💻 시스템 정보")
+    
+    try:
+        if psutil:
+            # 메모리 사용량
+            memory = psutil.virtual_memory()
+            st.metric(
+                "메모리 사용률", 
+                f"{memory.percent:.1f}%",
+                f"{memory.used/(1024**3):.1f}GB / {memory.total/(1024**3):.1f}GB"
+            )
+            
+            # CPU 사용률
+            cpu_percent = psutil.cpu_percent(interval=1)
+            st.metric("CPU 사용률", f"{cpu_percent:.1f}%")
+            
+        else:
+            st.info("psutil이 설치되지 않아 시스템 정보를 표시할 수 없습니다.")
+            
+    except Exception as e:
+        st.error(f"시스템 정보 조회 실패: {e}")
+    
+    st.markdown("---")
+    
+    # 위험 구역
+    st.subheader("⚠️ 위험 구역")
+    st.warning("다음 작업들은 신중하게 수행하세요!")
+    
+    if st.button("🗑️ 모든 로그 삭제", type="secondary"):
+        if st.button("정말 삭제하시겠습니까?", type="secondary"):
+            try:
+                if os.path.exists(LOG_FILE):
+                    os.remove(LOG_FILE)
+                st.success("모든 로그가 삭제되었습니다.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"삭제 실패: {e}")
+
+def display_dashboard():
+    """메인 대시보드 표시"""
+    st.markdown('<h1 class="main-header">🤖 AI Trading Dashboard</h1>', unsafe_allow_html=True)
+    
+    # 사이드바 설정
+    st.sidebar.header("⚙️ 설정")
+    
+    # 자동 새로고침 설정 (개선됨)
+    auto_refresh = st.sidebar.checkbox("자동 새로고침", value=False)
     if auto_refresh:
-        time.sleep(refresh_interval)
-        st.rerun()
+        refresh_interval = st.sidebar.slider("새로고침 간격 (초)", 10, 300, 30)
+    
+    # 기간 선택
+    period_days = st.sidebar.selectbox(
+        "거래 내역 기간",
+        options=[7, 14, 30, 60, 90],
+        index=2,
+        format_func=lambda x: f"최근 {x}일"
+    )
+    
+    # 봇 제어 패널
+    display_bot_control()
+    
+    # === 탭 구성 ===
+    tab1, tab2, tab3 = st.tabs(["📊 대시보드", "📋 로그", "⚙️ 설정"])
+    
+    with tab1:
+        display_main_dashboard(period_days)
+    
+    with tab2:
+        display_log_tab()
+    
+    with tab3:
+        display_settings_tab()
+    
+    # 자동 새로고침 처리 (개선됨 - 블로킹 없이)
+    if auto_refresh:
+        # 자동 새로고침을 위한 JavaScript 기반 타이머 (논블로킹)
+        st.sidebar.info(f"🔄 {refresh_interval}초마다 자동 새로고침")
+        
+        # 현재 시간을 기반으로 새로고침 체크
+        import time
+        if 'last_refresh' not in st.session_state:
+            st.session_state.last_refresh = time.time()
+        
+        current_time = time.time()
+        if current_time - st.session_state.last_refresh >= refresh_interval:
+            st.session_state.last_refresh = current_time
+            st.rerun()
+        
+        # 남은 시간 표시
+        remaining = refresh_interval - (current_time - st.session_state.last_refresh)
+        st.sidebar.progress(1 - remaining/refresh_interval)
+        st.sidebar.caption(f"⏱️ {remaining:.0f}초 후 새로고침")
 
 if __name__ == "__main__":
     display_dashboard()
