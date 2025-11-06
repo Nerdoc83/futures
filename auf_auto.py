@@ -157,14 +157,15 @@ LIVE_TRADING_CONFIG = {
     "TRAILING_STOP_MIN_PROFIT_PCT": 12.0,       # 최소 확보 수익률 (%) - 레버리지 고려하여 자동 계산됨
                                                   # 예: 12% 수익 확보 + 10배 레버리지 = 1.2% 콜백
     
-    # 🔧 자금 관리 설정 (동적 균등 분할)
-    "MAX_POSITION_SIZE_PCT": 100,  # 안전장치: 가용 자금의 최대 100% (동적 균등 분할 활용)
-    "MIN_POSITION_SIZE_PCT": 3,   # 최소 3% (너무 작은 포지션 방지)
-    "DYNAMIC_EQUAL_SPLIT": True,  # 동적 균등 분할 활성화
-    "VOLATILITY_BASED_SIZING": True,  # 변동성 기반 포지션 크기 조절
+    # 🔧 자금 관리 설정 (공격적 균등 분할)
+    "TARGET_TOTAL_USAGE_PCT": 80,  # 🆕 목표: 전체 자금의 80% 사용
+    "MAX_POSITION_SIZE_PCT": 25,   # 🔧 단일 포지션 최대 25% (안전장치)
+    "MIN_POSITION_SIZE_PCT": 10,   # 🔧 최소 10% (너무 작은 포지션 방지)
+    "DYNAMIC_EQUAL_SPLIT": True,   # 동적 균등 분할 활성화
+    "VOLATILITY_BASED_SIZING": True,  # 변동성 기반 포지션 크기 조절 (완화)
     "HIGH_VOLATILITY_THRESHOLD": 5.0,  # 5% 이상이면 고변동성
-    "LOW_VOLATILITY_MULTIPLIER": 1.2,  # 저변동성 = 1.2배 투자
-    "HIGH_VOLATILITY_MULTIPLIER": 0.8,  # 고변동성 = 0.8배 투자
+    "LOW_VOLATILITY_MULTIPLIER": 1.1,   # 🔧 저변동성 = 1.1배 투자 (완화)
+    "HIGH_VOLATILITY_MULTIPLIER": 0.9,  # 🔧 고변동성 = 0.9배 투자 (완화)
     
     # 🔧 거래 수수료 (바이낸스 선물 일반회원)
     "MAKER_FEE": 0.02,  # 0.02%
@@ -1325,32 +1326,39 @@ def execute_live_trade(coin_data: dict, ai_decision: dict, available_balance: fl
         confidence = ai_decision['confidence']
         leverage = ai_decision.get('leverage', 10)
         
-        # 동적 균등 분할 (가용 자금 / 최대 포지션 수)
+        # 🔧 개선된 동적 균등 분할 (목표: 전체 80% 사용)
         max_positions = LIVE_TRADING_CONFIG['MAX_CONCURRENT_POSITIONS']
-        base_position_pct = 100 / max_positions  # 20%씩 분할
+        target_total_usage = 80  # 전체 자금의 80% 목표
+        base_position_pct = target_total_usage / max_positions  # 16%씩 분할 (5개 = 80%)
         
-        # 변동성 기반 조정
+        # 변동성 기반 조정 (완화)
         volatility = abs(coin_data.get('change', 0))
         if volatility > LIVE_TRADING_CONFIG.get('HIGH_VOLATILITY_THRESHOLD', 5.0):
-            volatility_multiplier = LIVE_TRADING_CONFIG.get('HIGH_VOLATILITY_MULTIPLIER', 0.8)
+            volatility_multiplier = 0.9  # 고변동성: 10% 감소
         else:
-            volatility_multiplier = LIVE_TRADING_CONFIG.get('LOW_VOLATILITY_MULTIPLIER', 1.2)
+            volatility_multiplier = 1.1  # 저변동성: 10% 증가
         
-        # 신뢰도 기반 조정 (70-95% → 50-100%)
-        confidence_multiplier = 0.5 + (confidence - 70) / 25 * 0.5
-        confidence_multiplier = max(0.5, min(1.0, confidence_multiplier))
+        # 신뢰도 기반 조정 (완화: 70-95% → 85-115%)
+        # 70% confidence → 0.85배
+        # 95% confidence → 1.15배
+        confidence_multiplier = 0.85 + (confidence - 70) / 25 * 0.3
+        confidence_multiplier = max(0.85, min(1.15, confidence_multiplier))
         
         # 최종 포지션 크기
         position_pct = base_position_pct * volatility_multiplier * confidence_multiplier
-        position_pct = max(LIVE_TRADING_CONFIG['MIN_POSITION_SIZE_PCT'], 
-                          min(LIVE_TRADING_CONFIG['MAX_POSITION_SIZE_PCT'], position_pct))
+        
+        # 안전 범위 체크
+        min_pct = LIVE_TRADING_CONFIG.get('MIN_POSITION_SIZE_PCT', 10)  # 최소 10%
+        max_pct = LIVE_TRADING_CONFIG.get('MAX_POSITION_SIZE_PCT', 25)  # 최대 25%
+        position_pct = max(min_pct, min(max_pct, position_pct))
         
         position_size = available_balance * (position_pct / 100)
         
         print(f"   💰 포지션 크기 계산:")
+        print(f"      - 목표 총 사용률: {target_total_usage}%")
         print(f"      - 기본: {base_position_pct:.1f}%")
-        print(f"      - 변동성 조정: ×{volatility_multiplier:.2f}")
-        print(f"      - 신뢰도 조정: ×{confidence_multiplier:.2f}")
+        print(f"      - 변동성 조정: ×{volatility_multiplier:.2f} ({volatility:.1f}%)")
+        print(f"      - 신뢰도 조정: ×{confidence_multiplier:.2f} ({confidence}%)")
         print(f"      - 최종: {position_pct:.1f}% = ${position_size:,.2f}")
         
         # 최소 포지션 크기 체크
@@ -1405,7 +1413,7 @@ def execute_live_trade(coin_data: dict, ai_decision: dict, available_balance: fl
             
             trailing_order = set_trailing_stop_order(symbol, side.upper(), leverage, position_size)
             if trailing_order:
-                print(f"   ✅ 트레일링 스탑 활성화")
+                print(f"   ✅트레일링 스탑 활성화")
             else:
                 print(f"   ⚠️ 트레일링 스탑 설정 실패")
         
