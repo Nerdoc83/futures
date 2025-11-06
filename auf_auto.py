@@ -1,5 +1,5 @@
 """
-AI Live Trading Bot v2.3 (실거래 버전 - PnL 수정본)
+AI Live Trading Bot v2.5 (추세 반전 감지)
 ----------------------------------------------------------------------
 ⚠️ 실제 바이낸스 선물 거래 - 실제 자금 사용
 - 실시간 바이낸스 선물 데이터 사용
@@ -7,21 +7,31 @@ AI Live Trading Bot v2.3 (실거래 버전 - PnL 수정본)
 - Isolated Margin 모드
 - 실제 주문 체결 및 청산
 - AI 보수적 리스크 관리
-- 🆕 처음부터 트레일링 스탑 설정 (20% 체크 제거)
-- 🔧 v2.3 수정사항:
-  1. ✅ 바이낸스 Income History API로 실제 realized PnL 조회
-  2. ✅ 거래 내역(My Trades)에서 PnL 대체 조회
-  3. ✅ 수수료를 반영한 PnL 계산 (Maker 0.02%, Taker 0.05%)
-  4. ✅ 트레일링 스탑 청산시 정확한 손익 계산
-  5. ✅ 청산가 역산 알고리즘 개선
+- 🆕 처음부터 트레일링 스탑 설정
+- 🆕 명확한 추세 반전시 AI 개입 청산
+
+🔧 v2.5 신규 기능:
+  1. ✅ 명확한 추세 반전 감지 (+10% 이상 수익시)
+  2. ✅ 다중 기술적 지표 분석 (RSI, MACD, EMA, 캔들 패턴)
+  3. ✅ 신호 강도 점수화 (7/10 이상시만 청산)
+  4. ✅ 최소 3개 이상의 동시 신호 요구
+  5. ✅ 수익 보호 조기 청산 (트레일링 스탑 보완)
+
+v2.4 기능:
+  - 공격적 포지션 크기 (목표 80% 자금 사용)
+  - 동적 균등 분할 및 변동성 조정
+
+v2.3 기능:
+  - 바이낸스 실제 realized PnL 조회
+  - 수수료 반영 손익 계산
+  - 정확한 손익 동기화
 
 ⚠️ 중요:
-- AI 포지션 관리가 10분마다 실행됩니다 (모니터링 목적)
-- 최소 보유시간 제약이 완전히 제거되었습니다
-- 진입 직후라도 시장 급변 시 즉시 청산 가능
-- 변동성에 따라 청산 임계값이 자동 조정됩니다
-- 🆕 트레일링 스탑이 익절과 손절을 모두 담당, AI는 모니터링만 수행
-- 🆕 바이낸스 실제 PnL을 우선 사용, 실패시에만 추정 계산
+- AI는 10분마다 포지션 모니터링
+- 추세 반전은 수익 중(+10% 이상)일 때만 체크
+- 명확한 신호(강도 7/10 이상)에만 개입
+- 트레일링 스탑은 계속 작동 (기본 보호)
+- 추세 유지시 AI는 개입하지 않음
 ----------------------------------------------------------------------
 """
 
@@ -156,6 +166,12 @@ LIVE_TRADING_CONFIG = {
     "TRAILING_STOP_ENABLED": True,              # 트레일링 스탑 활성화
     "TRAILING_STOP_MIN_PROFIT_PCT": 12.0,       # 최소 확보 수익률 (%) - 레버리지 고려하여 자동 계산됨
                                                   # 예: 12% 수익 확보 + 10배 레버리지 = 1.2% 콜백
+    
+    # 🆕 추세 반전 감지 설정
+    "TREND_REVERSAL_DETECTION": True,           # 추세 반전 감지 활성화
+    "TREND_REVERSAL_MIN_PROFIT_PCT": 10,        # 최소 수익률 (10% 이상일 때만 체크)
+    "TREND_REVERSAL_MIN_STRENGTH": 7,           # 최소 신호 강도 (7/10 이상)
+    "TREND_REVERSAL_MIN_SIGNALS": 3,            # 최소 신호 개수 (3개 이상)
     
     # 🔧 자금 관리 설정 (공격적 균등 분할)
     "TARGET_TOTAL_USAGE_PCT": 80,  # 🆕 목표: 전체 자금의 80% 사용
@@ -549,6 +565,158 @@ def calculate_pnl_from_price(entry_price: float, exit_price: float, position_siz
     except Exception as e:
         print(f"   ❌ PnL 계산 오류: {e}")
         return 0.0, 0.0
+
+def detect_trend_reversal(symbol: str, side: str, current_price: float, entry_price: float) -> Tuple[bool, str, int]:
+    """
+    🆕 명확한 추세 반전 감지
+    
+    Args:
+        symbol: 거래 심볼
+        side: 'LONG' 또는 'SHORT'
+        current_price: 현재가
+        entry_price: 진입가
+    
+    Returns:
+        (is_reversed, reason, strength)
+        - is_reversed: 추세 반전 여부
+        - reason: 반전 이유 설명
+        - strength: 신호 강도 (0-10)
+    """
+    try:
+        # 5분봉 기술적 지표 조회 (단기 추세 파악)
+        ohlcv = exchange.fetch_ohlcv(symbol, '5m', limit=50)
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        
+        # 기술적 지표 계산
+        close_series = df['close']
+        high_series = df['high']
+        low_series = df['low']
+        
+        # RSI
+        try:
+            rsi = ta.rsi(close_series, length=14)
+            current_rsi = float(rsi.iloc[-1]) if rsi is not None else 50.0
+        except:
+            current_rsi = 50.0
+        
+        # MACD
+        try:
+            macd_result = ta.macd(close_series, fast=12, slow=26, signal=9)
+            if macd_result is not None and isinstance(macd_result, pd.DataFrame):
+                macd_line = float(macd_result.iloc[-1, 0])
+                signal_line = float(macd_result.iloc[-1, 1])
+                prev_macd = float(macd_result.iloc[-2, 0])
+                prev_signal = float(macd_result.iloc[-2, 1])
+            else:
+                macd_line = signal_line = prev_macd = prev_signal = 0.0
+        except:
+            macd_line = signal_line = prev_macd = prev_signal = 0.0
+        
+        # EMA
+        try:
+            ema_20 = ta.ema(close_series, length=20)
+            current_ema = float(ema_20.iloc[-1]) if ema_20 is not None else current_price
+        except:
+            current_ema = current_price
+        
+        # 최근 캔들 패턴 (마지막 3개 캔들)
+        recent_candles = df.tail(3)
+        bullish_candles = sum(1 for _, c in recent_candles.iterrows() if c['close'] > c['open'])
+        bearish_candles = 3 - bullish_candles
+        
+        # 신호 점수 초기화
+        reversal_signals = []
+        signal_strength = 0
+        
+        # ===== SHORT 포지션 추세 반전 감지 =====
+        if side.upper() == 'SHORT':
+            # 신호 1: RSI 과매수 (70 이상)
+            if current_rsi > 70:
+                reversal_signals.append(f"RSI 과매수 ({current_rsi:.1f})")
+                signal_strength += 3
+            elif current_rsi > 65:
+                reversal_signals.append(f"RSI 높음 ({current_rsi:.1f})")
+                signal_strength += 2
+            
+            # 신호 2: MACD 상승 크로스
+            if macd_line > signal_line and prev_macd <= prev_signal:
+                reversal_signals.append("MACD 상승 크로스")
+                signal_strength += 3
+            elif macd_line > signal_line:
+                reversal_signals.append("MACD 상승세")
+                signal_strength += 1
+            
+            # 신호 3: 가격이 EMA20 돌파
+            if current_price > current_ema * 1.01:  # 1% 이상 돌파
+                reversal_signals.append(f"EMA20 돌파 ({((current_price/current_ema-1)*100):+.1f}%)")
+                signal_strength += 3
+            elif current_price > current_ema:
+                reversal_signals.append("EMA20 상회")
+                signal_strength += 1
+            
+            # 신호 4: 연속 상승 캔들
+            if bullish_candles >= 3:
+                reversal_signals.append("3연속 상승 캔들")
+                signal_strength += 2
+            elif bullish_candles == 2:
+                signal_strength += 1
+            
+            # 신호 5: 진입가 대비 불리한 움직임
+            price_move_pct = ((current_price - entry_price) / entry_price) * 100
+            if price_move_pct > 2:  # 2% 이상 불리
+                reversal_signals.append(f"진입가 대비 +{price_move_pct:.1f}% 불리")
+                signal_strength += 2
+        
+        # ===== LONG 포지션 추세 반전 감지 =====
+        else:  # LONG
+            # 신호 1: RSI 과매도 (30 이하)
+            if current_rsi < 30:
+                reversal_signals.append(f"RSI 과매도 ({current_rsi:.1f})")
+                signal_strength += 3
+            elif current_rsi < 35:
+                reversal_signals.append(f"RSI 낮음 ({current_rsi:.1f})")
+                signal_strength += 2
+            
+            # 신호 2: MACD 하락 크로스
+            if macd_line < signal_line and prev_macd >= prev_signal:
+                reversal_signals.append("MACD 하락 크로스")
+                signal_strength += 3
+            elif macd_line < signal_line:
+                reversal_signals.append("MACD 하락세")
+                signal_strength += 1
+            
+            # 신호 3: 가격이 EMA20 이탈
+            if current_price < current_ema * 0.99:  # 1% 이상 이탈
+                reversal_signals.append(f"EMA20 이탈 ({((current_price/current_ema-1)*100):+.1f}%)")
+                signal_strength += 3
+            elif current_price < current_ema:
+                reversal_signals.append("EMA20 하회")
+                signal_strength += 1
+            
+            # 신호 4: 연속 하락 캔들
+            if bearish_candles >= 3:
+                reversal_signals.append("3연속 하락 캔들")
+                signal_strength += 2
+            elif bearish_candles == 2:
+                signal_strength += 1
+            
+            # 신호 5: 진입가 대비 불리한 움직임
+            price_move_pct = ((entry_price - current_price) / entry_price) * 100
+            if price_move_pct > 2:  # 2% 이상 불리
+                reversal_signals.append(f"진입가 대비 +{price_move_pct:.1f}% 불리")
+                signal_strength += 2
+        
+        # ===== 명확한 반전 판단 =====
+        # 조건: 신호 강도 7 이상 AND 3개 이상의 신호
+        is_clear_reversal = signal_strength >= 7 and len(reversal_signals) >= 3
+        
+        reason = " | ".join(reversal_signals) if reversal_signals else "추세 유지"
+        
+        return is_clear_reversal, reason, signal_strength
+        
+    except Exception as e:
+        print(f"      ⚠️ 추세 분석 오류: {e}")
+        return False, "분석 실패", 0
 
 def get_realized_pnl_from_binance(symbol: str, start_time: int = None) -> Optional[Dict]:
     """
@@ -1512,6 +1680,52 @@ def manage_live_positions():
         else:
             print(f"      ⚠️ 손실 구간 ({pnl_pct:+.2f}%) - 트레일링 스탑이 손절 대기 중")
         
+        # 🆕 추세 반전 감지 (수익 중일 때만, +10% 이상)
+        should_check_reversal = pnl_pct >= 10 and has_trailing_stop
+        
+        if should_check_reversal:
+            print(f"      🔍 추세 반전 감지 중...")
+            is_reversed, reversal_reason, signal_strength = detect_trend_reversal(
+                symbol, side, current_price, entry_price
+            )
+            
+            if signal_strength > 0:
+                print(f"      📊 추세 분석: {reversal_reason}")
+                print(f"      💪 신호 강도: {signal_strength}/10")
+            
+            # 명확한 추세 반전 감지시 청산
+            if is_reversed:
+                print(f"      🚨 명확한 추세 반전 감지! (강도: {signal_strength}/10)")
+                print(f"      🔄 수익 보호 청산 시도...")
+                print(f"      📝 반전 신호: {reversal_reason}")
+                
+                # 즉시 청산
+                if close_position(symbol, side):
+                    # 청산 후 PnL 계산
+                    actual_pnl, actual_pnl_pct = calculate_pnl_from_price(
+                        entry_price, current_price, trade['position_size'], side, trade['leverage']
+                    )
+                    
+                    print(f"      ✅ 추세 반전 청산 완료")
+                    print(f"      📊 최종 PnL: ${actual_pnl:+.2f} ({actual_pnl_pct:+.2f}%)")
+                    
+                    # DB 업데이트
+                    update_trade_exit(
+                        trade_id=trade_id,
+                        exit_price=current_price,
+                        pnl=actual_pnl,
+                        pnl_percent=actual_pnl_pct,
+                        reason=f"AI 추세 반전 감지 청산 (강도 {signal_strength}/10): {reversal_reason}"
+                    )
+                    continue  # 다음 포지션으로
+                else:
+                    print(f"      ❌ 추세 반전 청산 실패 - 트레일링 스탑에 맡김")
+            else:
+                if signal_strength > 3:
+                    print(f"      ✅ 추세 유지 (약한 반전 신호: {signal_strength}/10)")
+                else:
+                    print(f"      ✅ 추세 유지")
+        
         # 🚨 응급상황 체크 (극단적인 경우에만 AI 개입)
         emergency_threshold = -30  # 30% 이상 손실시 응급상황
         if pnl_pct <= emergency_threshold and not has_trailing_stop:
@@ -1537,7 +1751,7 @@ def manage_live_positions():
                 print(f"      ✅ 응급 청산 완료")
             else:
                 print(f"      ❌ 응급 청산 실패")
-        else:
+        elif not should_check_reversal:
             print(f"      ✅ 트레일링 스탑이 관리 중 - AI 개입 불필요")
     
     print(f"{'='*80}\n")
