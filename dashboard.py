@@ -104,7 +104,7 @@ def load_open_positions():
             df['source'] = df['trading_style'].apply(
                 lambda x: 'MANUAL' if x == 'MANUAL' else 'BOT'
             )
-            /* **수정: DataFrame에서 컬럼 이름을 'action'으로 변경** */
+            # # 수정: DataFrame에서 컬럼 이름을 'action'으로 변경
             df.rename(columns={'side': 'action'}, inplace=True) 
         
         return df
@@ -155,7 +155,7 @@ def load_closed_trades(days=30):
             df['timestamp'] = pd.to_datetime(df['timestamp'])
             df['close_timestamp'] = pd.to_datetime(df['close_timestamp'])
             
-            /* **수정: DataFrame에서 컬럼 이름을 'action'으로 변경** */
+            # # 수정: DataFrame에서 컬럼 이름을 'action'으로 변경
             df.rename(columns={'side': 'action'}, inplace=True)
             
             # PnL 처리
@@ -220,7 +220,7 @@ def calculate_statistics(df_closed):
     losses = df_closed[df_closed['final_pnl'] < 0]['final_pnl']
     
     avg_win = wins.mean() if len(wins) > 0 else 0
-    avg_loss = losses.abs().mean() if len(losses) > 0 else 0 /* **절대값으로 수정** */
+    avg_loss = losses.abs().mean() if len(losses) > 0 else 0 
     largest_win = wins.max() if len(wins) > 0 else 0
     largest_loss = losses.min() if len(losses) > 0 else 0
     
@@ -283,7 +283,7 @@ def display_dashboard():
         st.metric("최대 수익", f"${stats['largest_win']:,.2f}")
     
     with col4:
-        st.metric("평균 손실", f"${abs(stats['avg_loss']):,.2f}") /* **abs()로 변경** */
+        st.metric("평균 손실", f"${abs(stats['avg_loss']):,.2f}")
         st.metric("최대 손실", f"${stats['largest_loss']:,.2f}")
     
     # 오픈 포지션
