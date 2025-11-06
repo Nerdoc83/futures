@@ -1174,7 +1174,8 @@ def execute_live_trade(coin_data: dict, decision: dict, available_balance: float
         # 4. 수량 계산
         precision = get_coin_precision(symbol)
         quantity = position_size * leverage / current_price
-        quantity = round(quantity, precision['amount'])
+        # 수정: precision['amount']를 int()로 감싸서 정수형으로 변환합니다.
+        quantity = round(quantity, int(precision['amount']))
         
         # 최소 수량 체크
         if quantity < precision['min_amount']:
