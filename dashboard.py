@@ -336,6 +336,22 @@ def display_bot_control():
                     st.sidebar.error("psutil이 설치되지 않아 봇을 정지할 수 없습니다.")
             except Exception as e:
                 st.sidebar.error(f"봇 정지 실패: {e}")
+    
+    # 수동 새로고침 버튼 섹션
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🔄 새로고침")
+    
+    col1, col2 = st.sidebar.columns(2)
+    with col1:
+        if st.button("📊 데이터", key="refresh_data_control", use_container_width=True, help="캐시를 지우고 데이터 새로고침"):
+            st.cache_data.clear()
+            st.sidebar.success("✅ 완료!")
+            time.sleep(0.5)
+            st.rerun()
+    
+    with col2:
+        if st.button("🔄 전체", key="refresh_all_control", use_container_width=True, help="페이지 전체 새로고침"):
+            st.rerun()
 
 def display_dashboard():
     """메인 대시보드 표시"""
@@ -388,6 +404,21 @@ def display_dashboard():
 
 def display_main_dashboard(period_days):
     """메인 대시보드 내용"""
+    
+    # 상단 제어 버튼
+    col1, col2, col3 = st.columns([4, 1, 1])
+    
+    with col2:
+        if st.button("🔄 새로고침", use_container_width=True, help="데이터를 다시 불러옵니다"):
+            # 캐시 클리어
+            st.cache_data.clear()
+            st.success("✅ 데이터 새로고침 완료!")
+            time.sleep(0.5)
+            st.rerun()
+    
+    with col3:
+        if st.button("📊 전체 새로고침", use_container_width=True, help="페이지 전체를 새로고침합니다"):
+            st.rerun()
     
     # 데이터 로드
     df_open = load_open_positions()
@@ -608,7 +639,7 @@ def display_log_tab():
     log_lines = st.selectbox(
         "표시할 로그 줄 수",
         options=[50, 100, 200, 500],
-        index=0
+        index=2  # 200줄을 기본값으로 설정
     )
     
     st.markdown("---")
@@ -794,25 +825,34 @@ def display_dashboard():
     with tab3:
         display_settings_tab()
     
-    # 자동 새로고침 처리 (개선됨 - 블로킹 없이)
+    # 자동 새로고침 처리 (단순하고 확실한 방식)
     if auto_refresh:
-        # 자동 새로고침을 위한 JavaScript 기반 타이머 (논블로킹)
         st.sidebar.info(f"🔄 {refresh_interval}초마다 자동 새로고침")
         
-        # 현재 시간을 기반으로 새로고침 체크
-        import time
-        if 'last_refresh' not in st.session_state:
-            st.session_state.last_refresh = time.time()
+        # 자동 새로고침 카운터
+        if 'refresh_counter' not in st.session_state:
+            st.session_state.refresh_counter = 0
+            st.session_state.last_refresh_time = time.time()
         
+        # 경과 시간 체크
         current_time = time.time()
-        if current_time - st.session_state.last_refresh >= refresh_interval:
-            st.session_state.last_refresh = current_time
-            st.rerun()
+        elapsed = current_time - st.session_state.last_refresh_time
         
-        # 남은 시간 표시
-        remaining = refresh_interval - (current_time - st.session_state.last_refresh)
-        st.sidebar.progress(1 - remaining/refresh_interval)
-        st.sidebar.caption(f"⏱️ {remaining:.0f}초 후 새로고침")
+        if elapsed >= refresh_interval:
+            # 새로고침 실행
+            st.session_state.refresh_counter += 1
+            st.session_state.last_refresh_time = current_time
+            st.rerun()
+        else:
+            # 남은 시간 표시
+            remaining = refresh_interval - elapsed
+            progress = elapsed / refresh_interval
+            st.sidebar.progress(progress)
+            st.sidebar.caption(f"⏱️ {remaining:.0f}초 후 새로고침 (횟수: {st.session_state.refresh_counter})")
+            
+            # 페이지를 1초마다 업데이트하여 카운트다운 표시
+            time.sleep(1)
+            st.rerun()
 
 if __name__ == "__main__":
     display_dashboard()

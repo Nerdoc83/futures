@@ -563,7 +563,7 @@ def ai_comprehensive_analysis(coin_data: dict, market_data: dict, performance_hi
         
         # 프롬프트 작성
         prompt = f"""
-다음 암호화폐의 선물 거래 진입을 분석해주세요:
+다음 암호화폐의 선물 거래를 양방향(LONG/SHORT) 분석해주세요:
 
 **코인 정보:**
 - 심볼: {coin_data['coin']}
@@ -586,20 +586,31 @@ def ai_comprehensive_analysis(coin_data: dict, market_data: dict, performance_hi
 - 리스크/리워드: 최소 1:2
 - 트레일링 스탑 활용 (7% 최소 확보)
 
+**분석 방향:**
+1. LONG 기회: 상승 추세, 지지선 반등, 과매도 반등 등
+2. SHORT 기회: 하락 추세, 저항선 거부, 과매수 조정 등
+3. 특히 다음 상황에서 SHORT 적극 고려:
+   - 급등(+50% 이상) 후 모멘텀 약화
+   - RSI 70 이상 과매수 + 볼린저밴드 상단 근처
+   - 대량 거래량 후 매수세 소진 징후
+   - 저항선에서 거부 패턴
+
 다음 형식으로 JSON 응답해주세요:
 {{
     "trade": true/false,
     "direction": "LONG" 또는 "SHORT",
     "confidence": 0-100,
     "leverage": 10-15,
-    "reasoning": "상세한 분석 근거"
+    "reasoning": "LONG과 SHORT 모두 검토한 상세한 분석 근거"
 }}
 
 주의사항:
 1. 70% 이상 확신할 때만 거래 추천
-2. 과매수/과매도 상황 고려
-3. 트렌드와 모멘텀 분석
-4. 리스크 관리 우선
+2. LONG과 SHORT 양방향 모두 검토 (편향 금지)
+3. 과매수 상황에서는 SHORT 우선 고려
+4. 급등/급락 후 역추세 기회 적극 평가
+5. 불분명한 상황에서는 관망 선택
+6. 리스크 관리 우선, 확실한 기회만 공략
 """
         
         # AI 호출
