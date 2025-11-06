@@ -152,8 +152,8 @@ LIVE_TRADING_CONFIG = {
     
     # 🆕 트레일링 스탑 설정 (처음부터 활성화)
     "TRAILING_STOP_ENABLED": True,              # 트레일링 스탑 활성화
-    "TRAILING_STOP_MIN_PROFIT_PCT": 8.0,        # 최소 확보 수익률 (%) - 레버리지 고려하여 자동 계산됨
-                                                  # 예: 8% 수익 확보 + 10배 레버리지 = 0.8% 콜백
+    "TRAILING_STOP_MIN_PROFIT_PCT": 12.0,       # 최소 확보 수익률 (%) - 레버리지 고려하여 자동 계산됨
+                                                  # 예: 12% 수익 확보 + 10배 레버리지 = 1.2% 콜백
     
     # 🔧 자금 관리 설정 (동적 균등 분할)
     "MAX_POSITION_SIZE_PCT": 100,  # 안전장치: 가용 자금의 최대 100% (동적 균등 분할 활용)
@@ -238,6 +238,76 @@ def cancel_all_pending_orders(symbol: str) -> bool:
         print(f"   ❌ 주문 정리 실패: {e}")
         return False
 
+def calculate_dynamic_callback_rate(symbol: str, leverage: int, base_profit_pct: float = 12.0) -> Tuple[float, str]:
+    """
+    변동성 기반 동적 콜백 비율 계산
+    
+    Args:
+        symbol: 거래 심볼
+        leverage: 레버리지
+        base_profit_pct: 기본 목표 수익률 (%)
+    
+    Returns:
+        (최적 콜백 비율, 변동성 수준)
+    """
+    try:
+        # 1시간봉 데이터로 ATR 계산 (최근 변동성)
+        ohlcv = exchange.fetch_ohlcv(symbol, '1h', limit=24)
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        
+        # ATR 계산
+        atr_result = ta.atr(df['high'], df['low'], df['close'], length=14)
+        if atr_result is not None and len(atr_result) > 0:
+            atr = float(atr_result.iloc[-1])
+            current_price = float(df['close'].iloc[-1])
+            atr_pct = (atr / current_price) * 100
+        else:
+            atr_pct = 3.0  # 기본값
+        
+        # 기본 콜백 비율 계산
+        base_callback = base_profit_pct / leverage
+        
+        # 변동성에 따른 멀티플라이어
+        if atr_pct < 1.5:
+            # 초저변동성 (BTC, ETH 횡보)
+            multiplier = 0.7
+            volatility_level = "초저변동성"
+        elif atr_pct < 3.0:
+            # 저변동성 (BTC, ETH 일반)
+            multiplier = 0.85
+            volatility_level = "저변동성"
+        elif atr_pct < 5.0:
+            # 중변동성 (대부분의 알트코인)
+            multiplier = 1.0
+            volatility_level = "중변동성"
+        elif atr_pct < 8.0:
+            # 고변동성 (변동성 큰 알트코인)
+            multiplier = 1.3
+            volatility_level = "고변동성"
+        else:
+            # 초고변동성 (밈코인, 신규코인)
+            multiplier = 1.6
+            volatility_level = "초고변동성"
+        
+        # 최종 콜백 비율
+        callback_rate = base_callback * multiplier
+        
+        # 안전 범위 제한
+        callback_rate = max(0.5, min(5.0, callback_rate))
+        
+        print(f"      📊 변동성 분석:")
+        print(f"         - ATR: {atr_pct:.2f}% ({volatility_level})")
+        print(f"         - 기본 콜백: {base_callback:.2f}%")
+        print(f"         - 변동성 조정: ×{multiplier}")
+        print(f"         - 최종 콜백: {callback_rate:.2f}%")
+        
+        return callback_rate, volatility_level
+        
+    except Exception as e:
+        print(f"      ⚠️ 변동성 계산 실패: {e}")
+        # 기본값 반환
+        return base_profit_pct / leverage, "중변동성"
+
 def set_trailing_stop_order(symbol: str, side: str, leverage: int, position_size: float) -> Optional[dict]:
     """
     🔧 트레일링 스탑 설정 (재시도 로직 포함)
@@ -251,24 +321,14 @@ def set_trailing_stop_order(symbol: str, side: str, leverage: int, position_size
     max_retries = 3
     base_wait_time = 2
     
-    # 최소 확보 수익률 계산
-    min_profit_pct = LIVE_TRADING_CONFIG.get("TRAILING_STOP_MIN_PROFIT_PCT", 7.0)
-    base_callback_rate = min_profit_pct / leverage
+    # 최소 확보 수익률
+    min_profit_pct = LIVE_TRADING_CONFIG.get("TRAILING_STOP_MIN_PROFIT_PCT", 12.0)
     
     print(f"   🎯 트레일링 스탑 설정 시작...")
     print(f"      - 목표 수익률: {min_profit_pct}%")
-    print(f"      - 기본 콜백: {base_callback_rate:.2f}%")
     
-    # 코인별 최소 콜백 비율 설정 (경험적 데이터)
-    coin_name = symbol.split('/')[0]
-    min_callback_rates = {
-        'BTC': 0.3, 'ETH': 0.3, 'BNB': 0.5, 'SOL': 0.5, 'XRP': 0.5,
-        'ADA': 0.8, 'DOGE': 1.0, 'MMT': 1.2, 'ALPACA': 1.0, 
-        'ASTER': 1.0, 'GIGGLE': 0.8
-    }
-    
-    min_callback = min_callback_rates.get(coin_name, 1.0)  # 기본값 1.0%
-    print(f"      - {coin_name} 최소 콜백: {min_callback}%")
+    # 🆕 변동성 기반 동적 콜백 계산
+    dynamic_callback, volatility_level = calculate_dynamic_callback_rate(symbol, leverage, min_profit_pct)
     
     for attempt in range(1, max_retries + 1):
         try:
@@ -280,18 +340,19 @@ def set_trailing_stop_order(symbol: str, side: str, leverage: int, position_size
                 print(f"      ⏱️ {wait_time}초 대기 후 재시도...")
                 time.sleep(wait_time)
             
-            # 콜백 비율 조정 (코인별 최소값 적용)
+            # 콜백 비율 조정 (재시도마다 약간씩 증가)
             if attempt == 1:
-                callback_rate = max(min_callback, base_callback_rate)
+                callback_rate = dynamic_callback
             elif attempt == 2:
-                callback_rate = max(min_callback + 0.3, base_callback_rate + 0.3)
+                callback_rate = dynamic_callback + 0.2
             else:
-                callback_rate = max(min_callback + 0.6, base_callback_rate + 0.6)
+                callback_rate = dynamic_callback + 0.4
             
             # 최대 5% 제한
             callback_rate = min(5.0, callback_rate)
             
-            print(f"      📏 콜백 비율: {callback_rate:.2f}% ({coin_name} 최적화)")
+            coin_name = symbol.split('/')[0]
+            print(f"      📏 콜백 비율: {callback_rate:.2f}% ({coin_name} {volatility_level})")
             
             # 포지션 정보 조회
             positions = exchange.fetch_positions([symbol])
@@ -370,7 +431,7 @@ def set_trailing_stop_order(symbol: str, side: str, leverage: int, position_size
             else:
                 print(f"   🚨 트레일링 스탑 설정 최종 실패!")
                 print(f"   ⚠️ 포지션이 보호되지 않음 - 수동 설정 필요")
-                print(f"   💡 권장 설정: {symbol} 트레일링 스탑 {base_callback_rate:.2f}% 콜백")
+                print(f"   💡 권장 설정: {symbol} 트레일링 스탑 {dynamic_callback:.2f}% 콜백 ({volatility_level})")
                 break
     
     return None
@@ -1630,12 +1691,17 @@ def main():
     
     # 🆕 트레일링 스탑 설정 출력
     if LIVE_TRADING_CONFIG.get("TRAILING_STOP_ENABLED", False):
-        min_profit = LIVE_TRADING_CONFIG.get("TRAILING_STOP_MIN_PROFIT_PCT", 8.0)
+        min_profit = LIVE_TRADING_CONFIG.get("TRAILING_STOP_MIN_PROFIT_PCT", 12.0)
         print(f"🎯 트레일링 스탑 (전체 관리):")
         print(f"   ✅ 활성화됨 (진입 즉시)")
         print(f"   ✅ 최소 확보 수익률: {min_profit}%")
-        print(f"   ✅ 콜백 비율: 최소 수익률 / 레버리지 (자동 계산)")
-        print(f"   📝 예시: 레버리지 10x → 콜백 {min_profit/10:.1f}%")
+        print(f"   ✅ 콜백 비율: 변동성에 따라 자동 조절")
+        print(f"   📝 예시:")
+        print(f"      - 초저변동성 (ATR<1.5%): 콜백 {min_profit/10*0.7:.1f}% (레버리지 10x)")
+        print(f"      - 저변동성 (ATR<3%): 콜백 {min_profit/10*0.85:.1f}%")
+        print(f"      - 중변동성 (ATR<5%): 콜백 {min_profit/10*1.0:.1f}%")
+        print(f"      - 고변동성 (ATR<8%): 콜백 {min_profit/10*1.3:.1f}%")
+        print(f"      - 초고변동성 (ATR>8%): 콜백 {min_profit/10*1.6:.1f}%")
         print(f"   🎯 익절과 손절을 모두 자동 처리")
         print(f"   🤖 AI는 모니터링만 수행 (응급상황시에만 개입)")
         print(f"{'='*80}\n")
