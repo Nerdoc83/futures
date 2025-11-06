@@ -14,36 +14,11 @@ AI Live Trading Bot v1.1 (실거래 버전 - 수정본)
   3. Position History 대신 계산된 PnL 사용
   4. AI 역할 변경 - 모니터링 전용 (트레일링 스탑이 익절+손절 담당)
 
-🛡️ 수동거래 보호 기능
-----------------------------------------------------------------------
-수동거래를 등록하면 AI가 자동으로 청산하지 않습니다.
-
-사용법:
-1. 수동거래 등록:
-   - register_manual_trade("BTC", "LONG", 50000, 0.1, 10)
-   - add_manual_long("BTC", 50000, 0.1, 10)  # 롱 포지션
-   - add_manual_short("ETH", 3000, 1.0, 5)   # 숏 포지션
-
-2. 기존 거래를 수동거래로 보호:
-   - protect_trade(12)  # 거래 ID 12를 AI 청산에서 보호
-
-3. 수동거래 보호 해제:
-   - unprotect_trade(12)  # 거래 ID 12의 보호 해제 (AI 청산 허용)
-
-4. 수동거래 현황 확인:
-   - display_manual_trades_status()
-   - list_manual_trades()
-   - check_trade_protection(거래_ID)  # 특정 거래 보호 상태 확인
-   - show_all_trades_protection()      # 모든 거래 보호 상태 확인
-
 ⚠️ 중요:
 - AI 포지션 관리가 10분마다 실행됩니다 (모니터링 목적)
 - 최소 보유시간 제약이 완전히 제거되었습니다
 - 진입 직후라도 시장 급변 시 즉시 청산 가능
 - 변동성에 따라 청산 임계값이 자동 조정됩니다
-- 수동거래는 여전히 AI 청산에서 보호됩니다
-- 수동거래는 DB 동기화에서도 보호됩니다
-- 수동으로 청산한 후에는 unprotect_trade(ID) 호출하여 DB 정리 필요
 - 🆕 트레일링 스탑이 익절과 손절을 모두 담당, AI는 모니터링만 수행
 ----------------------------------------------------------------------
 """
@@ -686,8 +661,7 @@ def init_database():
             pnl REAL,
             pnl_percent REAL,
             exit_reason TEXT,
-            status TEXT DEFAULT 'OPEN',
-            manual_trade BOOLEAN DEFAULT FALSE
+            status TEXT DEFAULT 'OPEN'
         )
     ''')
     
@@ -699,13 +673,21 @@ def init_database():
         # 이미 존재하면 무시
         pass
     
+    # 기존 manual_trade 컬럼이 있으면 모두 FALSE로 설정
+    try:
+        c.execute("UPDATE trades SET manual_trade = FALSE WHERE manual_trade = TRUE")
+        if c.rowcount > 0:
+            print(f"✅ {c.rowcount}개 거래의 수동거래 보호 해제됨")
+    except sqlite3.OperationalError:
+        # manual_trade 컬럼이 없으면 무시
+        pass
+    
     conn.commit()
     conn.close()
 
 def record_trade(coin_symbol: str, side: str, entry_price: float, quantity: float, 
                 leverage: int, position_size: float, ai_confidence: int, ai_reasoning: str,
-                stop_loss_price: float = 0, take_profit_price: float = 0, 
-                manual_trade: bool = False) -> int:
+                stop_loss_price: float = 0, take_profit_price: float = 0) -> int:
     """거래 기록"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -716,11 +698,11 @@ def record_trade(coin_symbol: str, side: str, entry_price: float, quantity: floa
         INSERT INTO trades (
             timestamp, coin_symbol, side, entry_price, quantity, leverage,
             position_size, ai_confidence, ai_reasoning, stop_loss_price,
-            take_profit_price, status, manual_trade
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
+            take_profit_price, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN')
     ''', (timestamp, coin_symbol, side, entry_price, quantity, leverage,
           position_size, ai_confidence, ai_reasoning, stop_loss_price,
-          take_profit_price, manual_trade))
+          take_profit_price))
     
     trade_id = c.lastrowid
     conn.commit()
@@ -752,7 +734,7 @@ def get_all_open_trades() -> List[dict]:
     c.execute('''
         SELECT id, timestamp, coin_symbol, side, entry_price, quantity, 
                leverage, position_size, ai_confidence, ai_reasoning,
-               stop_loss_price, take_profit_price, manual_trade
+               stop_loss_price, take_profit_price
         FROM trades WHERE status = 'OPEN'
         ORDER BY timestamp DESC
     ''')
@@ -774,8 +756,7 @@ def get_all_open_trades() -> List[dict]:
             'ai_confidence': row[8],
             'ai_reasoning': row[9],
             'stop_loss_price': row[10],
-            'take_profit_price': row[11],
-            'manual_trade': bool(row[12])
+            'take_profit_price': row[11]
         })
     
     return trades
@@ -836,12 +817,12 @@ def execute_live_trade(coin_data: dict, ai_decision: dict, available_balance: fl
         # 변동성 기반 조정
         volatility = abs(coin_data.get('change', 0))
         if volatility > LIVE_TRADING_CONFIG.get('HIGH_VOLATILITY_THRESHOLD', 5.0):
-            volatility_multiplier = LIVE_TRADING_CONFIG.get('HIGH_VOLATILITY_MULTIPLIER', 1.0)
+            volatility_multiplier = LIVE_TRADING_CONFIG.get('HIGH_VOLATILITY_MULTIPLIER', 0.8)
         else:
-            volatility_multiplier = LIVE_TRADING_CONFIG.get('LOW_VOLATILITY_MULTIPLIER', 1.5)
+            volatility_multiplier = LIVE_TRADING_CONFIG.get('LOW_VOLATILITY_MULTIPLIER', 1.2)
         
-        # 신뢰도 기반 조정 (70-95% → 70-100%)
-        confidence_multiplier = 0.5 + (confidence - 70) / 25 * 0.3
+        # 신뢰도 기반 조정 (70-95% → 50-100%)
+        confidence_multiplier = 0.5 + (confidence - 70) / 25 * 0.5
         confidence_multiplier = max(0.5, min(1.0, confidence_multiplier))
         
         # 최종 포지션 크기
@@ -897,8 +878,7 @@ def execute_live_trade(coin_data: dict, ai_decision: dict, available_balance: fl
             leverage=leverage,
             position_size=position_size,
             ai_confidence=confidence,
-            ai_reasoning=ai_decision.get('reasoning', 'AI 추천'),
-            manual_trade=False
+            ai_reasoning=ai_decision.get('reasoning', 'AI 추천')
         )
         
         print(f"   📝 DB 기록: 거래 ID {trade_id}")
@@ -947,10 +927,6 @@ def manage_live_positions():
     live_position_map = {pos['symbol']: pos for pos in live_positions}
     
     for trade in open_trades:
-        # 수동거래는 스킵
-        if trade.get('manual_trade', False):
-            continue
-        
         trade_id = trade['id']
         coin = trade['coin_symbol']
         side = trade['side']
@@ -1072,11 +1048,6 @@ def sync_db_with_binance() -> int:
     
     # 1. 바이낸스에 없는 DB 포지션 -> 청산 처리 (이미 청산됨)
     for trade in open_trades:
-        # 수동거래는 동기화에서 보호
-        if trade.get('manual_trade', False):
-            print(f"   🛡️ {trade['coin_symbol']} (ID: {trade['id']}): 수동거래 보호 - 동기화 스킵")
-            continue
-        
         symbol = f"{trade['coin_symbol']}/USDT:USDT"
         
         if symbol not in live_position_map:
@@ -1160,7 +1131,7 @@ def sync_db_with_binance() -> int:
             print(f"      - 레버리지: {leverage}x")
             print(f"      - 포지션 크기: ${notional:,.2f}")
             
-            # DB에 수동거래로 등록
+            # DB에 거래로 등록
             try:
                 trade_id = record_trade(
                     coin_symbol=coin,
@@ -1170,13 +1141,12 @@ def sync_db_with_binance() -> int:
                     leverage=leverage,
                     position_size=notional / leverage,
                     ai_confidence=0,
-                    ai_reasoning="동기화: 바이낸스에서 감지된 수동거래",
+                    ai_reasoning="동기화: 바이낸스에서 감지된 거래",
                     stop_loss_price=0,
-                    take_profit_price=0,
-                    manual_trade=True  # 수동거래로 표시
+                    take_profit_price=0
                 )
                 
-                print(f"      ✅ DB에 수동거래로 등록됨 (ID: {trade_id})")
+                print(f"      ✅ DB에 거래로 등록됨 (ID: {trade_id})")
                 synced_count += 1
                 
             except Exception as e:
@@ -1190,130 +1160,6 @@ def sync_db_with_binance() -> int:
     print(f"{'='*80}\n")
     
     return synced_count
-
-# ===== 수동거래 관리 =====
-
-def register_manual_trade(coin: str, side: str, entry_price: float, quantity: float, leverage: int) -> int:
-    """수동거래 등록"""
-    position_size = entry_price * quantity / leverage
-    
-    trade_id = record_trade(
-        coin_symbol=coin,
-        side=side,
-        entry_price=entry_price,
-        quantity=quantity,
-        leverage=leverage,
-        position_size=position_size,
-        ai_confidence=0,
-        ai_reasoning="수동거래",
-        stop_loss_price=0,
-        take_profit_price=0,
-        manual_trade=True
-    )
-    
-    print(f"✅ 수동거래 등록: {coin} {side} (ID: {trade_id})")
-    return trade_id
-
-def add_manual_long(coin: str, entry_price: float, quantity: float, leverage: int) -> int:
-    """수동 롱 포지션 등록"""
-    return register_manual_trade(coin, "LONG", entry_price, quantity, leverage)
-
-def add_manual_short(coin: str, entry_price: float, quantity: float, leverage: int) -> int:
-    """수동 숏 포지션 등록"""
-    return register_manual_trade(coin, "SHORT", entry_price, quantity, leverage)
-
-def protect_trade(trade_id: int):
-    """기존 거래를 수동거래로 보호"""
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    
-    c.execute("UPDATE trades SET manual_trade = TRUE WHERE id = ?", (trade_id,))
-    
-    if c.rowcount > 0:
-        print(f"✅ 거래 ID {trade_id}를 AI 청산에서 보호했습니다")
-    else:
-        print(f"❌ 거래 ID {trade_id}를 찾을 수 없습니다")
-    
-    conn.commit()
-    conn.close()
-
-def unprotect_trade(trade_id: int):
-    """거래 보호 해제 (AI 청산 허용)"""
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    
-    c.execute("UPDATE trades SET manual_trade = FALSE WHERE id = ?", (trade_id,))
-    
-    if c.rowcount > 0:
-        print(f"✅ 거래 ID {trade_id}의 보호를 해제했습니다 (AI 청산 허용)")
-    else:
-        print(f"❌ 거래 ID {trade_id}를 찾을 수 없습니다")
-    
-    conn.commit()
-    conn.close()
-
-def display_manual_trades_status():
-    """수동거래 현황 표시"""
-    open_trades = get_all_open_trades()
-    manual_trades = [t for t in open_trades if t.get('manual_trade', False)]
-    
-    if not manual_trades:
-        print("📊 등록된 수동거래 없음")
-        return
-    
-    print(f"\n{'='*80}")
-    print(f"🛡️ 수동거래 현황 ({len(manual_trades)}개)")
-    print(f"{'='*80}")
-    
-    for trade in manual_trades:
-        print(f"   ID {trade['id']}: {trade['coin_symbol']} {trade['side']} (${trade['entry_price']:,.2f})")
-    
-    print(f"{'='*80}\n")
-
-def list_manual_trades():
-    """수동거래 목록"""
-    display_manual_trades_status()
-
-def check_trade_protection(trade_id: int):
-    """특정 거래 보호 상태 확인"""
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    
-    c.execute("SELECT coin_symbol, side, manual_trade, status FROM trades WHERE id = ?", (trade_id,))
-    
-    row = c.fetchone()
-    conn.close()
-    
-    if not row:
-        print(f"❌ 거래 ID {trade_id}를 찾을 수 없습니다")
-        return
-    
-    coin, side, manual_trade, status = row
-    protection = "🛡️ 보호됨 (AI 청산 불가)" if manual_trade else "⚠️ 보호 안됨 (AI 청산 가능)"
-    
-    print(f"\n거래 ID {trade_id}:")
-    print(f"   - 코인: {coin}")
-    print(f"   - 방향: {side}")
-    print(f"   - 상태: {status}")
-    print(f"   - 보호: {protection}\n")
-
-def show_all_trades_protection():
-    """모든 거래 보호 상태 표시"""
-    open_trades = get_all_open_trades()
-    
-    if not open_trades:
-        print("📊 오픈 거래 없음")
-        return
-    
-    print(f"\n{'='*80}")
-    print(f"📊 전체 거래 보호 상태 ({len(open_trades)}개)")
-    print(f"{'='*80}")
-    
-    for trade in open_trades:
-        protection = "🛡️ 보호됨" if trade.get('manual_trade', False) else "⚠️ AI 관리"
-        print(f"   ID {trade['id']}: {trade['coin_symbol']} ({trade['side']}) - {protection}")
-    
-    print(f"{'='*80}\n")
 
 # ===== 성과 분석 =====
 
