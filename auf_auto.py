@@ -147,7 +147,7 @@ LIVE_TRADING_CONFIG = {
     "MAX_CONCURRENT_POSITIONS": 5,  # 최대 동시 포지션 (실제 진입 제한)
     "MIN_CAPITAL_THRESHOLD": 100.0,  # 최소 잔고 (USDT)
     "AI_ANALYSIS_INTERVAL": 60,  # 신규 진입 분석 (1분마다)
-    "PERFORMANCE_REVIEW_INTERVAL": 600,  # AI 성과 리뷰 (10분)
+    "PERFORMANCE_REVIEW_INTERVAL": 1800,  # AI 성과 리뷰 (30분)
     "POSITION_CHECK_INTERVAL": 600,  # 🔧 10분마다 AI 포지션 평가 (실시간 시장 대응)
     
     # 🆕 트레일링 스탑 설정 (처음부터 활성화)
@@ -161,8 +161,8 @@ LIVE_TRADING_CONFIG = {
     "DYNAMIC_EQUAL_SPLIT": True,  # 동적 균등 분할 활성화
     "VOLATILITY_BASED_SIZING": True,  # 변동성 기반 포지션 크기 조절
     "HIGH_VOLATILITY_THRESHOLD": 5.0,  # 5% 이상이면 고변동성
-    "LOW_VOLATILITY_MULTIPLIER": 1.2,  # 저변동성 = 1.2배 투자
-    "HIGH_VOLATILITY_MULTIPLIER": 0.8,  # 고변동성 = 0.8배 투자
+    "LOW_VOLATILITY_MULTIPLIER": 1.4,  # 저변동성 = 1.2배 투자
+    "HIGH_VOLATILITY_MULTIPLIER": 1.0,  # 고변동성 = 0.8배 투자
     
     # 🔧 거래 수수료 (바이낸스 선물 일반회원)
     "MAKER_FEE": 0.02,  # 0.02%
