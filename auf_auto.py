@@ -183,6 +183,11 @@ LIVE_TRADING_CONFIG = {
     "LOW_VOLATILITY_MULTIPLIER": 1.1,   # 🔧 저변동성 = 1.1배 투자 (완화)
     "HIGH_VOLATILITY_MULTIPLIER": 0.9,  # 🔧 고변동성 = 0.9배 투자 (완화)
     
+    # 🆕 초고변동성 필터 (트레일링 스탑 최적화)
+    "EXTREME_VOLATILITY_FILTER": True,   # 초고변동성 코인 필터링 활성화
+    "MAX_VOLATILITY_THRESHOLD": 15.0,    # ATR 15% 이상은 진입 차단
+    "MAX_24H_CHANGE": 50.0,              # 24시간 변동 50% 이상은 진입 차단
+    
     # 🔧 거래 수수료 (바이낸스 선물 일반회원)
     "MAKER_FEE": 0.02,  # 0.02%
     "TAKER_FEE": 0.05,  # 0.05%
@@ -299,14 +304,10 @@ def calculate_dynamic_callback_rate(symbol: str, leverage: int, base_profit_pct:
             # 중변동성 (대부분의 알트코인)
             multiplier = 0.8
             volatility_level = "중변동성"
-        elif atr_pct < 8.0:
+        else:
             # 고변동성 (변동성 큰 알트코인)
             multiplier = 1.0
             volatility_level = "고변동성"
-        else:
-            # 초고변동성 (밈코인, 신규코인)
-            multiplier = 1.3
-            volatility_level = "초고변동성"
         
         # 최종 콜백 비율
         callback_rate = base_callback * multiplier
@@ -1122,6 +1123,57 @@ def fetch_futures_market_indicators(symbol: str) -> Dict:
     
     return indicators
 
+def check_extreme_volatility(symbol: str, coin_data: dict) -> Tuple[bool, str]:
+    """
+    🆕 초고변동성 코인 필터 (트레일링 스탑 최적화)
+    
+    Args:
+        symbol: 거래 심볼
+        coin_data: 코인 기본 정보 (24h 변동 포함)
+    
+    Returns:
+        (is_extreme, reason)
+        - is_extreme: True면 진입 차단
+        - reason: 차단 사유
+    """
+    if not LIVE_TRADING_CONFIG.get("EXTREME_VOLATILITY_FILTER", False):
+        return False, "필터 비활성화"
+    
+    try:
+        # 1. 24시간 변동률 체크
+        change_24h = abs(coin_data.get('change', 0))
+        max_24h_change = LIVE_TRADING_CONFIG.get("MAX_24H_CHANGE", 30.0)
+        
+        if change_24h > max_24h_change:
+            return True, f"24h 변동 {change_24h:.1f}% (임계값: {max_24h_change}%)"
+        
+        # 2. ATR 기반 변동성 체크
+        try:
+            ohlcv = exchange.fetch_ohlcv(symbol, '1h', limit=24)
+            if len(ohlcv) >= 14:
+                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                
+                # ATR 계산
+                atr_result = ta.atr(df['high'], df['low'], df['close'], length=14)
+                if atr_result is not None and len(atr_result) > 0:
+                    atr = float(atr_result.iloc[-1])
+                    last_close = float(df['close'].iloc[-1])
+                    
+                    if last_close > 0:
+                        atr_pct = (atr / last_close) * 100
+                        max_atr = LIVE_TRADING_CONFIG.get("MAX_VOLATILITY_THRESHOLD", 10.0)
+                        
+                        if atr_pct > max_atr:
+                            return True, f"ATR {atr_pct:.1f}% (임계값: {max_atr}%)"
+        except:
+            pass  # ATR 계산 실패 시 24h 변동만으로 판단
+        
+        return False, "정상 변동성"
+        
+    except Exception as e:
+        # 오류 시 안전하게 통과
+        return False, f"체크 오류: {e}"
+
 def fetch_comprehensive_market_data(symbol: str) -> Dict:
     """포괄적 시장 데이터 수집 (기술적 지표 + 선물 특화 지표)"""
     try:
@@ -1896,9 +1948,10 @@ def execute_live_trade(coin_data: dict, ai_decision: dict, available_balance: fl
             
             trailing_order = set_trailing_stop_order(symbol, side.upper(), leverage, position_size)
             if trailing_order:
-                print(f"   ✅트레일링 스탑 활성화")
+                print(f"   ✅ 트레일링 스탑 활성화")
             else:
                 print(f"   ⚠️ 트레일링 스탑 설정 실패")
+
         
         return True
         
@@ -2508,6 +2561,14 @@ def main():
                         
                         try:
                             symbol = f"{coin}/USDT:USDT"
+                            
+                            # 🆕 초고변동성 필터 (먼저 체크)
+                            is_extreme, volatility_reason = check_extreme_volatility(symbol, coin_data)
+                            if is_extreme:
+                                print(f"   🚫 초고변동성 차단: {volatility_reason}")
+                                print(f"   ⏭️ 건너뜀 (트레일링 스탑에 부적합)")
+                                continue
+                            
                             print(f"   🔍 시장 데이터 수집 중...")
                             market_data = fetch_comprehensive_market_data(symbol)
                             
