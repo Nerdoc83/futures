@@ -588,7 +588,11 @@ def close_position_and_get_pnl(symbol: str, side: str, trade_info: dict) -> Tupl
             params={'reduceOnly': True}
         )
         
+        # 🔧 실제 청산가 조회
+        actual_exit_price = float(order.get('average', order.get('price', current_price)))
+        
         print(f"      ✅ 청산 주문 체결 (ID: {order.get('id', 'N/A')})")
+        print(f"      📍 실제 청산가: ${actual_exit_price:,.4f}")
         
         # 6. 청산 확인 (최대 3초 대기)
         close_confirmed = False
@@ -616,18 +620,24 @@ def close_position_and_get_pnl(symbol: str, side: str, trade_info: dict) -> Tupl
             trade_info
         )
         
-        # 8. 청산가 역산 (PnL 기반)
-        entry_price = trade_info['entry_price']
-        leverage = trade_info['leverage']
-        
-        if side.upper() == 'LONG':
-            price_move_pct = pnl_pct / leverage
-            exit_price = entry_price * (1 + price_move_pct / 100)
+        # 8. 🔧 실제 청산가 우선, PnL 기반 역산은 백업용
+        if actual_exit_price > 0 and abs(actual_exit_price - trade_info['entry_price']) / trade_info['entry_price'] < 0.5:
+            # 청산가가 정상 범위 내면 실제 체결가 사용
+            exit_price = actual_exit_price
+            print(f"      ✅ 실제 체결 청산가 사용: ${exit_price:,.4f}")
         else:
-            price_move_pct = pnl_pct / leverage
-            exit_price = entry_price * (1 - price_move_pct / 100)
-        
-        print(f"      📍 청산가: ${exit_price:,.4f} (역산)")
+            # 청산가가 이상하면 PnL 기반 역산
+            entry_price = trade_info['entry_price']
+            leverage = trade_info['leverage']
+            
+            if side.upper() == 'LONG':
+                price_move_pct = pnl_pct / leverage
+                exit_price = entry_price * (1 + price_move_pct / 100)
+            else:
+                price_move_pct = pnl_pct / leverage
+                exit_price = entry_price * (1 - price_move_pct / 100)
+            
+            print(f"      📍 PnL 기반 역산 청산가: ${exit_price:,.4f}")
         
         return True, exit_price, realized_pnl, pnl_pct
         
@@ -1844,7 +1854,7 @@ def execute_live_trade(coin_data: dict, ai_decision: dict, available_balance: fl
             print(f"   ⚙️ 마진 모드: Isolated")
         
         # 주문 실행
-        current_price = coin_data['price']
+        current_price = coin_data['price']  # 참고용
         quantity = position_size * leverage / current_price
         
         if side.upper() == 'LONG':
@@ -1852,19 +1862,25 @@ def execute_live_trade(coin_data: dict, ai_decision: dict, available_balance: fl
         else:
             order = exchange.create_market_sell_order(symbol, quantity)
         
+        # 🔧 실제 체결가 조회 (중요!)
+        actual_entry_price = float(order.get('average', order.get('price', current_price)))
+        actual_quantity = float(order.get('filled', quantity))
+        
         print(f"   ✅ 주문 체결:")
         print(f"      - 심볼: {symbol}")
         print(f"      - 방향: {side.upper()}")
-        print(f"      - 수량: {quantity:.6f}")
-        print(f"      - 진입가: ${current_price:,.4f}")
+        print(f"      - 수량: {actual_quantity:.6f}")
+        print(f"      - 실제 진입가: ${actual_entry_price:,.4f}")
+        if abs(actual_entry_price - current_price) / current_price > 0.001:  # 0.1% 이상 차이
+            print(f"      ⚠️ 슬리피지: ${current_price:,.4f} → ${actual_entry_price:,.4f}")
         print(f"      - 주문 ID: {order.get('id', 'N/A')}")
         
-        # DB 기록
+        # DB 기록 (실제 체결가 사용!)
         trade_id = record_trade(
             coin_symbol=coin,
             side=side.upper(),
-            entry_price=current_price,
-            quantity=quantity,
+            entry_price=actual_entry_price,  # 🔧 실제 체결가
+            quantity=actual_quantity,         # 🔧 실제 체결 수량
             leverage=leverage,
             position_size=position_size,
             ai_confidence=confidence,
@@ -2060,20 +2076,22 @@ def sync_db_with_binance() -> int:
     """
     🔧 개선된 DB-바이낸스 동기화 (실제 realized PnL 사용)
     
-    변경사항:
-    1. 바이낸스 Income History에서 실제 realized PnL 조회
-    2. 조회 실패시에만 가격 기반 계산 (수수료 반영)
-    3. Position History를 통한 대체 조회 방법 추가
+    변경사항 v2:
+    1. ✅ 심볼별 그룹화 - 같은 심볼의 여러 청산 처리
+    2. ✅ 한 번의 API 호출로 모든 PnL 조회
+    3. ✅ 시간순 매칭으로 정확한 PnL 할당
     
     로직:
-    1. 바이낸스에 없는 DB 포지션 -> 청산 처리 (이미 청산됨)
-    2. DB에 없는 바이낸스 포지션 -> DB에 추가 (수동거래로 등록)
+    1. 바이낸스에 없는 DB 포지션 -> 심볼별 그룹화
+    2. 심볼별로 모든 PnL 조회 (한 번만)
+    3. 각 trade에 순서대로 매칭하여 청산 처리
+    4. DB에 없는 바이낸스 포지션 -> DB에 추가
     
     Returns:
         동기화된 거래 수
     """
     print(f"\n{'='*80}")
-    print(f"🔄 DB-바이낸스 동기화 (실제 PnL 우선)")
+    print(f"🔄 DB-바이낸스 동기화 (다중 청산 대응)")
     print(f"{'='*80}")
     
     synced_count = 0
@@ -2088,120 +2106,145 @@ def sync_db_with_binance() -> int:
     print(f"   📊 DB 오픈 거래: {len(open_trades)}개")
     print(f"   📊 바이낸스 포지션: {len(live_positions)}개")
     
-    # 1. 바이낸스에 없는 DB 포지션 -> 청산 처리 (이미 청산됨)
+    # 🆕 1. 청산된 포지션을 심볼별로 그룹화
+    closed_trades_by_symbol = {}
     for trade in open_trades:
         symbol = f"{trade['coin_symbol']}/USDT:USDT"
         
         if symbol not in live_position_map:
-            trade_id = trade['id']
-            coin = trade['coin_symbol']
-            side = trade['side']
-            entry_price = trade['entry_price']
-            entry_time = trade.get('entry_time', None)
+            # 청산된 포지션
+            if symbol not in closed_trades_by_symbol:
+                closed_trades_by_symbol[symbol] = []
+            closed_trades_by_symbol[symbol].append(trade)
+    
+    if not closed_trades_by_symbol:
+        print(f"   ℹ️ 청산된 포지션 없음")
+    else:
+        print(f"\n   🔍 청산 감지된 심볼: {len(closed_trades_by_symbol)}개")
+        for sym, trades in closed_trades_by_symbol.items():
+            coin = sym.split('/')[0]
+            print(f"      - {coin}: {len(trades)}개 포지션")
+    
+    # 🆕 2. 심볼별로 PnL 조회 및 매칭
+    for symbol, trades in closed_trades_by_symbol.items():
+        coin = symbol.split('/')[0]
+        trade_count = len(trades)
+        
+        print(f"\n   🔄 {coin} 동기화 ({trade_count}개 포지션)")
+        
+        try:
+            # 🎯 핵심: 해당 심볼의 모든 PnL을 한 번에 조회
+            binance_symbol = symbol.replace('/USDT:USDT', 'USDT')
             
-            print(f"   ⚠️ {coin} (ID: {trade_id}): 바이낸스에 포지션 없음 - 청산 확인")
-            
-            try:
-                # 🆕 방법 1: Income History에서 실제 realized PnL 조회
-                start_time = None
-                if entry_time:
-                    entry_dt = parse_db_timestamp(entry_time)
+            # 가장 오래된 trade의 진입 시간부터 조회
+            oldest_entry_time = None
+            for trade in trades:
+                entry_time_str = trade.get('entry_time', trade.get('timestamp'))
+                if entry_time_str:
+                    entry_dt = parse_db_timestamp(entry_time_str)
                     if entry_dt:
-                        start_time = int(entry_dt.timestamp() * 1000)
-                
-                pnl_data = get_realized_pnl_from_binance(symbol, start_time)
-                
-                if pnl_data and pnl_data['realized_pnl'] != 0:
-                    # ✅ 실제 realized PnL 발견!
-                    realized_pnl = pnl_data['realized_pnl']
-                    commission = pnl_data['commission']
-                    
-                    # 수익률 계산
-                    pnl_pct = (realized_pnl / trade['position_size']) * 100
-                    
-                    # 청산가 역산 (근사값)
-                    if side.upper() == 'LONG':
-                        price_move_pct = pnl_pct / trade['leverage']
-                        exit_price_estimated = entry_price * (1 + price_move_pct / 100)
-                    else:
-                        price_move_pct = pnl_pct / trade['leverage']
-                        exit_price_estimated = entry_price * (1 - price_move_pct / 100)
-                    
-                    print(f"      ✅ 바이낸스 실제 PnL: ${realized_pnl:+.2f} ({pnl_pct:+.2f}%)")
-                    print(f"      💰 수수료: ${commission:.4f}")
-                    print(f"      📍 추정 청산가: ${exit_price_estimated:,.4f}")
-                    
-                else:
-                    # 🆕 방법 2: Position History/My Trades에서 조회 시도
-                    print(f"      🔍 거래 내역에서 조회 시도...")
-                    history_pnl = get_position_history_pnl(symbol, side)
-                    
-                    if history_pnl is not None and history_pnl != 0:
-                        realized_pnl = history_pnl
+                        entry_ts = int(entry_dt.timestamp() * 1000)
+                        if oldest_entry_time is None or entry_ts < oldest_entry_time:
+                            oldest_entry_time = entry_ts
+            
+            # userTrades API로 모든 청산 거래 조회
+            params = {
+                'symbol': binance_symbol,
+                'limit': 100
+            }
+            
+            if oldest_entry_time:
+                params['startTime'] = oldest_entry_time
+            
+            print(f"      📊 API 조회 중...")
+            user_trades = exchange.fapiprivate_get_usertrades(params)
+            
+            # reduceOnly 거래만 필터링 (청산 거래)
+            close_trades = []
+            for t in user_trades:
+                if t.get('reduceOnly') or t.get('positionSide') == 'BOTH':
+                    realized_pnl = float(t.get('realizedPnl', 0))
+                    if realized_pnl != 0:
+                        close_trades.append({
+                            'time': int(t['time']),
+                            'realized_pnl': realized_pnl,
+                            'commission': abs(float(t.get('commission', 0))),
+                            'price': float(t['price']),
+                            'qty': float(t['qty'])
+                        })
+            
+            # 시간순 정렬 (오래된 것부터)
+            close_trades.sort(key=lambda x: x['time'])
+            
+            print(f"      ✅ 청산 거래 {len(close_trades)}개 발견")
+            
+            if len(close_trades) >= trade_count:
+                # 🎯 충분한 PnL 데이터가 있음 - 매칭
+                for i, trade in enumerate(trades):
+                    if i < len(close_trades):
+                        pnl_data = close_trades[i]
+                        
+                        trade_id = trade['id']
+                        realized_pnl = pnl_data['realized_pnl']
+                        commission = pnl_data['commission']
+                        exit_price = pnl_data['price']
+                        
+                        # 수익률 계산
                         pnl_pct = (realized_pnl / trade['position_size']) * 100
                         
-                        # 청산가 역산
-                        if side.upper() == 'LONG':
-                            price_move_pct = pnl_pct / trade['leverage']
-                            exit_price_estimated = entry_price * (1 + price_move_pct / 100)
-                        else:
-                            price_move_pct = pnl_pct / trade['leverage']
-                            exit_price_estimated = entry_price * (1 - price_move_pct / 100)
+                        print(f"      ✅ ID {trade_id}: PnL ${realized_pnl:+.2f} ({pnl_pct:+.2f}%), 청산가 ${exit_price:,.4f}")
                         
-                        print(f"      ✅ 거래 내역 PnL: ${realized_pnl:+.2f} ({pnl_pct:+.2f}%)")
-                        print(f"      📍 추정 청산가: ${exit_price_estimated:,.4f}")
-                    
-                    else:
-                        # 방법 3: 현재가 기반 계산 (수수료 반영)
-                        print(f"      ⚠️ 실제 PnL 조회 실패 - 추정 계산 사용")
-                        ticker = exchange.fetch_ticker(symbol)
-                        exit_price_estimated = float(ticker['last'])
-                        
-                        # 🆕 수수료 반영 계산
-                        realized_pnl, pnl_pct = calculate_pnl_from_price(
-                            entry_price, exit_price_estimated, 
-                            trade['position_size'], side, trade['leverage']
+                        # DB 업데이트
+                        update_trade_exit(
+                            trade_id=trade_id,
+                            exit_price=exit_price,
+                            pnl=realized_pnl,
+                            pnl_percent=pnl_pct,
+                            reason="동기화: 트레일링 스탑 청산 (바이낸스 실제 PnL)"
                         )
                         
-                        print(f"      📊 추정 PnL (수수료 포함): ${realized_pnl:+.2f} ({pnl_pct:+.2f}%)")
-                        print(f"      ⚠️ 주의: 실제 체결가와 다를 수 있음")
+                        synced_count += 1
+                    else:
+                        print(f"      ⚠️ ID {trade['id']}: PnL 데이터 부족")
+            
+            else:
+                # ⚠️ PnL 데이터 부족 - 추정 계산 사용
+                print(f"      ⚠️ PnL 데이터 부족 ({len(close_trades)}/{trade_count}) - 추정 계산 사용")
                 
-                # 🔧 안전한 DB 업데이트 (exit_reason 컬럼 확인)
-                conn = sqlite3.connect(DB_FILE)
-                c = conn.cursor()
-                
-                # exit_reason 컬럼 존재 확인
-                c.execute("PRAGMA table_info(trades)")
-                columns = [column[1] for column in c.fetchall()]
-                
-                if 'exit_reason' in columns:
-                    c.execute('''
-                        UPDATE trades SET 
-                            exit_price = ?, pnl = ?, pnl_percent = ?, 
-                            exit_reason = ?, status = 'CLOSED'
-                        WHERE id = ?
-                    ''', (exit_price_estimated, realized_pnl, pnl_pct, 
-                         "동기화: 트레일링 스탑 청산 (바이낸스 PnL)", trade_id))
-                else:
-                    c.execute('''
-                        UPDATE trades SET 
-                            exit_price = ?, pnl = ?, pnl_percent = ?, 
-                            status = 'CLOSED'
-                        WHERE id = ?
-                    ''', (exit_price_estimated, realized_pnl, pnl_pct, trade_id))
-                
-                conn.commit()
-                conn.close()
-                
-                print(f"      ✅ DB 업데이트 완료")
-                synced_count += 1
-                
-            except Exception as e:
-                print(f"      ❌ 동기화 실패: {e}")
-                import traceback
-                traceback.print_exc()
+                for trade in trades:
+                    trade_id = trade['id']
+                    entry_price = trade['entry_price']
+                    side = trade['side']
+                    
+                    # 현재가로 추정
+                    ticker = exchange.fetch_ticker(symbol)
+                    exit_price = float(ticker['last'])
+                    
+                    # 수수료 반영 계산
+                    realized_pnl, pnl_pct = calculate_pnl_from_price(
+                        entry_price, exit_price,
+                        trade['position_size'], side, trade['leverage']
+                    )
+                    
+                    print(f"      📊 ID {trade_id}: 추정 PnL ${realized_pnl:+.2f} ({pnl_pct:+.2f}%)")
+                    
+                    # DB 업데이트
+                    update_trade_exit(
+                        trade_id=trade_id,
+                        exit_price=exit_price,
+                        pnl=realized_pnl,
+                        pnl_percent=pnl_pct,
+                        reason="동기화: 추정 계산 (PnL 데이터 부족)"
+                    )
+                    
+                    synced_count += 1
+                    
+        except Exception as e:
+            print(f"      ❌ {coin} 동기화 실패: {e}")
+            import traceback
+            traceback.print_exc()
     
-    # 2. 바이낸스에는 있는데 DB에 없는 포지션 -> DB에 추가 (수동거래)
+    # 3. 바이낸스에는 있는데 DB에 없는 포지션 -> DB에 추가 (수동거래)
     db_symbols = {f"{t['coin_symbol']}/USDT:USDT" for t in open_trades}
     
     for symbol, position in live_position_map.items():
