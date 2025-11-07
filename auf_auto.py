@@ -175,7 +175,7 @@ LIVE_TRADING_CONFIG = {
     
     # 🔧 자금 관리 설정 (공격적 균등 분할)
     "TARGET_TOTAL_USAGE_PCT": 100,  # 🆕 목표: 전체 자금의 100% 사용
-    "MAX_POSITION_SIZE_PCT": 40,   # 🔧 단일 포지션 최대 40% (안전장치)
+    "MAX_POSITION_SIZE_PCT": 100,   # 🔧 단일 포지션 최대 100% (안전장치)
     "MIN_POSITION_SIZE_PCT": 15,   # 🔧 최소 15% (너무 작은 포지션 방지)
     "DYNAMIC_EQUAL_SPLIT": True,   # 동적 균등 분할 활성화
     "VOLATILITY_BASED_SIZING": True,  # 변동성 기반 포지션 크기 조절 (완화)
@@ -1623,10 +1623,17 @@ def execute_live_trade(coin_data: dict, ai_decision: dict, available_balance: fl
         confidence = ai_decision['confidence']
         leverage = ai_decision.get('leverage', 10)
         
-        # 🔧 개선된 동적 균등 분할 (목표: 전체 80% 사용)
+        # 🔧 개선된 동적 균등 분할 (목표: 설정된 전체 자금 사용률)
         max_positions = LIVE_TRADING_CONFIG['MAX_CONCURRENT_POSITIONS']
-        target_total_usage = 80  # 전체 자금의 80% 목표
-        base_position_pct = target_total_usage / max_positions  # 16%씩 분할 (5개 = 80%)
+        target_total_usage = LIVE_TRADING_CONFIG['TARGET_TOTAL_USAGE_PCT']  # 설정값 사용
+        
+        # 🆕 동적 분할: 현재 오픈 포지션 수를 고려하여 남은 슬롯에 균등 분할
+        open_trades = get_all_open_trades()
+        current_positions = len(open_trades)
+        remaining_slots = max(1, max_positions - current_positions)  # 최소 1개
+        
+        # 남은 슬롯에 균등 분할 (예: 5개 중 3개 진입 → 남은 2슬롯에 나누어 투자)
+        base_position_pct = target_total_usage / remaining_slots
         
         # 변동성 기반 조정 (완화)
         volatility = abs(coin_data.get('change', 0))
@@ -1653,7 +1660,9 @@ def execute_live_trade(coin_data: dict, ai_decision: dict, available_balance: fl
         
         print(f"   💰 포지션 크기 계산:")
         print(f"      - 목표 총 사용률: {target_total_usage}%")
-        print(f"      - 기본: {base_position_pct:.1f}%")
+        print(f"      - 현재 포지션: {current_positions}/{max_positions}개")
+        print(f"      - 남은 슬롯: {remaining_slots}개")
+        print(f"      - 기본 (동적 분할): {base_position_pct:.1f}% ({target_total_usage}% ÷ {remaining_slots}슬롯)")
         print(f"      - 변동성 조정: ×{volatility_multiplier:.2f} ({volatility:.1f}%)")
         print(f"      - 신뢰도 조정: ×{confidence_multiplier:.2f} ({confidence}%)")
         print(f"      - 최종: {position_pct:.1f}% = ${position_size:,.2f}")
