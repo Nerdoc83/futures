@@ -174,9 +174,9 @@ LIVE_TRADING_CONFIG = {
     "TREND_REVERSAL_MIN_SIGNALS": 3,            # 최소 신호 개수 (3개 이상)
     
     # 🔧 자금 관리 설정 (공격적 균등 분할)
-    "TARGET_TOTAL_USAGE_PCT": 80,  # 🆕 목표: 전체 자금의 80% 사용
+    "TARGET_TOTAL_USAGE_PCT": 100,  # 🆕 목표: 전체 자금의 100% 사용
     "MAX_POSITION_SIZE_PCT": 25,   # 🔧 단일 포지션 최대 25% (안전장치)
-    "MIN_POSITION_SIZE_PCT": 10,   # 🔧 최소 10% (너무 작은 포지션 방지)
+    "MIN_POSITION_SIZE_PCT": 15,   # 🔧 최소 15% (너무 작은 포지션 방지)
     "DYNAMIC_EQUAL_SPLIT": True,   # 동적 균등 분할 활성화
     "VOLATILITY_BASED_SIZING": True,  # 변동성 기반 포지션 크기 조절 (완화)
     "HIGH_VOLATILITY_THRESHOLD": 5.0,  # 5% 이상이면 고변동성
@@ -289,23 +289,23 @@ def calculate_dynamic_callback_rate(symbol: str, leverage: int, base_profit_pct:
         # 변동성에 따른 멀티플라이어
         if atr_pct < 1.5:
             # 초저변동성 (BTC, ETH 횡보)
-            multiplier = 0.7
+            multiplier = 0.6
             volatility_level = "초저변동성"
         elif atr_pct < 3.0:
             # 저변동성 (BTC, ETH 일반)
-            multiplier = 0.85
+            multiplier = 0.7
             volatility_level = "저변동성"
         elif atr_pct < 5.0:
             # 중변동성 (대부분의 알트코인)
-            multiplier = 1.0
+            multiplier = 0.8
             volatility_level = "중변동성"
         elif atr_pct < 8.0:
             # 고변동성 (변동성 큰 알트코인)
-            multiplier = 1.3
+            multiplier = 1.0
             volatility_level = "고변동성"
         else:
             # 초고변동성 (밈코인, 신규코인)
-            multiplier = 1.6
+            multiplier = 1.3
             volatility_level = "초고변동성"
         
         # 최종 콜백 비율
