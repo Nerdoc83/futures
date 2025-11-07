@@ -175,7 +175,7 @@ LIVE_TRADING_CONFIG = {
     
     # 🔧 자금 관리 설정 (공격적 균등 분할)
     "TARGET_TOTAL_USAGE_PCT": 100,  # 🆕 목표: 전체 자금의 100% 사용
-    "MAX_POSITION_SIZE_PCT": 100,   # 🔧 단일 포지션 최대 100% (안전장치)
+    "MAX_POSITION_SIZE_PCT": 40,   # 🔧 단일 포지션 최대 40% (안전장치)
     "MIN_POSITION_SIZE_PCT": 15,   # 🔧 최소 15% (너무 작은 포지션 방지)
     "DYNAMIC_EQUAL_SPLIT": True,   # 동적 균등 분할 활성화
     "VOLATILITY_BASED_SIZING": True,  # 변동성 기반 포지션 크기 조절 (완화)
@@ -569,7 +569,10 @@ def close_position_and_get_pnl(symbol: str, side: str, trade_info: dict) -> Tupl
         except:
             current_price = float(target_position['markPrice'])
         
-        # 4. 청산 주문 생성
+        # 4. 청산 시간 기록 (중요!)
+        close_timestamp = get_utc_timestamp_ms()
+        
+        # 5. 청산 주문 생성
         position_side = target_position['side']
         contracts = abs(float(target_position['contracts']))
         
@@ -587,7 +590,7 @@ def close_position_and_get_pnl(symbol: str, side: str, trade_info: dict) -> Tupl
         
         print(f"      ✅ 청산 주문 체결 (ID: {order.get('id', 'N/A')})")
         
-        # 5. 청산 확인 (최대 3초 대기)
+        # 6. 청산 확인 (최대 3초 대기)
         close_confirmed = False
         for i in range(3):
             time.sleep(1)
@@ -603,53 +606,30 @@ def close_position_and_get_pnl(symbol: str, side: str, trade_info: dict) -> Tupl
             print(f"      ⚠️ 청산 확인 실패 (시간 초과)")
             # 그래도 PnL 조회는 시도
         
-        # 6. 🆕🆕🆕 즉시 바이낸스 실제 PnL 조회 (가장 중요!)
-        print(f"      🔍 바이낸스 실제 PnL 조회 중...")
-        time.sleep(0.5)  # API 동기화 대기
+        # 7. 🎯 통합 PnL 조회 (2초 추가 대기 후)
+        print(f"      ⏳ API 동기화 대기 (2초)...")
+        time.sleep(2)
         
-        pnl_data = get_realized_pnl_from_binance(symbol, start_time=None)
+        realized_pnl, pnl_pct = get_realized_pnl_accurate(
+            symbol, 
+            close_timestamp, 
+            trade_info
+        )
         
-        if pnl_data and pnl_data['realized_pnl'] != 0:
-            # ✅ 실제 PnL 조회 성공!
-            realized_pnl = pnl_data['realized_pnl']
-            commission = pnl_data['commission']
-            
-            # 실제 청산가 역산 (근사)
-            entry_price = trade_info['entry_price']
-            leverage = trade_info['leverage']
-            position_size = trade_info['position_size']
-            
-            if side.upper() == 'LONG':
-                pnl_pct = (realized_pnl / position_size) * 100
-                price_move_pct = pnl_pct / leverage
-                exit_price = entry_price * (1 + price_move_pct / 100)
-            else:
-                pnl_pct = (realized_pnl / position_size) * 100
-                price_move_pct = pnl_pct / leverage
-                exit_price = entry_price * (1 - price_move_pct / 100)
-            
-            print(f"      ✅ 바이낸스 실제 PnL: ${realized_pnl:+.2f} ({pnl_pct:+.2f}%)")
-            print(f"      💰 수수료: ${commission:.4f}")
-            print(f"      📍 실제 청산가: ${exit_price:,.4f}")
-            
-            return True, exit_price, realized_pnl, pnl_pct
+        # 8. 청산가 역산 (PnL 기반)
+        entry_price = trade_info['entry_price']
+        leverage = trade_info['leverage']
         
+        if side.upper() == 'LONG':
+            price_move_pct = pnl_pct / leverage
+            exit_price = entry_price * (1 + price_move_pct / 100)
         else:
-            # ⚠️ 조회 실패 -> fallback: 추정 계산
-            print(f"      ⚠️ 바이낸스 PnL 조회 실패 - 추정 계산 사용")
-            
-            realized_pnl, pnl_pct = calculate_pnl_from_price(
-                trade_info['entry_price'], 
-                current_price,
-                trade_info['position_size'], 
-                side, 
-                trade_info['leverage']
-            )
-            
-            print(f"      📊 추정 PnL: ${realized_pnl:+.2f} ({pnl_pct:+.2f}%)")
-            print(f"      ⚠️ 실제 값과 다를 수 있음")
-            
-            return True, current_price, realized_pnl, pnl_pct
+            price_move_pct = pnl_pct / leverage
+            exit_price = entry_price * (1 - price_move_pct / 100)
+        
+        print(f"      📍 청산가: ${exit_price:,.4f} (역산)")
+        
+        return True, exit_price, realized_pnl, pnl_pct
         
     except Exception as e:
         print(f"      ❌ 청산 실패: {e}")
@@ -849,16 +829,16 @@ def detect_trend_reversal(symbol: str, side: str, current_price: float, entry_pr
 
 def get_realized_pnl_from_binance(symbol: str, start_time: int = None) -> Optional[Dict]:
     """
-    🆕 바이낸스 Income History에서 실제 realized PnL 조회
+    🆕 바이낸스 Income History에서 실제 realized PnL 조회 (방법 2: 백업)
     
     Args:
         symbol: 심볼 (예: "ZEC/USDT:USDT")
-        start_time: 조회 시작 시간 (밀리초), None이면 최근 내역만
+        start_time: 조회 시작 시간 (밀리초), None이면 최근 5초 이내
     
     Returns:
         {
             'realized_pnl': float,
-            'commission': float,
+            'commission': 0.0,  # Income API는 수수료 포함된 값
             'trade_time': int
         } 또는 None
     """
@@ -869,11 +849,14 @@ def get_realized_pnl_from_binance(symbol: str, start_time: int = None) -> Option
         params = {
             'symbol': binance_symbol,
             'incomeType': 'REALIZED_PNL',
-            'limit': 10
+            'limit': 20  # 충분히 가져오기
         }
         
-        if start_time:
-            params['startTime'] = start_time
+        # start_time이 없으면 최근 5초 이내로 설정
+        if not start_time:
+            start_time = get_utc_timestamp_ms() - 5000  # 5초 전
+        
+        params['startTime'] = start_time
         
         # CCXT를 통한 호출
         income_history = exchange.fapiprivate_get_income(params)
@@ -881,52 +864,164 @@ def get_realized_pnl_from_binance(symbol: str, start_time: int = None) -> Option
         if not income_history:
             return None
         
-        # 가장 최근 realized PnL
-        latest_pnl = income_history[0]
+        # 해당 심볼의 REALIZED_PNL 모두 합산 (부분 청산 대응)
+        total_pnl = 0.0
+        latest_time = 0
+        found_count = 0
+        
+        for income in income_history:
+            if income['symbol'] == binance_symbol and income['incomeType'] == 'REALIZED_PNL':
+                total_pnl += float(income['income'])
+                latest_time = max(latest_time, int(income['time']))
+                found_count += 1
+        
+        if found_count == 0:
+            return None
         
         return {
-            'realized_pnl': float(latest_pnl['income']),
-            'commission': abs(float(latest_pnl.get('commission', 0))),
-            'trade_time': int(latest_pnl['time'])
+            'realized_pnl': total_pnl,
+            'commission': 0.0,  # REALIZED_PNL은 이미 수수료 포함
+            'trade_time': latest_time
         }
         
     except Exception as e:
         # API 호출 실패시 조용히 None 반환
         return None
 
-def get_position_history_pnl(symbol: str, side: str) -> Optional[float]:
+def get_position_history_pnl(symbol: str, close_timestamp: int) -> Optional[Dict]:
     """
-    🆕 바이낸스 거래 내역에서 실제 PnL 조회 (대체 방법)
+    🆕 바이낸스 거래 내역에서 실제 PnL 조회 (방법 1: 가장 정확)
     
     Args:
         symbol: 심볼 (예: "ZEC/USDT:USDT")
-        side: 'LONG' 또는 'SHORT'
+        close_timestamp: 청산 시간 (밀리초)
     
     Returns:
-        실제 realized PnL (float) 또는 None
+        {
+            'realized_pnl': float,
+            'commission': float,
+            'trade_time': int
+        } 또는 None
     """
     try:
-        # 최근 거래 내역 조회
-        trades = exchange.fetch_my_trades(symbol, limit=50)
+        binance_symbol = symbol.replace('/USDT:USDT', 'USDT')
+        
+        # 청산 시간 전후 10초 범위 조회
+        start_time = close_timestamp - 10000  # 10초 전
+        end_time = close_timestamp + 10000    # 10초 후
+        
+        # userTrades API 호출 (CCXT 직접 호출)
+        params = {
+            'symbol': binance_symbol,
+            'startTime': start_time,
+            'endTime': end_time,
+            'limit': 100
+        }
+        
+        trades = exchange.fapiprivate_get_usertrades(params)
         
         if not trades:
             return None
         
-        # 최근 청산 거래 찾기 (reduceOnly=True)
-        for trade in reversed(trades):
-            trade_info = trade.get('info', {})
-            
-            # reduceOnly 거래 = 포지션 청산 거래
-            if trade_info.get('reduceOnly') or trade_info.get('positionSide') == 'BOTH':
-                # realizedPnl 필드 확인
-                realized_pnl = float(trade_info.get('realizedPnl', 0))
-                if realized_pnl != 0:
-                    return realized_pnl
+        # reduceOnly 거래만 필터링하여 realizedPnl 합산
+        total_pnl = 0.0
+        total_commission = 0.0
+        latest_time = 0
+        found_count = 0
         
-        return None
+        for trade in trades:
+            # reduceOnly 거래 = 포지션 청산
+            if trade.get('reduceOnly') or trade.get('positionSide') == 'BOTH':
+                realized_pnl = float(trade.get('realizedPnl', 0))
+                commission = float(trade.get('commission', 0))
+                
+                if realized_pnl != 0:  # 0이 아닌 PnL만
+                    total_pnl += realized_pnl
+                    total_commission += abs(commission)
+                    latest_time = max(latest_time, int(trade['time']))
+                    found_count += 1
+        
+        if found_count == 0:
+            return None
+        
+        return {
+            'realized_pnl': total_pnl,
+            'commission': total_commission,
+            'trade_time': latest_time
+        }
         
     except Exception as e:
+        # API 호출 실패시 조용히 None 반환
         return None
+
+def get_realized_pnl_accurate(symbol: str, close_timestamp: int, trade_info: dict) -> Tuple[float, float]:
+    """
+    🎯 통합 PnL 조회 함수 (2단계 폴백 시스템)
+    
+    Args:
+        symbol: 심볼
+        close_timestamp: 청산 시간 (밀리초)
+        trade_info: DB 거래 정보 (fallback 계산용)
+    
+    Returns:
+        (realized_pnl, pnl_percentage)
+    """
+    print(f"      🔍 바이낸스 실제 PnL 조회 중...")
+    
+    # 🥇 1차 시도: userTrades API (가장 정확)
+    print(f"      📊 1차: userTrades API 조회...")
+    pnl_data = get_position_history_pnl(symbol, close_timestamp)
+    
+    if pnl_data and pnl_data['realized_pnl'] != 0:
+        realized_pnl = pnl_data['realized_pnl']
+        commission = pnl_data['commission']
+        position_size = trade_info['position_size']
+        pnl_pct = (realized_pnl / position_size) * 100
+        
+        print(f"      ✅ userTrades 조회 성공!")
+        print(f"      💰 실제 PnL: ${realized_pnl:+.2f} ({pnl_pct:+.2f}%)")
+        print(f"      💳 수수료: ${commission:.4f}")
+        
+        return realized_pnl, pnl_pct
+    
+    # 🥈 2차 시도: Income API (백업)
+    print(f"      📊 2차: Income API 조회...")
+    time.sleep(1)  # 추가 대기
+    pnl_data = get_realized_pnl_from_binance(symbol, close_timestamp)
+    
+    if pnl_data and pnl_data['realized_pnl'] != 0:
+        realized_pnl = pnl_data['realized_pnl']
+        position_size = trade_info['position_size']
+        pnl_pct = (realized_pnl / position_size) * 100
+        
+        print(f"      ✅ Income API 조회 성공!")
+        print(f"      💰 실제 PnL: ${realized_pnl:+.2f} ({pnl_pct:+.2f}%)")
+        
+        return realized_pnl, pnl_pct
+    
+    # 🥉 3차 시도: 추정 계산 (최후의 수단)
+    print(f"      ⚠️ API 조회 실패 - 추정 계산 사용")
+    
+    # 현재가 조회
+    try:
+        ticker = exchange.fetch_ticker(symbol)
+        current_price = float(ticker['last'])
+    except:
+        # 진입가 기준으로 추정
+        current_price = trade_info['entry_price']
+    
+    realized_pnl, pnl_pct = calculate_pnl_from_price(
+        trade_info['entry_price'],
+        current_price,
+        trade_info['position_size'],
+        trade_info['side'],
+        trade_info['leverage']
+    )
+    
+    print(f"      📊 추정 PnL: ${realized_pnl:+.2f} ({pnl_pct:+.2f}%)")
+    print(f"      ⚠️ 실제 값과 다를 수 있음")
+    
+    return realized_pnl, pnl_pct
 
 def get_top_volume_coins(limit: int = 10) -> List[dict]:
     """거래량 기준 상위 코인 조회"""
@@ -1232,6 +1327,71 @@ def ai_comprehensive_analysis(coin_data: dict, market_data: dict, performance_hi
         
         futures_text += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         
+        # 🆕 AI 성과 기반 피드백 생성 (승률/성공 패턴만)
+        feedback_section = ""
+        total_trades = performance_history.get('total_trades', 0)
+        win_rate = performance_history.get('win_rate', 0)
+        
+        if total_trades >= 10:  # 최소 10회 거래 이상일 때만 피드백
+            if win_rate >= 60:
+                feedback_section = """
+🎯 **전략 피드백 (승률 우수):**
+✅ 현재 승률이 60% 이상으로 우수합니다.
+✅ 현재 전략을 유지하세요.
+✅ 성공 패턴을 분석하여 반복하세요:
+   - 어떤 타임프레임 조합이 효과적이었나?
+   - 어떤 기술적 지표 조합이 신뢰도가 높았나?
+   - LONG/SHORT 중 어느 방향이 더 성공적이었나?
+✅ 고확률 기회에 적극적으로 진입하세요 (70%+ 확신)
+"""
+            elif win_rate >= 50:
+                feedback_section = """
+📊 **전략 피드백 (승률 양호):**
+✅ 현재 승률이 50-60%로 양호한 수준입니다.
+✅ 현재 접근 방식을 계속 유지하세요.
+⚠️ 진입 기준을 조금 더 엄격하게 적용하여 승률 향상을 목표로 하세요.
+💡 다음 사항을 고려하세요:
+   - 여러 타임프레임의 신호가 일치하는 경우 우선 진입
+   - 추세 순응 거래(With the Trend)에 집중
+   - 불확실한 신호는 과감히 패스
+"""
+            elif win_rate >= 40:
+                feedback_section = """
+⚠️ **전략 조정 필요 (승률 저조):**
+🔴 현재 승률이 40-50%로 개선이 필요합니다.
+🔴 진입 기준을 더욱 엄격하게 적용하세요:
+   - 80% 이상 확신하는 거래만 진입
+   - 3개 이상의 타임프레임에서 신호가 일치할 때만 진입
+   - 추세 순응 거래만 선택 (역추세 거래 회피)
+   - 펀딩비/OI 등 선물 특화 지표가 명확할 때만 진입
+🔴 불확실한 상황에서는 무조건 관망
+🔴 리스크 관리를 최우선으로 고려
+"""
+            else:  # win_rate < 40
+                feedback_section = """
+🚨 **긴급 전략 변경 필요 (승률 매우 저조):**
+🔴 현재 승률이 40% 미만으로 심각한 수준입니다.
+🔴 즉시 다음 조치를 취하세요:
+   - 진입 기준을 85% 이상 확신으로 상향
+   - 5개 이상의 타임프레임에서 신호가 완벽히 일치할 때만 진입
+   - 추세 순응 거래만 엄격히 선택
+   - 역추세 거래는 완전히 배제
+   - 명확한 기술적 패턴(이중바닥, 헤드앤숄더 등)이 있을 때만 진입
+   - 펀딩비/OI가 극단적으로 과열되었을 때만 역방향 진입 고려
+🔴 의심스러운 모든 상황은 무조건 관망
+🔴 성공한 거래들의 공통 패턴을 찾아 집중
+"""
+        else:  # 거래 횟수 부족
+            feedback_section = """
+📈 **학습 단계 (데이터 수집 중):**
+💡 아직 데이터가 부족합니다 (10회 이상 필요).
+💡 다음 원칙을 따르며 신중하게 거래하세요:
+   - 70% 이상 확신하는 거래만 진입
+   - 여러 타임프레임의 신호가 일치하는 경우 우선
+   - 추세 순응 거래를 기본으로
+   - 각 거래의 결과를 분석하며 패턴 학습
+"""
+        
         # 프롬프트 작성
         prompt = f"""
 다음 암호화폐의 선물 거래를 양방향(LONG/SHORT) 분석해주세요:
@@ -1250,7 +1410,8 @@ def ai_comprehensive_analysis(coin_data: dict, market_data: dict, performance_hi
 **AI 과거 성과:**
 - 최근 {performance_history.get('days', 0)}일 거래: {performance_history.get('total_trades', 0)}회
 - 승률: {performance_history.get('win_rate', 0):.1f}%
-- 총 수익: ${performance_history.get('total_pnl', 0):+,.2f}
+
+{feedback_section}
 
 **거래 조건:**
 - 레버리지: 10-15x
