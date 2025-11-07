@@ -175,7 +175,7 @@ LIVE_TRADING_CONFIG = {
     
     # 🔧 자금 관리 설정 (공격적 균등 분할)
     "TARGET_TOTAL_USAGE_PCT": 100,  # 🆕 목표: 전체 자금의 100% 사용
-    "MAX_POSITION_SIZE_PCT": 25,   # 🔧 단일 포지션 최대 25% (안전장치)
+    "MAX_POSITION_SIZE_PCT": 40,   # 🔧 단일 포지션 최대 40% (안전장치)
     "MIN_POSITION_SIZE_PCT": 15,   # 🔧 최소 15% (너무 작은 포지션 방지)
     "DYNAMIC_EQUAL_SPLIT": True,   # 동적 균등 분할 활성화
     "VOLATILITY_BASED_SIZING": True,  # 변동성 기반 포지션 크기 조절 (완화)
