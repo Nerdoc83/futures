@@ -327,14 +327,11 @@ def calculate_dynamic_callback_rate(symbol: str, leverage: int, base_profit_pct:
             # 중변동성 (대부분의 알트코인)
             multiplier = 0.8
             volatility_level = "중변동성"
-        elif atr_pct < 8.0:
-            # 고변동성 (변동성 큰 알트코인)
+        else:
+            # 고변동성 (ATR 5% 이상 - 최대 콜백)
+            # ATR 15% 이상은 초고변동성 필터로 진입 차단됨
             multiplier = 1.0
             volatility_level = "고변동성"
-        else:
-            # 초고변동성 (밈코인, 신규코인)
-            multiplier = 1.3
-            volatility_level = "초고변동성"
         
         # 최종 콜백 비율
         callback_rate = base_callback * multiplier
@@ -2489,11 +2486,10 @@ def main():
         print(f"   ✅ 최소 확보 수익률: {min_profit}%")
         print(f"   ✅ 콜백 비율: 변동성에 따라 자동 조절")
         print(f"   📝 예시:")
-        print(f"      - 초저변동성 (ATR<1.5%): 콜백 {min_profit/10*0.7:.1f}% (레버리지 10x)")
-        print(f"      - 저변동성 (ATR<3%): 콜백 {min_profit/10*0.85:.1f}%")
-        print(f"      - 중변동성 (ATR<5%): 콜백 {min_profit/10*1.0:.1f}%")
-        print(f"      - 고변동성 (ATR<8%): 콜백 {min_profit/10*1.3:.1f}%")
-        print(f"      - 초고변동성 (ATR>8%): 콜백 {min_profit/10*1.6:.1f}%")
+        print(f"      - 초저변동성 (ATR<1.5%): 콜백 {min_profit/10*0.6:.1f}% (레버리지 10x)")
+        print(f"      - 저변동성 (ATR<3%): 콜백 {min_profit/10*0.7:.1f}%")
+        print(f"      - 중변동성 (ATR<5%): 콜백 {min_profit/10*0.8:.1f}%")
+        print(f"      - 고변동성 (ATR≥5%): 콜백 {min_profit/10*1.0:.1f}% (최대)")
         print(f"   🎯 익절과 손절을 모두 자동 처리 (바이낸스 서버)")
         print(f"   🤖 AI 포지션 모니터링 제거 → API 비용 절감")
         print(f"{'='*80}\n")
