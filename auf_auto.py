@@ -204,6 +204,7 @@ TRADING_STYLES = {
         "base_callback_pct": 1.0,  # 기본 콜백 (레버리지 10배 기준) - 실제는 레버리지로 조정
         "min_profit_target": 3.0,  # 최소 3% 수익 목표
         "typical_holding": "5-30분",
+        "max_leverage": 30,  # 최대 레버리지
         "leverage_guideline": "극단적 기회 → 20-30배 권장",
         "description": "초고변동성 극단 기회 - 급등/급락 포착",
         "trigger_conditions": """
@@ -222,6 +223,7 @@ TRADING_STYLES = {
         "base_callback_pct": 3.0,  # 기본 콜백 (레버리지 10배 기준) - 실제는 레버리지로 조정
         "min_profit_target": 8.0,  # 최소 8% 수익 목표
         "typical_holding": "1-8시간",
+        "max_leverage": 15,  # 최대 레버리지
         "leverage_guideline": "안정적 거래 → 8-15배 권장",
         "description": "AI 최적화 전략 - 안정적 단기 추세 추종",
         "trigger_conditions": """
@@ -381,9 +383,9 @@ def determine_optimal_trading_style(symbol: str, coin_data: dict) -> Tuple[str, 
                 
                 if atr_pct > 10.0:
                     extreme_conditions.append(f"초고변동성 ATR {atr_pct:.1f}%")
-                    print(f"      ✅ 조건1: ATR {atr_pct:.1f}% (>10%)")
+                    print(f"      ✅ 조건1: ATR {atr_pct:.1f}% (스캘핑 조건 충족: 10% 초과)")
                 else:
-                    print(f"      ❌ 조건1: ATR {atr_pct:.1f}% (<10%)")
+                    print(f"      ❌ 조건1: ATR {atr_pct:.1f}% (스캘핑 조건 미달: 10% 초과 필요)")
             else:
                 atr_pct = 0
         except:
@@ -393,9 +395,9 @@ def determine_optimal_trading_style(symbol: str, coin_data: dict) -> Tuple[str, 
         change_24h = abs(coin_data.get('change', 0))
         if change_24h > 20.0:
             extreme_conditions.append(f"24h 급변 {change_24h:.1f}%")
-            print(f"      ✅ 조건2: 24h 변동 {change_24h:.1f}% (>20%)")
+            print(f"      ✅ 조건2: 24h 변동 {change_24h:.1f}% (스캘핑 조건 충족: 20% 초과)")
         else:
-            print(f"      ❌ 조건2: 24h 변동 {change_24h:.1f}% (<20%)")
+            print(f"      ❌ 조건2: 24h 변동 {change_24h:.1f}% (스캘핑 조건 미달: 20% 초과 필요)")
         
         # 조건 3: 펀딩비 극단 과열 (±0.1% 이상)
         try:
@@ -404,9 +406,9 @@ def determine_optimal_trading_style(symbol: str, coin_data: dict) -> Tuple[str, 
             
             if abs(fr) > 0.1:
                 extreme_conditions.append(f"펀딩비 극단 {fr:+.3f}%")
-                print(f"      ✅ 조건3: 펀딩비 {fr:+.3f}% (±0.1% 초과)")
+                print(f"      ✅ 조건3: 펀딩비 {fr:+.3f}% (스캘핑 조건 충족: ±0.1% 초과)")
             else:
-                print(f"      ❌ 조건3: 펀딩비 {fr:+.3f}% (±0.1% 이하)")
+                print(f"      ❌ 조건3: 펀딩비 {fr:+.3f}% (스캘핑 조건 미달: ±0.1% 초과 필요)")
         except:
             print(f"      ❌ 조건3: 펀딩비 조회 실패")
         
@@ -422,9 +424,9 @@ def determine_optimal_trading_style(symbol: str, coin_data: dict) -> Tuple[str, 
             
             if volume_24h > avg_volume * 3:
                 extreme_conditions.append(f"거래량 폭발 {volume_24h/avg_volume:.1f}배")
-                print(f"      ✅ 조건4: 거래량 {volume_24h/avg_volume:.1f}배 (>3배)")
+                print(f"      ✅ 조건4: 거래량 {volume_24h/avg_volume:.1f}배 (스캘핑 조건 충족: 3배 초과)")
             else:
-                print(f"      ❌ 조건4: 거래량 {volume_24h/avg_volume:.1f}배 (<3배)")
+                print(f"      ❌ 조건4: 거래량 {volume_24h/avg_volume:.1f}배 (스캘핑 조건 미달: 3배 초과 필요)")
         except:
             print(f"      ❌ 조건4: 거래량 비교 실패")
         
@@ -437,9 +439,9 @@ def determine_optimal_trading_style(symbol: str, coin_data: dict) -> Tuple[str, 
                 
                 if change_1h > 5.0:
                     extreme_conditions.append(f"1시간 급변 {change_1h:.1f}%")
-                    print(f"      ✅ 조건5: 1시간 변동 {change_1h:.1f}% (>5%)")
+                    print(f"      ✅ 조건5: 1시간 변동 {change_1h:.1f}% (스캘핑 조건 충족: 5% 초과)")
                 else:
-                    print(f"      ❌ 조건5: 1시간 변동 {change_1h:.1f}% (<5%)")
+                    print(f"      ❌ 조건5: 1시간 변동 {change_1h:.1f}% (스캘핑 조건 미달: 5% 초과 필요)")
         except:
             print(f"      ❌ 조건5: 1시간 변동 계산 실패")
         
@@ -456,7 +458,7 @@ def determine_optimal_trading_style(symbol: str, coin_data: dict) -> Tuple[str, 
             style_config = TRADING_STYLES[selected_style]
             print(f"   ⚡ *** 극단적 기회 감지! 스캘핑 모드 ***")
             print(f"      - 타임프레임: {style_config['timeframes']}")
-            print(f"      - 콜백: {style_config['callback_pct']}%")
+            print(f"      - 콜백: {style_config['base_callback_pct']}%")
             print(f"      - 목표: {style_config['min_profit_target']}%+")
             print(f"      - 예상 보유: {style_config['typical_holding']}")
             print(f"      💡 빠른 진입/청산으로 극단적 변동성 이용!")
@@ -465,7 +467,7 @@ def determine_optimal_trading_style(symbol: str, coin_data: dict) -> Tuple[str, 
             style_config = TRADING_STYLES[selected_style]
             print(f"   📌 기본 전략: 데이트레이딩")
             print(f"      - 타임프레임: {style_config['timeframes']}")
-            print(f"      - 콜백: {style_config['callback_pct']}%")
+            print(f"      - 콜백: {style_config['base_callback_pct']}%")
             print(f"      - 목표: {style_config['min_profit_target']}%+")
             print(f"      - 예상 보유: {style_config['typical_holding']}")
             print(f"      💡 안정적 AI 최적화 전략")
