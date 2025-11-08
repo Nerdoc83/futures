@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 AI Live Trading Bot v2.7 (포지션 모니터링 최적화)
 ----------------------------------------------------------------------
@@ -109,11 +111,17 @@ class Logger:
     def __init__(self, filename):
         self.terminal = sys.stdout
         # buffering=1 = 라인 버퍼링 (줄 단위 즉시 flush)
-        self.log = open(filename, 'a', encoding='utf-8', buffering=1)
+        # errors='replace' = 인코딩 불가능한 문자는 대체 문자로 변환 (크래시 방지)
+        self.log = open(filename, 'a', encoding='utf-8', buffering=1, errors='replace')
     
     def write(self, message):
-        self.terminal.write(message)
-        self.terminal.flush()  # 🆕 터미널도 즉시 flush
+        try:
+            self.terminal.write(message)
+            self.terminal.flush()  # 🆕 터미널도 즉시 flush
+        except UnicodeEncodeError:
+            # 터미널이 UTF-8을 지원하지 않을 경우 ASCII로 대체
+            self.terminal.write(message.encode('ascii', errors='replace').decode('ascii'))
+            self.terminal.flush()
         self.log.write(message)
         self.log.flush()  # 🆕 파일도 즉시 flush
     
