@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-AI Live Trading Bot v2.7 (포지션 모니터링 최적화)
+AI Live Trading Bot v2.8 (신뢰도 기반 포지션 사이징)
 ----------------------------------------------------------------------
 ⚠️ 실제 바이낸스 선물 거래 - 실제 자금 사용
 - 실시간 바이낸스 선물 데이터 사용
@@ -13,7 +13,14 @@ AI Live Trading Bot v2.7 (포지션 모니터링 최적화)
 - 🆕 거래 시간대 제한 (한국시간 23:00~07:00 신규 진입 차단)
 - 🆕 AI 포지션 모니터링 제거 (트레일링 스탑에 전담)
 
-🔧 v2.7 신규 기능:
+🔧 v2.8 신규 기능 (Option C - 신뢰도 기반 포지션 사이징):
+  1. ✅ 간단하고 명확한 포지션 크기 계산
+  2. ✅ 스타일별 베이스: 스캘핑 25%, 데이트레이딩 35%
+  3. ✅ 신뢰도 보너스: 70-80% +0%, 80-90% +5%, 90%+ +10%
+  4. ✅ 최대 50% 제한 (안전장치)
+  5. ✅ 불필요한 변동성 조정 제거 → 예측 가능한 투자금액
+
+🔧 v2.7 기능:
   1. ✅ AI 포지션 모니터링 제거 (API 비용 절감)
   2. ✅ 트레일링 스탑에 포지션 관리 전담
   3. ✅ 검증된 자동화 시스템에만 의존 (불필요한 AI 개입 제거)
@@ -246,15 +253,12 @@ LIVE_TRADING_CONFIG = {
     # 🆕 트레일링 스탑 설정 (거래 스타일별로 자동 설정됨)
     "TRAILING_STOP_ENABLED": True,              # 트레일링 스탑 활성화
     
-    # 🔧 자금 관리 설정 (공격적 균등 분할)
-    "TARGET_TOTAL_USAGE_PCT": 100,  # 🆕 목표: 전체 자금의 100% 사용
-    "MAX_POSITION_SIZE_PCT": 30,   # 🔧 단일 포지션 최대 30% (안전장치)
-    "MIN_POSITION_SIZE_PCT": 15,   # 🔧 최소 15% (너무 작은 포지션 방지)
-    "DYNAMIC_EQUAL_SPLIT": True,   # 동적 균등 분할 활성화
-    "VOLATILITY_BASED_SIZING": True,  # 변동성 기반 포지션 크기 조절 (완화)
-    "HIGH_VOLATILITY_THRESHOLD": 5.0,  # 5% 이상이면 고변동성
-    "LOW_VOLATILITY_MULTIPLIER": 1.1,   # 🔧 저변동성 = 1.1배 투자 (완화)
-    "HIGH_VOLATILITY_MULTIPLIER": 0.9,  # 🔧 고변동성 = 0.9배 투자 (완화)
+    # 🔧 자금 관리 설정 (Option C - 신뢰도 기반 포지션 사이징)
+    # 베이스: 스캘핑 25%, 데이트레이딩 35%
+    # 신뢰도 보너스: 70-80% +0%, 80-90% +5%, 90%+ +10%
+    # 최대: 50% 제한 (안전장치)
+    "MAX_POSITION_SIZE_PCT": 50,   # 🔧 단일 포지션 최대 50% (안전장치)
+    "MIN_POSITION_SIZE_PCT": 25,   # 🔧 최소 25% (스캘핑 베이스)
     
     # 🔧 초고변동성 필터 (거래 스타일 시스템으로 대체 - 비활성화)
     "EXTREME_VOLATILITY_FILTER": False,  # 거래 스타일이 자동으로 변동성 조절
@@ -2100,49 +2104,36 @@ def execute_live_trade(coin_data: dict, ai_decision: dict, available_balance: fl
             trading_style = TRADING_STYLES[default_style]
             print(f"   📌 기본 스타일 사용: {trading_style['name']}")
         
-        # 🔧 개선된 동적 균등 분할 (목표: 설정된 전체 자금 사용률)
-        max_positions = LIVE_TRADING_CONFIG['MAX_CONCURRENT_POSITIONS']
-        target_total_usage = LIVE_TRADING_CONFIG['TARGET_TOTAL_USAGE_PCT']  # 설정값 사용
-        
-        # 🆕 동적 분할: 현재 오픈 포지션 수를 고려하여 남은 슬롯에 균등 분할
-        open_trades = get_all_open_trades()
-        current_positions = len(open_trades)
-        remaining_slots = max(1, max_positions - current_positions)  # 최소 1개
-        
-        # 남은 슬롯에 균등 분할 (예: 5개 중 3개 진입 → 남은 2슬롯에 나누어 투자)
-        base_position_pct = target_total_usage / remaining_slots
-        
-        # 변동성 기반 조정 (완화)
-        volatility = abs(coin_data.get('change', 0))
-        if volatility > LIVE_TRADING_CONFIG.get('HIGH_VOLATILITY_THRESHOLD', 5.0):
-            volatility_multiplier = 0.9  # 고변동성: 10% 감소
+        # 🔧 Option C: 신뢰도 기반 포지션 사이징 (단순하고 명확)
+        # 거래 스타일별 기본 포지션 크기
+        if style_name == "SCALPING":
+            base_position_pct = 25  # 스캘핑: 25%
+        elif style_name == "DAY_TRADING":
+            base_position_pct = 35  # 데이트레이딩: 35%
         else:
-            volatility_multiplier = 1.1  # 저변동성: 10% 증가
+            base_position_pct = 35  # 기본값: 35%
         
-        # 신뢰도 기반 조정 (완화: 70-95% → 85-115%)
-        # 70% confidence → 0.85배
-        # 95% confidence → 1.15배
-        confidence_multiplier = 0.85 + (confidence - 70) / 25 * 0.3
-        confidence_multiplier = max(0.85, min(1.15, confidence_multiplier))
+        # 신뢰도 보너스
+        if confidence >= 90:
+            confidence_bonus = 10  # 90%+ → +10%
+        elif confidence >= 80:
+            confidence_bonus = 5   # 80-90% → +5%
+        else:
+            confidence_bonus = 0   # 70-80% → +0%
         
         # 최종 포지션 크기
-        position_pct = base_position_pct * volatility_multiplier * confidence_multiplier
+        position_pct = base_position_pct + confidence_bonus
         
-        # 안전 범위 체크
-        min_pct = LIVE_TRADING_CONFIG.get('MIN_POSITION_SIZE_PCT', 10)  # 최소 10%
-        max_pct = LIVE_TRADING_CONFIG.get('MAX_POSITION_SIZE_PCT', 25)  # 최대 25%
-        position_pct = max(min_pct, min(max_pct, position_pct))
+        # 최대 50% 제한 (안전장치)
+        position_pct = min(50, position_pct)
         
         position_size = available_balance * (position_pct / 100)
         
-        print(f"   💰 포지션 크기 계산:")
-        print(f"      - 목표 총 사용률: {target_total_usage}%")
-        print(f"      - 현재 포지션: {current_positions}/{max_positions}개")
-        print(f"      - 남은 슬롯: {remaining_slots}개")
-        print(f"      - 기본 (동적 분할): {base_position_pct:.1f}% ({target_total_usage}% ÷ {remaining_slots}슬롯)")
-        print(f"      - 변동성 조정: ×{volatility_multiplier:.2f} ({volatility:.1f}%)")
-        print(f"      - 신뢰도 조정: ×{confidence_multiplier:.2f} ({confidence}%)")
-        print(f"      - 최종: {position_pct:.1f}% = ${position_size:,.2f}")
+        print(f"   💰 포지션 크기 계산 (Option C - 신뢰도 기반):")
+        print(f"      - 거래 스타일: {trading_style['name']}")
+        print(f"      - 베이스: {base_position_pct}%")
+        print(f"      - 신뢰도 보너스: +{confidence_bonus}% ({confidence}% 신뢰도)")
+        print(f"      - 최종: {position_pct}% = ${position_size:,.2f}")
         
         # 최소 포지션 크기 체크
         if position_size < 50:
@@ -2977,7 +2968,7 @@ if __name__ == "__main__":
     
     print(f"""
 ╔═══════════════════════════════════════════════════════════════╗
-║        🔴 AI 실거래 트레이딩 봇 v2.7 (최적화)                ║
+║        🔴 AI 실거래 트레이딩 봇 v2.8 (신뢰도 기반 사이징)     ║
 ║        🎯 OBJECTIVE: MAXIMIZE RISK-ADJUSTED RETURNS          ║
 ║        ⚠️  실제 자금으로 거래합니다!                         ║
 ║        ✅ AI: {provider:20s} ({model_name:20s})    ║
@@ -2985,7 +2976,7 @@ if __name__ == "__main__":
 ║        ✅ Risk/Reward ≥ 1:2 전략                             ║
 ║        🆕 트레일링 스탑 (바이낸스 서버)                       ║
 ║        🆕 거래 시간대 제한 (KST 07:00~23:00)                  ║
-║        🆕 AI 포지션 모니터링 제거 (비용 절감)                 ║
+║        🆕 Option C 포지션 사이징 (신뢰도 기반)                ║
 ╚═══════════════════════════════════════════════════════════════╝
     """)
     
@@ -2997,7 +2988,14 @@ if __name__ == "__main__":
     print(f"   5. 수수료: Maker 0.02%, Taker 0.05%")
     print(f"   6. 🆕 트레일링 스탑이 진입 즉시 활성화됩니다 (바이낸스 서버)")
     print(f"   7. 🆕 거래 시간대: 한국시간 07:00~23:00만 신규 진입")
-    print(f"   8. 🆕 AI는 신규 진입 분석만 담당 (포지션 관리는 트레일링 스탑)\n")
+    print(f"   8. 🆕 Option C 포지션 사이징: 스캘핑 25%, 데이트레이딩 35% + 신뢰도 보너스\n")
+    
+    print("\n🔧 v2.8 신규 기능 (Option C - 신뢰도 기반 포지션 사이징):")
+    print("   1. ✅ 스타일별 베이스: 스캘핑 25%, 데이트레이딩 35%")
+    print("   2. ✅ 신뢰도 보너스: 70-80% +0%, 80-90% +5%, 90%+ +10%")
+    print("   3. ✅ 최대 50% 제한 (안전장치)")
+    print("   4. ✅ 간단하고 예측 가능한 포지션 크기")
+    print("   5. ✅ AI 신뢰도를 직접 활용 → 확신 있을 때 더 큰 배팅")
     
     print("\n🔧 v2.7 최적화:")
     print("   1. ✅ AI 포지션 모니터링 제거 → DeepSeek API 비용 최대 90% 절감")
