@@ -188,21 +188,63 @@ if not initialize_ai():
     print("\n사용 가능한 AI 제공자: gemini, deepseek")
     exit(1)
 
+# ===== 거래 스타일 프리셋 (데이트레이딩 중심 + 극단적 스캘핑) =====
+TRADING_STYLES = {
+    "SCALPING": {
+        "name": "스캘핑 (극단적 기회)",
+        "timeframes": ['1m', '3m', '5m'],
+        "primary_tf": '3m',
+        "base_callback_pct": 1.0,  # 기본 콜백 (레버리지 10배 기준) - 실제는 레버리지로 조정
+        "min_profit_target": 3.0,  # 최소 3% 수익 목표
+        "typical_holding": "5-30분",
+        "leverage_guideline": "극단적 기회 → 20-30배 권장",
+        "description": "초고변동성 극단 기회 - 급등/급락 포착",
+        "trigger_conditions": """
+        다음 조건 중 3개 이상 충족시에만 선택:
+        1. ATR > 10% (초고변동성)
+        2. 24h 변동 > 20% (급격한 움직임)
+        3. 펀딩비 극단 과열 (>0.1% 또는 <-0.1%)
+        4. 거래량 폭발 (평균 대비 3배+)
+        5. AI 신뢰도 85%+
+        """
+    },
+    "DAY_TRADING": {
+        "name": "데이트레이딩 (기본)",
+        "timeframes": ['15m', '1h', '4h'],
+        "primary_tf": '1h',
+        "base_callback_pct": 3.0,  # 기본 콜백 (레버리지 10배 기준) - 실제는 레버리지로 조정
+        "min_profit_target": 8.0,  # 최소 8% 수익 목표
+        "typical_holding": "1-8시간",
+        "leverage_guideline": "안정적 거래 → 8-15배 권장",
+        "description": "AI 최적화 전략 - 안정적 단기 추세 추종",
+        "trigger_conditions": """
+        기본 스타일 (스캘핑 조건 미충족시 자동 선택)
+        - 중변동성 시장
+        - 대부분의 거래
+        - AI 강점 극대화
+        """
+    }
+}
+
 # ===== 실거래 설정 =====
 LIVE_TRADING_CONFIG = {
     "MAX_CONCURRENT_POSITIONS": 5,  # 최대 동시 포지션 (실제 진입 제한)
     "MIN_CAPITAL_THRESHOLD": 100.0,  # 최소 잔고 (USDT)
-    "AI_ANALYSIS_INTERVAL": 60,  # 신규 진입 분석 (1분마다)
+    
+    # 🆕 AI 거래 스타일: 데이트레이딩 중심 + 극단적 스캘핑
+    "ADAPTIVE_STYLE_ENABLED": True,  # 극단적 기회 감지 활성화
+    "DEFAULT_STYLE": "DAY_TRADING",  # 기본은 무조건 데이트레이딩
+    "SCALPING_MIN_CONDITIONS": 3,  # 스캘핑 선택 최소 조건 개수 (5개 중 3개)
+    
+    "AI_ANALYSIS_INTERVAL": 300,  # 신규 진입 분석 (5분마다)
     "PERFORMANCE_REVIEW_INTERVAL": 600,  # AI 성과 리뷰 (10분)
     
     # 🆕 거래 시간대 제한: 한국시간 23:00~07:00 (UTC 14:00~22:00)은 신규 진입 차단
     # - 변동성이 심한 시간대는 거래하지 않음
     # - 기존 포지션의 관리는 트레일링 스탑이 담당 (바이낸스 서버에서 자동 작동)
     
-    # 🆕 트레일링 스탑 설정 (처음부터 활성화)
+    # 🆕 트레일링 스탑 설정 (거래 스타일별로 자동 설정됨)
     "TRAILING_STOP_ENABLED": True,              # 트레일링 스탑 활성화
-    "TRAILING_STOP_MIN_PROFIT_PCT": 12.0,       # 최소 확보 수익률 (%) - 레버리지 고려하여 자동 계산됨
-                                                  # 예: 12% 수익 확보 + 10배 레버리지 = 1.2% 콜백
     
     # 🔧 자금 관리 설정 (공격적 균등 분할)
     "TARGET_TOTAL_USAGE_PCT": 100,  # 🆕 목표: 전체 자금의 100% 사용
@@ -214,18 +256,20 @@ LIVE_TRADING_CONFIG = {
     "LOW_VOLATILITY_MULTIPLIER": 1.1,   # 🔧 저변동성 = 1.1배 투자 (완화)
     "HIGH_VOLATILITY_MULTIPLIER": 0.9,  # 🔧 고변동성 = 0.9배 투자 (완화)
     
-    # 🆕 초고변동성 필터 (트레일링 스탑 최적화)
-    "EXTREME_VOLATILITY_FILTER": True,   # 초고변동성 코인 필터링 활성화
-    "MAX_VOLATILITY_THRESHOLD": 15.0,    # ATR 15% 이상은 진입 차단
-    "MAX_24H_CHANGE": 70.0,              # 24시간 변동 50% 이상은 진입 차단
+    # 🔧 초고변동성 필터 (거래 스타일 시스템으로 대체 - 비활성화)
+    "EXTREME_VOLATILITY_FILTER": False,  # 거래 스타일이 자동으로 변동성 조절
+    "MAX_VOLATILITY_THRESHOLD": 15.0,    # (미사용)
+    "MAX_24H_CHANGE": 70.0,              # (미사용)
+    # → 초고변동성 코인은 자동으로 "스캘핑" 스타일 선택됨 (0.8% 콜백, 빠른 청산)
     
     # 🔧 거래 수수료 (바이낸스 선물 일반회원)
     "MAKER_FEE": 0.02,  # 0.02%
     "TAKER_FEE": 0.05,  # 0.05%
     
-    # 🔧 레버리지 설정
-    "MAX_LEVERAGE": 15,
-    "CONSERVATIVE_LEVERAGE": 10,
+    # 🔧 레버리지 설정 (AI 동적 판단)
+    "MIN_LEVERAGE": 2,   # 최소 레버리지 (불확실한 상황)
+    "MAX_LEVERAGE": 30,  # 최대 레버리지 (확실한 기회)
+    "DEFAULT_LEVERAGE": 10,  # 기본 레버리지 (중립)
     
     # 🔧 마진 모드
     "MARGIN_MODE": "isolated",  # isolated 또는 cross
@@ -293,94 +337,179 @@ def cancel_all_pending_orders(symbol: str) -> bool:
         print(f"   ❌ 주문 정리 실패: {e}")
         return False
 
-def calculate_dynamic_callback_rate(symbol: str, leverage: int, base_profit_pct: float = 12.0) -> Tuple[float, str]:
+def determine_optimal_trading_style(symbol: str, coin_data: dict) -> Tuple[str, dict]:
     """
-    변동성 기반 동적 콜백 비율 계산
+    거래 스타일 결정: 데이트레이딩(기본) + 극단적 기회 스캘핑
+    
+    스캘핑 조건 (5개 중 3개 이상 충족):
+    1. ATR > 10% (초고변동성)
+    2. 24h 변동 > 20% (급격한 움직임)  
+    3. 펀딩비 극단 과열 (±0.1% 이상)
+    4. 거래량 폭발 (평균 대비 3배+)
+    5. 가격 급변 진행중 (최근 1시간 5%+ 변동)
     
     Args:
         symbol: 거래 심볼
-        leverage: 레버리지
-        base_profit_pct: 기본 목표 수익률 (%)
+        coin_data: 코인 기본 정보
     
     Returns:
-        (최적 콜백 비율, 변동성 수준)
+        (선택된 스타일명, 스타일 설정)
     """
     try:
-        # 1시간봉 데이터로 ATR 계산 (최근 변동성)
-        ohlcv = exchange.fetch_ohlcv(symbol, '1h', limit=24)
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        print(f"   🎯 거래 스타일 분석 중...")
         
-        # ATR 계산
-        atr_result = ta.atr(df['high'], df['low'], df['close'], length=14)
-        if atr_result is not None and len(atr_result) > 0:
-            atr = float(atr_result.iloc[-1])
-            current_price = float(df['close'].iloc[-1])
-            atr_pct = (atr / current_price) * 100
+        # 기본은 데이트레이딩
+        default_style = "DAY_TRADING"
+        
+        # === 극단적 조건 체크 ===
+        extreme_conditions = []
+        
+        # 조건 1: ATR > 10% (초고변동성)
+        try:
+            ohlcv_1h = exchange.fetch_ohlcv(symbol, '1h', limit=24)
+            df_1h = pd.DataFrame(ohlcv_1h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            
+            atr_result = ta.atr(df_1h['high'], df_1h['low'], df_1h['close'], length=14)
+            if atr_result is not None and len(atr_result) > 0:
+                atr = float(atr_result.iloc[-1])
+                current_price = float(df_1h['close'].iloc[-1])
+                atr_pct = (atr / current_price) * 100
+                
+                if atr_pct > 10.0:
+                    extreme_conditions.append(f"초고변동성 ATR {atr_pct:.1f}%")
+                    print(f"      ✅ 조건1: ATR {atr_pct:.1f}% (>10%)")
+                else:
+                    print(f"      ❌ 조건1: ATR {atr_pct:.1f}% (<10%)")
+            else:
+                atr_pct = 0
+        except:
+            atr_pct = 0
+        
+        # 조건 2: 24h 변동 > 20%
+        change_24h = abs(coin_data.get('change', 0))
+        if change_24h > 20.0:
+            extreme_conditions.append(f"24h 급변 {change_24h:.1f}%")
+            print(f"      ✅ 조건2: 24h 변동 {change_24h:.1f}% (>20%)")
         else:
-            atr_pct = 3.0  # 기본값
+            print(f"      ❌ 조건2: 24h 변동 {change_24h:.1f}% (<20%)")
         
-        # 기본 콜백 비율 계산
-        base_callback = base_profit_pct / leverage
+        # 조건 3: 펀딩비 극단 과열 (±0.1% 이상)
+        try:
+            funding_rate = exchange.fetch_funding_rate(symbol)
+            fr = float(funding_rate.get('fundingRate', 0)) * 100
+            
+            if abs(fr) > 0.1:
+                extreme_conditions.append(f"펀딩비 극단 {fr:+.3f}%")
+                print(f"      ✅ 조건3: 펀딩비 {fr:+.3f}% (±0.1% 초과)")
+            else:
+                print(f"      ❌ 조건3: 펀딩비 {fr:+.3f}% (±0.1% 이하)")
+        except:
+            print(f"      ❌ 조건3: 펀딩비 조회 실패")
         
-        # 변동성에 따른 멀티플라이어
-        if atr_pct < 1.5:
-            # 초저변동성 (BTC, ETH 횡보)
-            multiplier = 0.6
-            volatility_level = "초저변동성"
-        elif atr_pct < 3.0:
-            # 저변동성 (BTC, ETH 일반)
-            multiplier = 0.7
-            volatility_level = "저변동성"
-        elif atr_pct < 5.0:
-            # 중변동성 (대부분의 알트코인)
-            multiplier = 0.8
-            volatility_level = "중변동성"
+        # 조건 4: 거래량 폭발 (평균 대비 3배+)
+        try:
+            volume_24h = coin_data.get('volume', 0)
+            quote_volume = coin_data.get('quoteVolume', 0)
+            
+            # 최근 7일 평균 거래량 계산
+            ohlcv_1d = exchange.fetch_ohlcv(symbol, '1d', limit=7)
+            df_1d = pd.DataFrame(ohlcv_1d, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            avg_volume = df_1d['volume'].mean()
+            
+            if volume_24h > avg_volume * 3:
+                extreme_conditions.append(f"거래량 폭발 {volume_24h/avg_volume:.1f}배")
+                print(f"      ✅ 조건4: 거래량 {volume_24h/avg_volume:.1f}배 (>3배)")
+            else:
+                print(f"      ❌ 조건4: 거래량 {volume_24h/avg_volume:.1f}배 (<3배)")
+        except:
+            print(f"      ❌ 조건4: 거래량 비교 실패")
+        
+        # 조건 5: 최근 1시간 급변 (5%+ 변동)
+        try:
+            if len(df_1h) >= 2:
+                price_1h_ago = float(df_1h['close'].iloc[-2])
+                price_now = float(df_1h['close'].iloc[-1])
+                change_1h = abs((price_now - price_1h_ago) / price_1h_ago * 100)
+                
+                if change_1h > 5.0:
+                    extreme_conditions.append(f"1시간 급변 {change_1h:.1f}%")
+                    print(f"      ✅ 조건5: 1시간 변동 {change_1h:.1f}% (>5%)")
+                else:
+                    print(f"      ❌ 조건5: 1시간 변동 {change_1h:.1f}% (<5%)")
+        except:
+            print(f"      ❌ 조건5: 1시간 변동 계산 실패")
+        
+        # === 스캘핑 조건 충족 여부 ===
+        min_conditions = LIVE_TRADING_CONFIG.get("SCALPING_MIN_CONDITIONS", 3)
+        conditions_met = len(extreme_conditions)
+        
+        print(f"   📊 극단적 조건: {conditions_met}/5개 충족")
+        for condition in extreme_conditions:
+            print(f"      🔥 {condition}")
+        
+        if conditions_met >= min_conditions:
+            selected_style = "SCALPING"
+            style_config = TRADING_STYLES[selected_style]
+            print(f"   ⚡ *** 극단적 기회 감지! 스캘핑 모드 ***")
+            print(f"      - 타임프레임: {style_config['timeframes']}")
+            print(f"      - 콜백: {style_config['callback_pct']}%")
+            print(f"      - 목표: {style_config['min_profit_target']}%+")
+            print(f"      - 예상 보유: {style_config['typical_holding']}")
+            print(f"      💡 빠른 진입/청산으로 극단적 변동성 이용!")
         else:
-            # 고변동성 (ATR 5% 이상 - 최대 콜백)
-            # ATR 15% 이상은 초고변동성 필터로 진입 차단됨
-            multiplier = 1.0
-            volatility_level = "고변동성"
+            selected_style = default_style
+            style_config = TRADING_STYLES[selected_style]
+            print(f"   📌 기본 전략: 데이트레이딩")
+            print(f"      - 타임프레임: {style_config['timeframes']}")
+            print(f"      - 콜백: {style_config['callback_pct']}%")
+            print(f"      - 목표: {style_config['min_profit_target']}%+")
+            print(f"      - 예상 보유: {style_config['typical_holding']}")
+            print(f"      💡 안정적 AI 최적화 전략")
         
-        # 최종 콜백 비율
-        callback_rate = base_callback * multiplier
-        
-        # 안전 범위 제한
-        callback_rate = max(0.5, min(5.0, callback_rate))
-        
-        print(f"      📊 변동성 분석:")
-        print(f"         - ATR: {atr_pct:.2f}% ({volatility_level})")
-        print(f"         - 기본 콜백: {base_callback:.2f}%")
-        print(f"         - 변동성 조정: ×{multiplier}")
-        print(f"         - 최종 콜백: {callback_rate:.2f}%")
-        
-        return callback_rate, volatility_level
+        return selected_style, style_config
         
     except Exception as e:
-        print(f"      ⚠️ 변동성 계산 실패: {e}")
-        # 기본값 반환
-        return base_profit_pct / leverage, "중변동성"
+        print(f"   ⚠️ 스타일 분석 실패: {e}")
+        print(f"   → 기본 스타일 사용: 데이트레이딩")
+        default_style = LIVE_TRADING_CONFIG.get("DEFAULT_STYLE", "DAY_TRADING")
+        return default_style, TRADING_STYLES[default_style]
 
-def set_trailing_stop_order(symbol: str, side: str, leverage: int, position_size: float) -> Optional[dict]:
+def set_trailing_stop_order(symbol: str, side: str, leverage: int, position_size: float, trading_style: dict) -> Optional[dict]:
     """
-    🔧 트레일링 스탑 설정 (재시도 로직 포함)
+    🔧 트레일링 스탑 설정 (거래 스타일 기반)
     
     Args:
         symbol: 거래 심볼 (예: BTC/USDT:USDT)
         side: 포지션 방향 ('LONG' 또는 'SHORT')
         leverage: 레버리지
         position_size: 포지션 크기 (USDT)
+        trading_style: 선택된 거래 스타일 설정
     """
     max_retries = 3
     base_wait_time = 2
     
-    # 최소 확보 수익률
-    min_profit_pct = LIVE_TRADING_CONFIG.get("TRAILING_STOP_MIN_PROFIT_PCT", 12.0)
-    
     print(f"   🎯 트레일링 스탑 설정 시작...")
-    print(f"      - 목표 수익률: {min_profit_pct}%")
+    print(f"      - 거래 스타일: {trading_style['name']}")
+    print(f"      - 수익 목표: {trading_style['min_profit_target']}%")
+    print(f"      - 레버리지: {leverage}배")
     
-    # 🆕 변동성 기반 동적 콜백 계산
-    dynamic_callback, volatility_level = calculate_dynamic_callback_rate(symbol, leverage, min_profit_pct)
+    # 🆕 레버리지 기반 동적 콜백 계산
+    # 기본 콜백 (레버리지 10배 기준)
+    base_callback = trading_style['base_callback_pct']
+    
+    # 실제 콜백 = 기본_콜백 × (10 / 레버리지)
+    # 예: 레버리지 30배 → 1% × (10/30) = 0.33%
+    #     레버리지 10배 → 3% × (10/10) = 3%
+    #     레버리지 2배 → 3% × (10/2) = 15%
+    dynamic_callback = base_callback * (10 / leverage)
+    
+    # 안전 범위: 0.3% ~ 20%
+    dynamic_callback = max(0.3, min(20.0, dynamic_callback))
+    
+    print(f"      📊 콜백 계산:")
+    print(f"         - 기본 콜백: {base_callback}% (10배 기준)")
+    print(f"         - 레버리지 조정: ×(10/{leverage})")
+    print(f"         - 최종 콜백: {dynamic_callback:.2f}%")
     
     for attempt in range(1, max_retries + 1):
         try:
@@ -392,19 +521,17 @@ def set_trailing_stop_order(symbol: str, side: str, leverage: int, position_size
                 print(f"      ⏱️ {wait_time}초 대기 후 재시도...")
                 time.sleep(wait_time)
             
-            # 콜백 비율 조정 (재시도마다 약간씩 증가)
-            if attempt == 1:
-                callback_rate = dynamic_callback
-            elif attempt == 2:
-                callback_rate = dynamic_callback + 0.2
-            else:
-                callback_rate = dynamic_callback + 0.4
+            # 동적 콜백 사용 (재시도시 약간 증가)
+            callback_rate = dynamic_callback + (0.1 * (attempt - 1))
             
-            # 최대 5% 제한
-            callback_rate = min(5.0, callback_rate)
+            # 최대 20% 제한
+            callback_rate = min(20.0, callback_rate)
             
             coin_name = symbol.split('/')[0]
-            print(f"      📏 콜백 비율: {callback_rate:.2f}% ({coin_name} {volatility_level})")
+            if attempt > 1:
+                print(f"      📏 콜백 비율: {callback_rate:.2f}% (재시도 +{0.1 * (attempt - 1):.1f}%)")
+            else:
+                print(f"      📏 콜백 비율: {callback_rate:.2f}%")
             
             # 포지션 정보 조회
             positions = exchange.fetch_positions([symbol])
@@ -1328,9 +1455,13 @@ def fetch_comprehensive_market_data(symbol: str) -> Dict:
         print(f"❌ 시장 데이터 수집 실패: {e}")
         return {}
 
-def ai_comprehensive_analysis(coin_data: dict, market_data: dict, performance_history: dict) -> dict:
-    """AI 종합 분석 (모든 타임프레임 + 선물 특화 지표)"""
+def ai_comprehensive_analysis(coin_data: dict, market_data: dict, performance_history: dict, timeframes: List[str] = None) -> dict:
+    """AI 종합 분석 (선택된 타임프레임 + 선물 특화 지표)"""
     global last_api_call_time
+    
+    # 기본 타임프레임 (전체 분석용)
+    if timeframes is None:
+        timeframes = ['1m', '3m', '5m', '15m', '1h', '1d', '1w']
     
     try:
         provider = AI_MODEL_CONFIG["provider"].lower()
@@ -1346,9 +1477,9 @@ def ai_comprehensive_analysis(coin_data: dict, market_data: dict, performance_hi
         ohlcv = market_data.get('ohlcv', {})
         futures_indicators = market_data.get('futures_indicators', {})
         
-        # 🆕 모든 타임프레임의 기술적 지표 정리 (7개)
+        # 🆕 선택된 타임프레임의 기술적 지표 정리
         timeframe_analysis = []
-        for tf in ['1m', '3m', '5m', '15m', '1h', '1d', '1w']:
+        for tf in timeframes:
             tf_data = ohlcv.get(tf)
             if tf_data is not None and len(tf_data) > 0:
                 latest = tf_data.iloc[-1]
@@ -1485,10 +1616,37 @@ def ai_comprehensive_analysis(coin_data: dict, market_data: dict, performance_hi
    - 추세 순응 거래를 기본으로
    - 각 거래의 결과를 분석하며 패턴 학습
 """
+        # 거래 스타일 정보
+        if set(timeframes) == set(['1m', '3m', '5m']):
+            style_info = """
+**⚡ 극단적 기회 스캘핑 모드 발동! ⚡**
+- 극단적 조건 충족 (초고변동성/급등락/펀딩비 과열 등)
+- 목표 보유: 5-30분 (매우 짧음)
+- 수익 목표: 3-8% (빠른 청산)
+- 콜백: 1.0%
+- 전략: 극단적 변동성을 이용한 초단타
+- 주 분석 타임프레임: 1m, 3m, 5m
+
+💡 지금이 아니면 놓치는 기회! 빠른 진입/청산 필수!
+"""
+        else:  # 데이트레이딩
+            style_info = """
+**📌 기본 데이트레이딩 모드**
+- AI 최적화 구간 (안정적)
+- 목표 보유: 1-8시간
+- 수익 목표: 8-15%
+- 콜백: 3.0%
+- 전략: 단기 추세 추종, AI 강점 극대화
+- 주 분석 타임프레임: 15m, 1h, 4h
+
+💡 안정적이고 검증된 전략!
+"""
         
         # 프롬프트 작성
         prompt = f"""
 다음 암호화폐의 선물 거래를 양방향(LONG/SHORT) 분석해주세요:
+
+{style_info}
 
 **코인 정보:**
 - 심볼: {coin_data['coin']}
@@ -1496,7 +1654,7 @@ def ai_comprehensive_analysis(coin_data: dict, market_data: dict, performance_hi
 - 24h 변동: {current.get('change_24h', 0):+.2f}%
 - 24h 거래량: ${current.get('volume_24h', 0):,.0f}
 
-**멀티 타임프레임 기술적 분석:**
+**타임프레임별 기술적 분석:**
 {''.join(timeframe_analysis)}
 
 {futures_text}
@@ -1507,57 +1665,94 @@ def ai_comprehensive_analysis(coin_data: dict, market_data: dict, performance_hi
 
 {feedback_section}
 
-**거래 조건:**
-- 레버리지: 10-15x
-- 리스크/리워드: 최소 1:2
-- 트레일링 스탑 활용 (7% 최소 확보)
+**분석 지침 (선택된 스타일 최적화):**
 
-**분석 방향:**
 1. 추세 순응 거래 (With the Trend):
-   - 단기 시그널(1m~15m)이 장기 추세(1d, 1w)와 일치
-   - 높은 확신도, 더 큰 익절 목표 (ATR x 3.0+)
-   - 예: 주봉 상승추세 + 3분봉 매수신호 = 강한 LONG
+   - 여러 타임프레임의 신호가 일치
+   - 높은 확신도, 큰 익절 목표
 
 2. 역추세 거래 (Counter-Trend):
-   - 단기 시그널이 장기 추세와 반대
-   - 단기 조정 노림, 빠른 익절 (ATR x 1.5~2.0)
-   - 예: 주봉 상승추세 + 3분봉 매도신호 = 짧은 SHORT
+   - 급등/급락 후 조정 노림
+   - 빠른 익절 필수
 
 3. LONG 기회:
    - 과매도 반등 (RSI < 30)
    - 지지선 테스트 후 반등
-   - 볼린저밴드 하단 근처 + 매수 시그널
+   - 볼린저밴드 하단 + 매수 시그널
    - 🔥 펀딩비 숏 과열 (<-0.05%)
-   - 주봉/일봉 상승추세 중 단기 되돌림
 
 4. SHORT 기회:
-   - 급등(+50% 이상) 후 모멘텀 약화
-   - RSI 70 이상 과매수 + 볼린저밴드 상단 근처
-   - 대량 거래량 후 매수세 소진 징후
-   - 저항선에서 거부 패턴
+   - 급등 후 모멘텀 약화
+   - RSI > 70 과매수
+   - 저항선 거부 패턴
    - 🔥 펀딩비 롱 과열 (>0.05%)
-   - 주봉/일봉 하락추세 중 단기 반등
+
+**🎯 스타일별 특별 지침:**
+{"**[스캘핑 모드]** 극단적 변동성을 이용하세요:" if set(timeframes) == set(['1m', '3m', '5m']) else "**[데이트레이딩 모드]** 안정적 추세를 추종하세요:"}
+{"""
+- 단기 타임프레임(1m, 3m, 5m) 집중
+- 빠른 모멘텀 포착 (급등/급락 진행중)
+- 3-8% 수익시 즉시 청산
+- 과매수/과매도 역추세 공략
+- 85% 이상 확신시에만 진입
+- 레버리지 권장: 20-30배 (극단적 기회)
+""" if set(timeframes) == set(['1m', '3m', '5m']) else """
+- 중기 타임프레임(15m, 1h, 4h) 신뢰
+- 명확한 추세 방향 확인
+- 8-15% 수익 목표
+- 추세 순응 우선
+- 70% 이상 확신시 진입 가능
+- 레버리지 권장: 8-15배 (안정적)
+"""}
+
+**⚡ 레버리지 판단 (2-30배 범위):**
+
+당신이 레버리지를 결정합니다! 다음 기준을 참고하세요:
+
+🔴 낮은 레버리지 (2-5배):
+- 변동성 매우 높음 (ATR > 15%)
+- 신호 불명확 (여러 지표 충돌)
+- 신뢰도 낮음 (70-75%)
+- 불확실한 시장 상황
+- 리스크 최소화 우선
+
+🟡 중간 레버리지 (8-15배):
+- 중변동성 (ATR 3-8%)
+- 신호 보통 (일부 지표 일치)
+- 신뢰도 보통 (75-85%)
+- 일반적인 거래 상황
+- 균형잡힌 접근
+
+🟢 높은 레버리지 (20-30배):
+- 명확한 추세 (여러 타임프레임 일치)
+- 신호 강력 (대부분 지표 일치)
+- 신뢰도 매우 높음 (85-95%+)
+- 극단적 펀딩비 (기회 명확)
+- 확실한 기회
+
+💡 예시:
+- "모든 타임프레임 상승, RSI 30, 펀딩비 -0.15%, 신뢰도 92%" → 25-30배
+- "15m, 1h 상승, RSI 45, 신뢰도 78%" → 10-12배
+- "지표 충돌, ATR 18%, 신뢰도 72%" → 3-5배
 
 다음 형식으로 JSON 응답해주세요:
 {{
     "trade": true/false,
     "direction": "LONG" 또는 "SHORT",
     "confidence": 0-100,
-    "leverage": 10-15,
-    "reasoning": "멀티 타임프레임과 선물 특화 지표(펀딩비, OI)를 모두 고려한 상세 분석"
+    "leverage": 2-30,  // AI가 판단한 최적 레버리지
+    "reasoning": "선택된 스타일과 타임프레임을 고려한 상세 분석"
 }}
 
 주의사항:
-1. 70% 이상 확신할 때만 거래 추천
-2. LONG과 SHORT 양방향 모두 검토 (편향 금지)
+1. {"85%" if set(timeframes) == set(['1m', '3m', '5m']) else "70%"} 이상 확신할 때만 거래 추천
+2. LONG과 SHORT 양방향 모두 검토
 3. 🔥 펀딩비 과열 상황 반드시 고려
-4. OI 증가/감소 추세를 가격 변동과 함께 분석
-5. ⭐ 주봉/일봉 장기 추세와 단기 시그널(1m~15m) 방향성 확인
-6. 추세 순응 거래 > 역추세 거래 (확신도 차이)
-7. 여러 타임프레임의 시그널이 일치할수록 신뢰도 높음
-8. 급등/급락 후 역추세 기회 적극 평가
-9. 불분명한 상황에서는 관망 선택
-10. 리스크 관리 우선, 확실한 기회만 공략
+4. OI와 가격 변동 함께 분석
+5. 타임프레임별 신호 일치도 확인
+6. {"극단적 변동성 이용" if set(timeframes) == set(['1m', '3m', '5m']) else "안정적 추세 추종"}
+7. 불분명하면 과감히 관망
+8. 리스크 관리 우선
 """
         
         # AI 호출
@@ -1870,13 +2065,40 @@ def get_recent_performance(days: int = 7) -> dict:
 # ===== 실거래 실행 =====
 
 def execute_live_trade(coin_data: dict, ai_decision: dict, available_balance: float) -> bool:
-    """실제 거래 실행"""
+    """실제 거래 실행 (거래 스타일 자동 선택)"""
     try:
         coin = coin_data['coin']
         symbol = f"{coin}/USDT:USDT"
         side = ai_decision['direction']
         confidence = ai_decision['confidence']
-        leverage = ai_decision.get('leverage', 10)
+        ai_leverage = ai_decision.get('leverage', 10)
+        
+        # 🆕 AI 레버리지 검증 및 조정
+        min_lev = LIVE_TRADING_CONFIG['MIN_LEVERAGE']
+        max_lev = LIVE_TRADING_CONFIG['MAX_LEVERAGE']
+        
+        # 범위 제한
+        leverage = max(min_lev, min(max_lev, ai_leverage))
+        
+        if ai_leverage != leverage:
+            print(f"   ⚠️ AI 레버리지 {ai_leverage}배 → {leverage}배로 조정 (범위: {min_lev}-{max_lev}배)")
+        else:
+            print(f"   ✅ AI 레버리지: {leverage}배")
+        
+        # 🆕 거래 스타일 자동 결정 (가장 최적의 스타일 선택)
+        if LIVE_TRADING_CONFIG.get("ADAPTIVE_STYLE_ENABLED", True):
+            print(f"\n   🎯 최적 거래 스타일 분석 중...")
+            style_name, trading_style = determine_optimal_trading_style(symbol, coin_data)
+            
+            # 선택된 스타일의 레버리지 사용
+            leverage = min(leverage, trading_style['max_leverage'])
+            print(f"   ⚙️ 레버리지 조정: {leverage}x (스타일 권장치)")
+        else:
+            # 기본 스타일 사용
+            default_style = LIVE_TRADING_CONFIG.get("DEFAULT_STYLE", "DAY_TRADING")
+            style_name = default_style
+            trading_style = TRADING_STYLES[default_style]
+            print(f"   📌 기본 스타일 사용: {trading_style['name']}")
         
         # 🔧 개선된 동적 균등 분할 (목표: 설정된 전체 자금 사용률)
         max_positions = LIVE_TRADING_CONFIG['MAX_CONCURRENT_POSITIONS']
@@ -1973,12 +2195,12 @@ def execute_live_trade(coin_data: dict, ai_decision: dict, available_balance: fl
         
         print(f"   📝 DB 기록: 거래 ID {trade_id}")
         
-        # 🆕 트레일링 스탑 설정 (진입 즉시)
+        # 🆕 트레일링 스탑 설정 (진입 즉시 - 거래 스타일 기반)
         if LIVE_TRADING_CONFIG.get("TRAILING_STOP_ENABLED", False):
             print(f"   🎯 트레일링 스탑 설정 중...")
             time.sleep(2)  # 포지션 확립 대기
             
-            trailing_order = set_trailing_stop_order(symbol, side.upper(), leverage, position_size)
+            trailing_order = set_trailing_stop_order(symbol, side.upper(), leverage, position_size, trading_style)
             if trailing_order:
                 print(f"   ✅ 트레일링 스탑 활성화")
             else:
@@ -2480,26 +2702,58 @@ def main():
     
     print(f"   💰 Available Balance: ${balance:,.2f}")
     print(f"   🎯 최대 포지션: {LIVE_TRADING_CONFIG['MAX_CONCURRENT_POSITIONS']}개")
-    print(f"   🤖 AI 신규 분석: {LIVE_TRADING_CONFIG['AI_ANALYSIS_INTERVAL']}초마다")
-    print(f"   📊 성과 리뷰: {LIVE_TRADING_CONFIG['PERFORMANCE_REVIEW_INTERVAL']}초마다")
-    print(f"   📈 레버리지: {LIVE_TRADING_CONFIG['CONSERVATIVE_LEVERAGE']}-{LIVE_TRADING_CONFIG['MAX_LEVERAGE']}x")
+    print(f"   🤖 AI 신규 분석: {LIVE_TRADING_CONFIG['AI_ANALYSIS_INTERVAL']//60}분마다")
+    print(f"   📊 성과 리뷰: {LIVE_TRADING_CONFIG['PERFORMANCE_REVIEW_INTERVAL']//60}분마다")
+    print(f"   📈 레버리지: {LIVE_TRADING_CONFIG['MIN_LEVERAGE']}-{LIVE_TRADING_CONFIG['MAX_LEVERAGE']}x (AI 판단)")
     print(f"   🛡️ 마진 모드: {LIVE_TRADING_CONFIG['MARGIN_MODE'].upper()}")
     print(f"{'='*80}\n")
     
-    # 🆕 트레일링 스탑 설정 출력
-    if LIVE_TRADING_CONFIG.get("TRAILING_STOP_ENABLED", False):
-        min_profit = LIVE_TRADING_CONFIG.get("TRAILING_STOP_MIN_PROFIT_PCT", 12.0)
-        print(f"🎯 트레일링 스탑 (전체 관리):")
-        print(f"   ✅ 활성화됨 (진입 즉시)")
-        print(f"   ✅ 최소 확보 수익률: {min_profit}%")
-        print(f"   ✅ 콜백 비율: 변동성에 따라 자동 조절")
-        print(f"   📝 예시:")
-        print(f"      - 초저변동성 (ATR<1.5%): 콜백 {min_profit/10*0.6:.1f}% (레버리지 10x)")
-        print(f"      - 저변동성 (ATR<3%): 콜백 {min_profit/10*0.7:.1f}%")
-        print(f"      - 중변동성 (ATR<5%): 콜백 {min_profit/10*0.8:.1f}%")
-        print(f"      - 고변동성 (ATR≥5%): 콜백 {min_profit/10*1.0:.1f}% (최대)")
-        print(f"   🎯 익절과 손절을 모두 자동 처리 (바이낸스 서버)")
-        print(f"   🤖 AI 포지션 모니터링 제거 → API 비용 절감")
+    # 🆕 거래 스타일: 데이트레이딩 중심 + 극단적 스캘핑
+    if LIVE_TRADING_CONFIG.get("ADAPTIVE_STYLE_ENABLED", True):
+        print(f"🎯 AI 최적화 거래 시스템:")
+        print(f"   ✅ 데이트레이딩 중심 (95% 거래)")
+        print(f"   ✅ 극단적 기회 스캘핑 (5% 거래)")
+        print(f"   ✅ AI 동적 레버리지 (2-30배)")
+        print(f"   ✅ 레버리지 기반 자동 콜백")
+        print(f"")
+        print(f"   📌 기본 전략: 데이트레이딩")
+        print(f"      - 타임프레임: 15m, 1h, 4h")
+        print(f"      - 레버리지: 8-15배 권장")
+        print(f"      - 콜백: 3% 기준 (10배시) → 동적 조정")
+        print(f"      - 목표: 8-15%")
+        print(f"      - 보유: 1-8시간")
+        print(f"")
+        print(f"   ⚡ 극단 전략: 스캘핑 (조건부)")
+        print(f"      - 타임프레임: 1m, 3m, 5m")
+        print(f"      - 레버리지: 20-30배 권장")
+        print(f"      - 콜백: 1% 기준 (10배시) → 동적 조정")
+        print(f"      - 목표: 3-8%")
+        print(f"      - 보유: 5-30분")
+        print(f"      - 발동: 5개 조건 중 3개 충족")
+        print(f"")
+        print(f"   ⚙️ 동적 콜백 시스템:")
+        print(f"      - 공식: 기본콜백 × (10 / 레버리지)")
+        print(f"      - 예시:")
+        print(f"        • 30배 → 1% × (10/30) = 0.33%")
+        print(f"        • 10배 → 3% × (10/10) = 3.0%")
+        print(f"        • 2배 → 3% × (10/2) = 15.0%")
+        print(f"      💡 높은 레버리지 = 빠른 청산")
+        print(f"      💡 낮은 레버리지 = 여유있는 청산")
+        print(f"")
+        print(f"   🔥 스캘핑 발동 조건 (극단적 기회):")
+        print(f"      1. ATR > 10% (초고변동성)")
+        print(f"      2. 24h 변동 > 20% (급등/급락)")
+        print(f"      3. 펀딩비 ±0.1% 초과 (극단 과열)")
+        print(f"      4. 거래량 평균 3배+ (폭발)")
+        print(f"      5. 1시간 변동 5%+ (급변 진행중)")
+        print(f"")
+        print(f"   💡 AI가 모든 것을 판단합니다:")
+        print(f"      - 거래 스타일 (데이 or 스캘핑)")
+        print(f"      - 레버리지 (2-30배)")
+        print(f"      - 콜백 (자동 계산)")
+        print(f"{'='*80}\n")
+    else:
+        print(f"📌 기본 스타일: {LIVE_TRADING_CONFIG.get('DEFAULT_STYLE', 'DAY_TRADING')}")
         print(f"{'='*80}\n")
     
     # 3초 후 자동 시작
@@ -2592,13 +2846,6 @@ def main():
                             try:
                                 symbol = f"{coin}/USDT:USDT"
                                 
-                                # 🆕 초고변동성 필터 (먼저 체크)
-                                is_extreme, volatility_reason = check_extreme_volatility(symbol, coin_data)
-                                if is_extreme:
-                                    print(f"   🚫 초고변동성 차단: {volatility_reason}")
-                                    print(f"   ⏭️ 건너뜀 (트레일링 스탑에 부적합)")
-                                    continue
-                                
                                 print(f"   🔍 시장 데이터 수집 중...")
                                 market_data = fetch_comprehensive_market_data(symbol)
                                 
@@ -2623,22 +2870,38 @@ def main():
                                     oi_status = futures_ind['oi_status']
                                     print(f"   📊 OI: {oi:,.0f} ({oi_status})")
                                 
+                                # 🆕 거래 스타일 자동 결정
+                                print(f"   🎯 거래 스타일 결정 중...")
+                                style_name, trading_style = determine_optimal_trading_style(symbol, coin_data)
+                                
                                 performance_history = get_recent_performance(7)
-                                print(f"   🤖 AI 분석 중...")
-                                decision = ai_comprehensive_analysis(coin_data, market_data, performance_history)
+                                print(f"   🤖 AI 분석 중 (타임프레임: {trading_style['timeframes']})...")
+                                decision = ai_comprehensive_analysis(
+                                    coin_data, 
+                                    market_data, 
+                                    performance_history,
+                                    timeframes=trading_style['timeframes']  # 선택된 스타일의 타임프레임 사용
+                                )
                                 
                                 print(f"   신뢰도: {decision.get('confidence', 0)}%")
                                 print(f"   판단: {decision.get('reasoning', 'N/A')}")
                                 
-                                # 70% 이상만 거래
-                                if decision.get('trade') and decision.get('confidence', 0) >= 70:
-                                    print(f"\n   ✅ AI 승인")
+                                # 스타일별 신뢰도 기준
+                                min_confidence = 85 if style_name == "SCALPING" else 70
+                                confidence = decision.get('confidence', 0)
+                                
+                                print(f"   📊 요구 신뢰도: {min_confidence}% ({trading_style['name']})")
+                                
+                                if decision.get('trade') and confidence >= min_confidence:
+                                    print(f"\n   ✅ AI 승인 (신뢰도 {confidence}% ≥ {min_confidence}%)")
                                     if execute_live_trade(coin_data, decision, available_balance):
                                         open_positions_count += 1
                                         available_balance = get_available_balance()
                                 else:
-                                    conf = decision.get('confidence', 0)
-                                    print(f"   ⏭️ 보류 (Confidence: {conf}%)")
+                                    if decision.get('trade'):
+                                        print(f"   ⏭️ 신뢰도 부족 ({confidence}% < {min_confidence}%)")
+                                    else:
+                                        print(f"   ⏭️ AI 거래 비추천 (신뢰도: {confidence}%)")
                                 
                                 time.sleep(2)
                             except Exception as e:
