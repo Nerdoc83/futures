@@ -1736,10 +1736,19 @@ def ai_comprehensive_analysis(coin_data: dict, market_data: dict, performance_hi
 - 극단적 펀딩비 (기회 명확)
 - 확실한 기회
 
-💡 예시:
-- "모든 타임프레임 상승, RSI 30, 펀딩비 -0.15%, 신뢰도 92%" → 25-30배
-- "15m, 1h 상승, RSI 45, 신뢰도 78%" → 10-12배
-- "지표 충돌, ATR 18%, 신뢰도 72%" → 3-5배
+💡 레버리지 결정 예시:
+- 케이스 1: "모든 타임프레임 상승, RSI 30, 펀딩비 -0.15%, 신뢰도 92%"
+  → leverage: 28
+  → leverage_reasoning: "3개 타임프레임 모두 강한 상승 신호, 과매도 구간(RSI 30), 극단적 펀딩비로 롱 유리, 신뢰도 92%로 매우 높음 → 고레버리지 28배 적용"
+
+- 케이스 2: "15m, 1h 상승, RSI 45, 신뢰도 78%"
+  → leverage: 12
+  → leverage_reasoning: "중기 타임프레임 상승 일치, 중립 RSI, 신뢰도 중간 수준 → 중간 레버리지 12배 적용"
+
+- 케이스 3: "지표 충돌, ATR 18%, 신뢰도 72%"
+  → leverage: 4
+  → leverage_reasoning: "지표 간 신호 불일치, 초고변동성 ATR 18%, 신뢰도 낮음 → 안전하게 저레버리지 4배 적용"
+
 
 다음 형식으로 JSON 응답해주세요:
 {{
@@ -1747,6 +1756,7 @@ def ai_comprehensive_analysis(coin_data: dict, market_data: dict, performance_hi
     "direction": "LONG" 또는 "SHORT",
     "confidence": 0-100,
     "leverage": 2-30,  // AI가 판단한 최적 레버리지
+    "leverage_reasoning": "레버리지를 이 값으로 선택한 구체적 이유 (신호 강도, 변동성, 신뢰도 등)",
     "reasoning": "선택된 스타일과 타임프레임을 고려한 상세 분석"
 }}
 
@@ -1759,6 +1769,7 @@ def ai_comprehensive_analysis(coin_data: dict, market_data: dict, performance_hi
 6. {"극단적 변동성 이용" if set(timeframes) == set(['1m', '3m', '5m']) else "안정적 추세 추종"}
 7. 불분명하면 과감히 관망
 8. 리스크 관리 우선
+9. **leverage_reasoning에 레버리지 선택 근거를 반드시 포함**
 """
         
         # AI 호출
@@ -2191,6 +2202,30 @@ def execute_live_trade(coin_data: dict, ai_decision: dict, available_balance: fl
         # 🆕 트레일링 스탑 설정 (진입 즉시 - 거래 스타일 기반)
         if LIVE_TRADING_CONFIG.get("TRAILING_STOP_ENABLED", False):
             print(f"   🎯 트레일링 스탑 설정 중...")
+            
+            # AI 레버리지 결정 이유 표시
+            ai_leverage_reasoning = ai_decision.get('leverage_reasoning', '')
+            
+            # 레버리지 조정 과정 표시
+            leverage_info = []
+            if ai_leverage_reasoning:
+                leverage_info.append(f"AI 판단: {ai_leverage_reasoning}")
+            
+            if ai_leverage != leverage:
+                if leverage == trading_style['max_leverage']:
+                    leverage_info.append(f"→ 스타일 최대치 {trading_style['max_leverage']}배로 제한됨")
+                elif leverage == min_lev:
+                    leverage_info.append(f"→ 최소 {min_lev}배로 상향됨")
+                elif leverage == max_lev:
+                    leverage_info.append(f"→ 최대 {max_lev}배로 제한됨")
+            
+            print(f"      - 거래 스타일: {trading_style['name']}")
+            print(f"      - 레버리지: {leverage}배")
+            if leverage_info:
+                for info in leverage_info:
+                    print(f"         {info}")
+            print(f"      - 수익 목표: {trading_style['min_profit_target']}%")
+            
             time.sleep(2)  # 포지션 확립 대기
             
             trailing_order = set_trailing_stop_order(symbol, side.upper(), leverage, position_size, trading_style)
@@ -2877,6 +2912,15 @@ def main():
                                 )
                                 
                                 print(f"   신뢰도: {decision.get('confidence', 0)}%")
+                                print(f"   방향: {decision.get('direction', 'N/A')}")
+                                
+                                # 레버리지 정보 표시
+                                ai_leverage = decision.get('leverage', 10)
+                                leverage_reasoning = decision.get('leverage_reasoning', '')
+                                print(f"   레버리지: {ai_leverage}배")
+                                if leverage_reasoning:
+                                    print(f"   레버리지 이유: {leverage_reasoning}")
+                                
                                 print(f"   판단: {decision.get('reasoning', 'N/A')}")
                                 
                                 # 스타일별 신뢰도 기준
