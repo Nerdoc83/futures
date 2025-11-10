@@ -3066,10 +3066,41 @@ def main():
                             coin = pos['symbol'].split('/')[0]
                             unrealized_pnl = pos.get('unrealizedPnl', 0)
                             position_size = abs(pos.get('notional', 0))
-                            leverage = pos.get('leverage', 1)  # 🔧 레버리지 가져오기
                             
                             if position_size == 0:
                                 continue
+                            
+                            # DB에서 해당 거래 찾기 (레버리지 정보 포함)
+                            conn = sqlite3.connect(DB_FILE)
+                            c = conn.cursor()
+                            c.execute('''
+                                SELECT id, coin_symbol, side, entry_price, quantity, leverage,
+                                       remaining_position_pct, partial_profit_taken
+                                FROM trades 
+                                WHERE coin_symbol = ? AND status = 'OPEN'
+                                ORDER BY id DESC LIMIT 1
+                            ''', (coin,))
+                            
+                            trade_row = c.fetchone()
+                            conn.close()
+                            
+                            if not trade_row:
+                                print(f"\n   📊 {coin}")
+                                print(f"      ⚠️ DB에 거래 기록 없음")
+                                continue
+                            
+                            trade_data = {
+                                'id': trade_row[0],
+                                'coin_symbol': trade_row[1],
+                                'side': trade_row[2],
+                                'entry_price': trade_row[3],
+                                'quantity': trade_row[4],
+                                'leverage': trade_row[5],
+                                'remaining_position_pct': trade_row[6] or 100,
+                                'partial_profit_taken': trade_row[7] or 0
+                            }
+                            
+                            leverage = trade_data['leverage']
                             
                             # 🔧 올바른 ROE 계산: 초기 마진 대비 수익률
                             initial_margin = position_size / leverage
@@ -3083,34 +3114,6 @@ def main():
                             if pnl_pct < 10:
                                 print(f"      ⏭️ 수익 10% 미만 (체크 기준 미달)")
                                 continue
-                            
-                            # DB에서 해당 거래 찾기
-                            conn = sqlite3.connect(DB_FILE)
-                            c = conn.cursor()
-                            c.execute('''
-                                SELECT id, coin_symbol, side, entry_price, quantity, 
-                                       remaining_position_pct, partial_profit_taken
-                                FROM trades 
-                                WHERE coin_symbol = ? AND status = 'OPEN'
-                                ORDER BY id DESC LIMIT 1
-                            ''', (coin,))
-                            
-                            trade_row = c.fetchone()
-                            conn.close()
-                            
-                            if not trade_row:
-                                print(f"      ⚠️ DB에 거래 기록 없음")
-                                continue
-                            
-                            trade_data = {
-                                'id': trade_row[0],
-                                'coin_symbol': trade_row[1],
-                                'side': trade_row[2],
-                                'entry_price': trade_row[3],
-                                'quantity': trade_row[4],
-                                'remaining_position_pct': trade_row[5] or 100,
-                                'partial_profit_taken': trade_row[6] or 0
-                            }
                             
                             # 이미 50% 청산했으면 스킵
                             if trade_data['remaining_position_pct'] <= 50:
@@ -3143,6 +3146,8 @@ def main():
                         
                         except Exception as e:
                             print(f"   ❌ {coin} 체크 오류: {e}")
+                            import traceback
+                            traceback.print_exc()
                 
                 last_partial_check_time = current_time
                 print(f"{'='*80}\n")
