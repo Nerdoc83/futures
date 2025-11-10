@@ -3066,14 +3066,17 @@ def main():
                             coin = pos['symbol'].split('/')[0]
                             unrealized_pnl = pos.get('unrealizedPnl', 0)
                             position_size = abs(pos.get('notional', 0))
+                            leverage = pos.get('leverage', 1)  # 🔧 레버리지 가져오기
                             
                             if position_size == 0:
                                 continue
                             
-                            pnl_pct = (unrealized_pnl / position_size) * 100
+                            # 🔧 올바른 ROE 계산: 초기 마진 대비 수익률
+                            initial_margin = position_size / leverage
+                            pnl_pct = (unrealized_pnl / initial_margin) * 100
                             
-                            print(f"\n   📊 {coin}")
-                            print(f"      수익률: {pnl_pct:+.2f}%")
+                            print(f"\n   📊 {coin} ({leverage}x)")
+                            print(f"      수익률(ROE): {pnl_pct:+.2f}%")
                             print(f"      미실현: ${unrealized_pnl:+,.2f}")
                             
                             # 수익 10% 미만이면 스킵
