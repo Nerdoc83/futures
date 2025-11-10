@@ -10,7 +10,7 @@ AI Live Trading Bot v2.8 (신뢰도 기반 포지션 사이징)
 - 실제 주문 체결 및 청산
 - AI 보수적 리스크 관리
 - 🆕 처음부터 트레일링 스탑 설정
-- 🆕 24시간 거래 가능 (시간대 제한 없음)
+- 🆕 거래 시간대 제한 (한국시간 23:00~07:00 신규 진입 차단)
 - 🆕 AI 포지션 모니터링 제거 (트레일링 스탑에 전담)
 
 🔧 v2.8 신규 기능 (Option C - 신뢰도 기반 포지션 사이징):
@@ -19,8 +19,6 @@ AI Live Trading Bot v2.8 (신뢰도 기반 포지션 사이징)
   3. ✅ 신뢰도 보너스: 70-80% +0%, 80-90% +5%, 90%+ +10%
   4. ✅ 최대 50% 제한 (안전장치)
   5. ✅ 불필요한 변동성 조정 제거 → 예측 가능한 투자금액
-  6. ✅ AI 레버리지 결정 이유 표시 (투명성 향상)
-  7. ✅ 24시간 거래 가능 (시간대 제한 제거)
 
 🔧 v2.7 기능:
   1. ✅ AI 포지션 모니터링 제거 (API 비용 절감)
@@ -28,9 +26,9 @@ AI Live Trading Bot v2.8 (신뢰도 기반 포지션 사이징)
   3. ✅ 검증된 자동화 시스템에만 의존 (불필요한 AI 개입 제거)
 
 🔧 v2.6 기능:
-  1. ✅ 트레일링 스탑 시스템 (바이낸스 서버 자동 관리)
-  2. ✅ 극단적 기회 감지 시스템 (스캘핑 모드)
-  3. ✅ 기존 포지션 관리는 24시간 유지 (자동화)
+  1. ✅ 거래 시간대 제한 (한국시간 23:00~07:00 / UTC 14:00~22:00)
+  2. ✅ 고변동성 시간대 신규 진입 차단
+  3. ✅ 기존 포지션 관리는 24시간 유지 (트레일링 스탑)
 
 🔧 v2.5 기능:
   1. ✅ 명확한 추세 반전 감지 (+10% 이상 수익시) - 제거됨
@@ -47,9 +45,9 @@ v2.3 기능:
   - 정확한 손익 동기화
 
 ⚠️ 중요:
-- 24시간 거래 가능 (시간대 제한 없음)
+- 신규 진입은 한국시간 07:00~23:00만 허용
 - 포지션 관리는 트레일링 스탑이 자동 처리 (바이낸스 서버)
-- AI는 신규 진입 분석에만 집중 (5분마다)
+- AI는 신규 진입 분석에만 집중 (10분마다)
 - 검증된 자동화에만 의존 → API 비용 절감 + 안정성 향상
 ----------------------------------------------------------------------
 """
@@ -249,6 +247,10 @@ LIVE_TRADING_CONFIG = {
     
     "AI_ANALYSIS_INTERVAL": 300,  # 신규 진입 분석 (5분마다)
     "PERFORMANCE_REVIEW_INTERVAL": 600,  # AI 성과 리뷰 (10분)
+    
+    # 🆕 거래 시간대 제한: 한국시간 23:00~07:00 (UTC 14:00~22:00)은 신규 진입 차단
+    # - 변동성이 심한 시간대는 거래하지 않음
+    # - 기존 포지션의 관리는 트레일링 스탑이 담당 (바이낸스 서버에서 자동 작동)
     
     # 🆕 트레일링 스탑 설정 (거래 스타일별로 자동 설정됨)
     "TRAILING_STOP_ENABLED": True,              # 트레일링 스탑 활성화
@@ -758,6 +760,18 @@ def close_position_and_get_pnl(symbol: str, side: str, trade_info: dict) -> Tupl
         print(f"      ✅ 청산 주문 체결 (ID: {order.get('id', 'N/A')})")
         print(f"      📍 실제 청산가: ${actual_exit_price:,.4f}")
         
+        # 청산가가 정상 범위인지 확인
+        if actual_exit_price > 0 and abs(actual_exit_price - trade_info['entry_price']) / trade_info['entry_price'] < 0.5:
+            exit_price = actual_exit_price
+        else:
+            # 청산가가 이상하면 현재가 사용
+            exit_price = current_price
+            print(f"      ⚠️ 청산가 이상, 현재가 사용: ${exit_price:,.4f}")
+        
+        # 🔧 trade_info에 exit_price 추가 (PnL 계산용)
+        trade_info_with_exit = trade_info.copy()
+        trade_info_with_exit['exit_price'] = exit_price
+        
         # 6. 청산 확인 (최대 3초 대기)
         close_confirmed = False
         for i in range(3):
@@ -774,34 +788,14 @@ def close_position_and_get_pnl(symbol: str, side: str, trade_info: dict) -> Tupl
             print(f"      ⚠️ 청산 확인 실패 (시간 초과)")
             # 그래도 PnL 조회는 시도
         
-        # 7. 🎯 통합 PnL 조회 (2초 추가 대기 후)
-        print(f"      ⏳ API 동기화 대기 (2초)...")
-        time.sleep(2)
+        # 7. 🎯 바이낸스 공식으로 PnL 직접 계산
+        print(f"      ⏳ PnL 계산 중...")
         
         realized_pnl, pnl_pct = get_realized_pnl_accurate(
             symbol, 
             close_timestamp, 
-            trade_info
+            trade_info_with_exit  # exit_price 포함된 버전
         )
-        
-        # 8. 🔧 실제 청산가 우선, PnL 기반 역산은 백업용
-        if actual_exit_price > 0 and abs(actual_exit_price - trade_info['entry_price']) / trade_info['entry_price'] < 0.5:
-            # 청산가가 정상 범위 내면 실제 체결가 사용
-            exit_price = actual_exit_price
-            print(f"      ✅ 실제 체결 청산가 사용: ${exit_price:,.4f}")
-        else:
-            # 청산가가 이상하면 PnL 기반 역산
-            entry_price = trade_info['entry_price']
-            leverage = trade_info['leverage']
-            
-            if side.upper() == 'LONG':
-                price_move_pct = pnl_pct / leverage
-                exit_price = entry_price * (1 + price_move_pct / 100)
-            else:
-                price_move_pct = pnl_pct / leverage
-                exit_price = entry_price * (1 - price_move_pct / 100)
-            
-            print(f"      📍 PnL 기반 역산 청산가: ${exit_price:,.4f}")
         
         return True, exit_price, realized_pnl, pnl_pct
         
@@ -811,39 +805,43 @@ def close_position_and_get_pnl(symbol: str, side: str, trade_info: dict) -> Tupl
 
 def calculate_pnl_from_price(entry_price: float, exit_price: float, position_size: float, side: str, leverage: int) -> Tuple[float, float]:
     """
-    🆕 수수료를 반영한 PnL 계산 (개선 버전)
+    🔧 바이낸스 공식 PnL 계산
+    
+    바이낸스 선물 PnL 계산 공식:
+    - Long: PnL = (Exit Price - Entry Price) × Position Size
+    - Short: PnL = (Entry Price - Exit Price) × Position Size
+    - ROE% = PnL / Initial Margin × 100
+    - Initial Margin = Position Size × Entry Price / Leverage
     
     Returns:
-        (realized_pnl, pnl_percentage)
+        (realized_pnl, roe_percentage)
     """
     try:
-        # 실제 거래 금액 (레버리지 적용)
-        notional_value = position_size * leverage
-        
-        # 손익 계산 (레버리지 반영)
+        # 1. PnL 계산 (바이낸스 공식)
         if side.upper() == 'LONG':
-            price_diff_pct = ((exit_price - entry_price) / entry_price) * 100
-        else:
-            price_diff_pct = ((entry_price - exit_price) / entry_price) * 100
+            pnl_before_fees = (exit_price - entry_price) * position_size
+        else:  # SHORT
+            pnl_before_fees = (entry_price - exit_price) * position_size
         
-        pnl_pct = price_diff_pct * leverage
-        pnl_before_fees = position_size * (pnl_pct / 100)
+        # 2. 수수료 계산 (실제 거래 금액 기준)
+        maker_fee = LIVE_TRADING_CONFIG.get('MAKER_FEE', 0.02)  # 0.02%
+        taker_fee = LIVE_TRADING_CONFIG.get('TAKER_FEE', 0.05)  # 0.05%
         
-        # 수수료 계산 (진입 + 청산)
-        maker_fee = LIVE_TRADING_CONFIG.get('MAKER_FEE', 0.02)
-        taker_fee = LIVE_TRADING_CONFIG.get('TAKER_FEE', 0.05)
+        entry_notional = position_size * entry_price  # 진입시 거래 금액
+        exit_notional = position_size * exit_price    # 청산시 거래 금액
         
-        entry_fee = notional_value * (maker_fee / 100)
-        exit_fee = notional_value * (taker_fee / 100)
+        entry_fee = entry_notional * (maker_fee / 100)
+        exit_fee = exit_notional * (taker_fee / 100)
         total_fees = entry_fee + exit_fee
         
-        # 최종 실현 손익 (수수료 차감)
+        # 3. 최종 실현 손익 (수수료 차감)
         realized_pnl = pnl_before_fees - total_fees
         
-        # 수수료 반영 수익률
-        final_pnl_pct = (realized_pnl / position_size) * 100
+        # 4. ROE% 계산 (바이낸스 공식)
+        initial_margin = (position_size * entry_price) / leverage
+        roe_percent = (realized_pnl / initial_margin) * 100
         
-        return realized_pnl, final_pnl_pct
+        return realized_pnl, roe_percent
         
     except Exception as e:
         print(f"   ❌ PnL 계산 오류: {e}")
@@ -1130,72 +1128,52 @@ def get_position_history_pnl(symbol: str, close_timestamp: int) -> Optional[Dict
 
 def get_realized_pnl_accurate(symbol: str, close_timestamp: int, trade_info: dict) -> Tuple[float, float]:
     """
-    🎯 통합 PnL 조회 함수 (2단계 폴백 시스템)
+    🔧 바이낸스 공식으로 PnL 직접 계산 (진입가, 청산가, 레버리지 기반)
+    
+    바이낸스 API에서 PnL을 가져오지 않고, 확실한 진입가/청산가/레버리지만 사용하여
+    바이낸스 공식으로 PnL을 직접 계산합니다.
     
     Args:
         symbol: 심볼
         close_timestamp: 청산 시간 (밀리초)
-        trade_info: DB 거래 정보 (fallback 계산용)
+        trade_info: DB 거래 정보 (entry_price, exit_price, position_size, side, leverage)
     
     Returns:
-        (realized_pnl, pnl_percentage)
+        (realized_pnl, roe_percentage)
     """
-    print(f"      🔍 바이낸스 실제 PnL 조회 중...")
+    print(f"      🔍 바이낸스 공식으로 PnL 직접 계산 중...")
     
-    # 🥇 1차 시도: userTrades API (가장 정확)
-    print(f"      📊 1차: userTrades API 조회...")
-    pnl_data = get_position_history_pnl(symbol, close_timestamp)
+    # 🔧 trade_info에서 확실한 값들 가져오기
+    entry_price = trade_info['entry_price']
+    exit_price = trade_info.get('exit_price', 0)  # 청산가
+    position_size = trade_info['position_size']
+    side = trade_info['side']
+    leverage = trade_info['leverage']
     
-    if pnl_data and pnl_data['realized_pnl'] != 0:
-        realized_pnl = pnl_data['realized_pnl']
-        commission = pnl_data['commission']
-        position_size = trade_info['position_size']
-        pnl_pct = (realized_pnl / position_size) * 100
-        
-        print(f"      ✅ userTrades 조회 성공!")
-        print(f"      💰 실제 PnL: ${realized_pnl:+.2f} ({pnl_pct:+.2f}%)")
-        print(f"      💳 수수료: ${commission:.4f}")
-        
-        return realized_pnl, pnl_pct
+    # 청산가가 없으면 현재가로 추정
+    if exit_price <= 0:
+        try:
+            ticker = exchange.fetch_ticker(symbol)
+            exit_price = float(ticker['last'])
+            print(f"      ⚠️ 청산가가 없어서 현재가 사용: ${exit_price:,.4f}")
+        except:
+            exit_price = entry_price
+            print(f"      ⚠️ 현재가 조회 실패, 진입가 사용")
     
-    # 🥈 2차 시도: Income API (백업)
-    print(f"      📊 2차: Income API 조회...")
-    time.sleep(1)  # 추가 대기
-    pnl_data = get_realized_pnl_from_binance(symbol, close_timestamp)
-    
-    if pnl_data and pnl_data['realized_pnl'] != 0:
-        realized_pnl = pnl_data['realized_pnl']
-        position_size = trade_info['position_size']
-        pnl_pct = (realized_pnl / position_size) * 100
-        
-        print(f"      ✅ Income API 조회 성공!")
-        print(f"      💰 실제 PnL: ${realized_pnl:+.2f} ({pnl_pct:+.2f}%)")
-        
-        return realized_pnl, pnl_pct
-    
-    # 🥉 3차 시도: 추정 계산 (최후의 수단)
-    print(f"      ⚠️ API 조회 실패 - 추정 계산 사용")
-    
-    # 현재가 조회
-    try:
-        ticker = exchange.fetch_ticker(symbol)
-        current_price = float(ticker['last'])
-    except:
-        # 진입가 기준으로 추정
-        current_price = trade_info['entry_price']
-    
-    realized_pnl, pnl_pct = calculate_pnl_from_price(
-        trade_info['entry_price'],
-        current_price,
-        trade_info['position_size'],
-        trade_info['side'],
-        trade_info['leverage']
+    # 🎯 바이낸스 공식으로 직접 계산
+    realized_pnl, roe_pct = calculate_pnl_from_price(
+        entry_price,
+        exit_price,
+        position_size,
+        side,
+        leverage
     )
     
-    print(f"      📊 추정 PnL: ${realized_pnl:+.2f} ({pnl_pct:+.2f}%)")
-    print(f"      ⚠️ 실제 값과 다를 수 있음")
+    print(f"      ✅ PnL 계산 완료!")
+    print(f"      📊 진입가: ${entry_price:,.4f} | 청산가: ${exit_price:,.4f} | 레버리지: {leverage}x")
+    print(f"      💰 실현 손익: ${realized_pnl:+.2f} | ROE: {roe_pct:+.2f}%")
     
-    return realized_pnl, pnl_pct
+    return realized_pnl, roe_pct
 
 def get_top_volume_coins(limit: int = 10) -> List[dict]:
     """거래량 기준 상위 코인 조회"""
@@ -2466,7 +2444,7 @@ def sync_db_with_binance() -> int:
         print(f"\n   🔄 {coin} 동기화 ({trade_count}개 포지션)")
         
         try:
-            # 🎯 핵심: 해당 심볼의 모든 PnL을 한 번에 조회
+            # 🎯 핵심: 해당 심볼의 모든 거래를 한 번에 조회
             binance_symbol = symbol.replace('/USDT:USDT', 'USDT')
             
             # 가장 오래된 trade의 진입 시간부터 조회
@@ -2496,15 +2474,17 @@ def sync_db_with_binance() -> int:
             close_trades = []
             for t in user_trades:
                 if t.get('reduceOnly') or t.get('positionSide') == 'BOTH':
-                    realized_pnl = float(t.get('realizedPnl', 0))
-                    if realized_pnl != 0:
-                        close_trades.append({
-                            'time': int(t['time']),
-                            'realized_pnl': realized_pnl,
-                            'commission': abs(float(t.get('commission', 0))),
-                            'price': float(t['price']),
-                            'qty': float(t['qty'])
-                        })
+                    # 🔧 청산가만 가져오기 (PnL은 직접 계산)
+                    close_price = float(t['price'])
+                    close_time = int(t['time'])
+                    close_qty = float(t['qty'])
+                    
+                    close_trades.append({
+                        'time': close_time,
+                        'price': close_price,
+                        'qty': close_qty,
+                        'commission': abs(float(t.get('commission', 0)))
+                    })
             
             # 시간순 정렬 (오래된 것부터)
             close_trades.sort(key=lambda x: x['time'])
@@ -2512,18 +2492,22 @@ def sync_db_with_binance() -> int:
             print(f"      ✅ 청산 거래 {len(close_trades)}개 발견")
             
             if len(close_trades) >= trade_count:
-                # 🎯 충분한 PnL 데이터가 있음 - 매칭
+                # 🎯 충분한 청산 데이터가 있음 - 매칭
                 for i, trade in enumerate(trades):
                     if i < len(close_trades):
-                        pnl_data = close_trades[i]
+                        close_data = close_trades[i]
                         
                         trade_id = trade['id']
-                        realized_pnl = pnl_data['realized_pnl']
-                        commission = pnl_data['commission']
-                        exit_price = pnl_data['price']
+                        exit_price = close_data['price']
+                        entry_price = trade['entry_price']
+                        position_size = trade['position_size']
+                        side = trade['side']
+                        leverage = trade['leverage']
                         
-                        # 수익률 계산
-                        pnl_pct = (realized_pnl / trade['position_size']) * 100
+                        # 🔧 바이낸스 공식으로 PnL 직접 계산
+                        realized_pnl, pnl_pct = calculate_pnl_from_price(
+                            entry_price, exit_price, position_size, side, leverage
+                        )
                         
                         print(f"      ✅ ID {trade_id}: PnL ${realized_pnl:+.2f} ({pnl_pct:+.2f}%), 청산가 ${exit_price:,.4f}")
                         
@@ -2533,30 +2517,31 @@ def sync_db_with_binance() -> int:
                             exit_price=exit_price,
                             pnl=realized_pnl,
                             pnl_percent=pnl_pct,
-                            reason="동기화: 트레일링 스탑 청산 (바이낸스 실제 PnL)"
+                            reason="동기화: 수동 종료 (바이낸스 청산가 기반 계산)"
                         )
                         
                         synced_count += 1
                     else:
-                        print(f"      ⚠️ ID {trade['id']}: PnL 데이터 부족")
+                        print(f"      ⚠️ ID {trade['id']}: 청산 데이터 부족")
             
             else:
-                # ⚠️ PnL 데이터 부족 - 추정 계산 사용
-                print(f"      ⚠️ PnL 데이터 부족 ({len(close_trades)}/{trade_count}) - 추정 계산 사용")
+                # ⚠️ 청산 데이터 부족 - 현재가로 추정
+                print(f"      ⚠️ 청산 데이터 부족 ({len(close_trades)}/{trade_count}) - 현재가로 추정")
                 
                 for trade in trades:
                     trade_id = trade['id']
                     entry_price = trade['entry_price']
                     side = trade['side']
+                    position_size = trade['position_size']
+                    leverage = trade['leverage']
                     
                     # 현재가로 추정
                     ticker = exchange.fetch_ticker(symbol)
                     exit_price = float(ticker['last'])
                     
-                    # 수수료 반영 계산
+                    # 🔧 바이낸스 공식으로 계산
                     realized_pnl, pnl_pct = calculate_pnl_from_price(
-                        entry_price, exit_price,
-                        trade['position_size'], side, trade['leverage']
+                        entry_price, exit_price, position_size, side, leverage
                     )
                     
                     print(f"      📊 ID {trade_id}: 추정 PnL ${realized_pnl:+.2f} ({pnl_pct:+.2f}%)")
@@ -2567,7 +2552,7 @@ def sync_db_with_binance() -> int:
                         exit_price=exit_price,
                         pnl=realized_pnl,
                         pnl_percent=pnl_pct,
-                        reason="동기화: 추정 계산 (PnL 데이터 부족)"
+                        reason="동기화: 현재가 기반 추정 (청산 데이터 부족)"
                     )
                     
                     synced_count += 1
@@ -2840,102 +2825,109 @@ def main():
                 print(f"⏸️  포지션 풀 ({open_positions_count}/{max_positions}) - 신규 진입 분석 스킵")
                 print(f"{'='*80}")
             elif current_time - last_analysis_time > LIVE_TRADING_CONFIG['AI_ANALYSIS_INTERVAL']:
-                print(f"\n{'='*80}")
-                print(f"🔍 AI 시장 분석")
-                print(f"{'='*80}")
-            
-                top_coins = get_top_volume_coins(10)
-                if top_coins:
-                    open_coin_symbols = {t['coin_symbol'] for t in open_trades}
-                    
-                    for coin_data in top_coins:
-                        # 포지션이 5개 차면 중단
-                        if open_positions_count >= LIVE_TRADING_CONFIG['MAX_CONCURRENT_POSITIONS']:
-                            print(f"\n   ⏸️  포지션 풀 ({open_positions_count}/{LIVE_TRADING_CONFIG['MAX_CONCURRENT_POSITIONS']}) - 분석 중단")
-                            break
+                # 🆕 거래 시간대 체크 (한국시간 23:00~07:00 금지)
+                is_allowed, time_msg = is_trading_allowed_time()
+                if not is_allowed:
+                    print(f"\n{'='*80}")
+                    print(time_msg)
+                    print(f"{'='*80}")
+                else:
+                    print(f"\n{'='*80}")
+                    print(f"🔍 AI 시장 분석")
+                    print(f"{'='*80}")
+                
+                    top_coins = get_top_volume_coins(10)
+                    if top_coins:
+                        open_coin_symbols = {t['coin_symbol'] for t in open_trades}
                         
-                        coin = coin_data['coin']
-                        if coin in open_coin_symbols:
-                            continue
-                        
-                        print(f"\n{'─'*70}")
-                        print(f"📈 {coin}")
-                        print(f"{'─'*70}")
-                        
-                        try:
-                            symbol = f"{coin}/USDT:USDT"
+                        for coin_data in top_coins:
+                            # 포지션이 5개 차면 중단
+                            if open_positions_count >= LIVE_TRADING_CONFIG['MAX_CONCURRENT_POSITIONS']:
+                                print(f"\n   ⏸️  포지션 풀 ({open_positions_count}/{LIVE_TRADING_CONFIG['MAX_CONCURRENT_POSITIONS']}) - 분석 중단")
+                                break
                             
-                            print(f"   🔍 시장 데이터 수집 중...")
-                            market_data = fetch_comprehensive_market_data(symbol)
-                            
-                            if not market_data:
-                                print(f"   ⚠️ 시장 데이터 없음")
+                            coin = coin_data['coin']
+                            if coin in open_coin_symbols:
                                 continue
                             
-                            # 수집된 타임프레임 개수
-                            ohlcv_count = len(market_data.get('ohlcv', {}))
-                            futures_ind = market_data.get('futures_indicators', {})
+                            print(f"\n{'─'*70}")
+                            print(f"📈 {coin}")
+                            print(f"{'─'*70}")
                             
-                            print(f"   ✅ {ohlcv_count}개 타임프레임 데이터 수집 완료")
-                            
-                            # 🆕 선물 지표 간단히 표시
-                            if futures_ind.get('funding_rate') is not None:
-                                fr = futures_ind['funding_rate']
-                                fr_status = futures_ind['funding_rate_status']
-                                print(f"   🔥 펀딩비: {fr:+.4f}% ({fr_status})")
-                            
-                            if futures_ind.get('open_interest') is not None:
-                                oi = futures_ind['open_interest']
-                                oi_status = futures_ind['oi_status']
-                                print(f"   📊 OI: {oi:,.0f} ({oi_status})")
-                            
-                            # 🆕 거래 스타일 자동 결정
-                            print(f"   🎯 거래 스타일 결정 중...")
-                            style_name, trading_style = determine_optimal_trading_style(symbol, coin_data)
-                            
-                            performance_history = get_recent_performance(7)
-                            print(f"   🤖 AI 분석 중 (타임프레임: {trading_style['timeframes']})...")
-                            decision = ai_comprehensive_analysis(
-                                coin_data, 
-                                market_data, 
-                                performance_history,
-                                timeframes=trading_style['timeframes']  # 선택된 스타일의 타임프레임 사용
-                            )
-                            
-                            print(f"   신뢰도: {decision.get('confidence', 0)}%")
-                            print(f"   방향: {decision.get('direction', 'N/A')}")
-                            
-                            # 레버리지 정보 표시
-                            ai_leverage = decision.get('leverage', 10)
-                            leverage_reasoning = decision.get('leverage_reasoning', '')
-                            print(f"   레버리지: {ai_leverage}배")
-                            if leverage_reasoning:
-                                print(f"   레버리지 이유: {leverage_reasoning}")
-                            
-                            print(f"   판단: {decision.get('reasoning', 'N/A')}")
-                            
-                            # 스타일별 신뢰도 기준
-                            min_confidence = 85 if style_name == "SCALPING" else 70
-                            confidence = decision.get('confidence', 0)
-                            
-                            print(f"   📊 요구 신뢰도: {min_confidence}% ({trading_style['name']})")
-                            
-                            if decision.get('trade') and confidence >= min_confidence:
-                                print(f"\n   ✅ AI 승인 (신뢰도 {confidence}% ≥ {min_confidence}%)")
-                                if execute_live_trade(coin_data, decision, available_balance):
-                                    open_positions_count += 1
-                                    available_balance = get_available_balance()
-                            else:
-                                if decision.get('trade'):
-                                    print(f"   ⏭️ 신뢰도 부족 ({confidence}% < {min_confidence}%)")
+                            try:
+                                symbol = f"{coin}/USDT:USDT"
+                                
+                                print(f"   🔍 시장 데이터 수집 중...")
+                                market_data = fetch_comprehensive_market_data(symbol)
+                                
+                                if not market_data:
+                                    print(f"   ⚠️ 시장 데이터 없음")
+                                    continue
+                                
+                                # 수집된 타임프레임 개수
+                                ohlcv_count = len(market_data.get('ohlcv', {}))
+                                futures_ind = market_data.get('futures_indicators', {})
+                                
+                                print(f"   ✅ {ohlcv_count}개 타임프레임 데이터 수집 완료")
+                                
+                                # 🆕 선물 지표 간단히 표시
+                                if futures_ind.get('funding_rate') is not None:
+                                    fr = futures_ind['funding_rate']
+                                    fr_status = futures_ind['funding_rate_status']
+                                    print(f"   🔥 펀딩비: {fr:+.4f}% ({fr_status})")
+                                
+                                if futures_ind.get('open_interest') is not None:
+                                    oi = futures_ind['open_interest']
+                                    oi_status = futures_ind['oi_status']
+                                    print(f"   📊 OI: {oi:,.0f} ({oi_status})")
+                                
+                                # 🆕 거래 스타일 자동 결정
+                                print(f"   🎯 거래 스타일 결정 중...")
+                                style_name, trading_style = determine_optimal_trading_style(symbol, coin_data)
+                                
+                                performance_history = get_recent_performance(7)
+                                print(f"   🤖 AI 분석 중 (타임프레임: {trading_style['timeframes']})...")
+                                decision = ai_comprehensive_analysis(
+                                    coin_data, 
+                                    market_data, 
+                                    performance_history,
+                                    timeframes=trading_style['timeframes']  # 선택된 스타일의 타임프레임 사용
+                                )
+                                
+                                print(f"   신뢰도: {decision.get('confidence', 0)}%")
+                                print(f"   방향: {decision.get('direction', 'N/A')}")
+                                
+                                # 레버리지 정보 표시
+                                ai_leverage = decision.get('leverage', 10)
+                                leverage_reasoning = decision.get('leverage_reasoning', '')
+                                print(f"   레버리지: {ai_leverage}배")
+                                if leverage_reasoning:
+                                    print(f"   레버리지 이유: {leverage_reasoning}")
+                                
+                                print(f"   판단: {decision.get('reasoning', 'N/A')}")
+                                
+                                # 스타일별 신뢰도 기준
+                                min_confidence = 85 if style_name == "SCALPING" else 70
+                                confidence = decision.get('confidence', 0)
+                                
+                                print(f"   📊 요구 신뢰도: {min_confidence}% ({trading_style['name']})")
+                                
+                                if decision.get('trade') and confidence >= min_confidence:
+                                    print(f"\n   ✅ AI 승인 (신뢰도 {confidence}% ≥ {min_confidence}%)")
+                                    if execute_live_trade(coin_data, decision, available_balance):
+                                        open_positions_count += 1
+                                        available_balance = get_available_balance()
                                 else:
-                                    print(f"   ⏭️ AI 거래 비추천 (신뢰도: {confidence}%)")
-                            
-                            time.sleep(2)
-                        except Exception as e:
-                            print(f"   ❌ 분석 오류: {e}")
-                
-                last_analysis_time = current_time
+                                    if decision.get('trade'):
+                                        print(f"   ⏭️ 신뢰도 부족 ({confidence}% < {min_confidence}%)")
+                                    else:
+                                        print(f"   ⏭️ AI 거래 비추천 (신뢰도: {confidence}%)")
+                                
+                                time.sleep(2)
+                            except Exception as e:
+                                print(f"   ❌ 분석 오류: {e}")
+                    
+                    last_analysis_time = current_time
             
             print(f"\n{'='*80}")
             print(f"💤 60초 대기...")
@@ -3012,7 +3004,7 @@ if __name__ == "__main__":
 ║        ✅ Isolated Margin 모드                                ║
 ║        ✅ Risk/Reward ≥ 1:2 전략                             ║
 ║        🆕 트레일링 스탑 (바이낸스 서버)                       ║
-║        🆕 24시간 거래 가능 (시간대 제한 없음)                 ║
+║        🆕 거래 시간대 제한 (KST 07:00~23:00)                  ║
 ║        🆕 Option C 포지션 사이징 (신뢰도 기반)                ║
 ╚═══════════════════════════════════════════════════════════════╝
     """)
@@ -3024,7 +3016,7 @@ if __name__ == "__main__":
     print("   4. 소액으로 테스트한 후 본격적으로 사용하세요")
     print(f"   5. 수수료: Maker 0.02%, Taker 0.05%")
     print(f"   6. 🆕 트레일링 스탑이 진입 즉시 활성화됩니다 (바이낸스 서버)")
-    print(f"   7. 🆕 24시간 거래 가능 (시간대 제한 없음)")
+    print(f"   7. 🆕 거래 시간대: 한국시간 07:00~23:00만 신규 진입")
     print(f"   8. 🆕 Option C 포지션 사이징: 스캘핑 25%, 데이트레이딩 35% + 신뢰도 보너스\n")
     
     print("\n🔧 v2.8 신규 기능 (Option C - 신뢰도 기반 포지션 사이징):")
@@ -3033,8 +3025,6 @@ if __name__ == "__main__":
     print("   3. ✅ 최대 50% 제한 (안전장치)")
     print("   4. ✅ 간단하고 예측 가능한 포지션 크기")
     print("   5. ✅ AI 신뢰도를 직접 활용 → 확신 있을 때 더 큰 배팅")
-    print("   6. ✅ AI 레버리지 결정 이유 표시 (투명성 향상)")
-    print("   7. ✅ 24시간 거래 가능 (시간대 제한 제거)")
     
     print("\n🔧 v2.7 최적화:")
     print("   1. ✅ AI 포지션 모니터링 제거 → DeepSeek API 비용 최대 90% 절감")
@@ -3043,11 +3033,11 @@ if __name__ == "__main__":
     print("   4. ✅ 불필요한 AI 개입 제거 → 오판으로 인한 조기 청산 방지")
     
     print("\n🔧 v2.6-v2.3 주요 기능:")
-    print("   1. ✅ 바이낸스 Income History API로 실제 realized PnL 조회")
-    print("   2. ✅ 수수료 반영 PnL 계산 (Maker 0.02%, Taker 0.05%)")
-    print("   3. ✅ 초고변동성 코인 필터링 (ATR 15% 이상 차단)")
-    print("   4. ✅ 동적 콜백 시스템 (변동성에 따라 자동 조절)")
-    print("   5. ✅ 극단적 기회 감지 시스템 (스캘핑 모드)\n")
+    print("   1. ✅ 거래 시간대 제한 (한국시간 23:00~07:00 신규 진입 차단)")
+    print("   2. ✅ 바이낸스 Income History API로 실제 realized PnL 조회")
+    print("   3. ✅ 수수료 반영 PnL 계산 (Maker 0.02%, Taker 0.05%)")
+    print("   4. ✅ 초고변동성 코인 필터링 (ATR 15% 이상 차단)")
+    print("   5. ✅ 동적 콜백 시스템 (변동성에 따라 자동 조절)\n")
     
     # 자동 시작 (확인 없음)
     print("🚀 백그라운드 모드 - 자동 시작...")
