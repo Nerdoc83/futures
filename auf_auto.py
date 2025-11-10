@@ -246,7 +246,7 @@ TRADING_STYLES = {
 # ===== 실거래 설정 =====
 LIVE_TRADING_CONFIG = {
     "MAX_CONCURRENT_POSITIONS": 5,  # 최대 동시 포지션 (실제 진입 제한)
-    "MIN_CAPITAL_THRESHOLD": 100.0,  # 최소 잔고 (USDT)
+    "MIN_CAPITAL_THRESHOLD": 50.0,  # 최소 잔고 (USDT)
     
     # 🆕 AI 거래 스타일: 데이트레이딩 중심 + 극단적 스캘핑
     "ADAPTIVE_STYLE_ENABLED": True,  # 극단적 기회 감지 활성화
@@ -2951,13 +2951,23 @@ def main():
     balance = get_available_balance()
     min_balance = LIVE_TRADING_CONFIG['MIN_CAPITAL_THRESHOLD']
     
-    if balance < min_balance:
+    # 🔧 현재 포지션 수 확인
+    current_positions = get_open_positions()
+    open_positions_count = len(current_positions)
+    max_positions = LIVE_TRADING_CONFIG['MAX_CONCURRENT_POSITIONS']
+    
+    # 포지션이 풀이 아니면서 잔고가 부족한 경우만 종료
+    if balance < min_balance and open_positions_count < max_positions:
         print(f"❌ 잔고 부족: ${balance:.2f} < ${min_balance:.2f}")
         print(f"   최소 ${min_balance:.2f} USDT가 필요합니다.")
+        print(f"   (신규 진입을 위한 최소 자본)")
         return
+    elif balance < min_balance and open_positions_count >= max_positions:
+        print(f"⚠️ 잔고: ${balance:.2f} (최소 ${min_balance:.2f} 미만)")
+        print(f"   ✅ 포지션 풀 ({open_positions_count}/{max_positions}) - 기존 포지션 관리 모드")
     
     print(f"   💰 Available Balance: ${balance:,.2f}")
-    print(f"   🎯 최대 포지션: {LIVE_TRADING_CONFIG['MAX_CONCURRENT_POSITIONS']}개")
+    print(f"   🎯 현재 포지션: {open_positions_count}/{max_positions}개")
     print(f"   🤖 AI 신규 분석: {LIVE_TRADING_CONFIG['AI_ANALYSIS_INTERVAL']//60}분마다")
     print(f"   📊 성과 리뷰: {LIVE_TRADING_CONFIG['PERFORMANCE_REVIEW_INTERVAL']//60}분마다")
     print(f"   📈 레버리지: {LIVE_TRADING_CONFIG['MIN_LEVERAGE']}-{LIVE_TRADING_CONFIG['MAX_LEVERAGE']}x (AI 판단)")
