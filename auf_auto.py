@@ -2287,7 +2287,7 @@ def get_recent_performance(days: int = 7) -> dict:
 
 # ===== 실거래 실행 =====
 
-def execute_live_trade(coin_data: dict, ai_decision: dict, available_balance: float) -> bool:
+def execute_live_trade(coin_data: dict, ai_decision: dict, available_balance: float, open_positions_count: int) -> bool:
     """실제 거래 실행 (거래 스타일 자동 선택)"""
     try:
         coin = coin_data['coin']
@@ -2348,15 +2348,30 @@ def execute_live_trade(coin_data: dict, ai_decision: dict, available_balance: fl
         
         position_size = available_balance * (position_pct / 100)
         
+        # 🆕 동적 최소 투자금액 계산 (남은 포지션 수 기반)
+        max_positions = LIVE_TRADING_CONFIG['MAX_CONCURRENT_POSITIONS']
+        remaining_slots = max_positions - open_positions_count
+        
+        if remaining_slots <= 0:
+            print(f"   ❌ 포지션 슬롯 없음")
+            return False
+        
+        # 최소 투자금액 = (가용자금 / 남은 슬롯) × 80%
+        min_position_size = (available_balance / remaining_slots) * 0.8
+        
         print(f"   💰 포지션 크기 계산 (Option C - 신뢰도 기반):")
         print(f"      - 거래 스타일: {trading_style['name']}")
         print(f"      - 베이스: {base_position_pct}%")
         print(f"      - 신뢰도 보너스: +{confidence_bonus}% ({confidence}% 신뢰도)")
-        print(f"      - 최종: {position_pct}% = ${position_size:,.2f}")
+        print(f"      - 계산된 크기: {position_pct}% = ${position_size:,.2f}")
+        print(f"      - 남은 슬롯: {remaining_slots}개")
+        print(f"      - 최소 요구: ${min_position_size:,.2f} (가용자금/슬롯 × 80%)")
         
         # 최소 포지션 크기 체크
-        if position_size < 50:
-            print(f"   ❌ 포지션 크기 부족: ${position_size:.2f} < $50")
+        if position_size < min_position_size:
+            print(f"   ❌ 포지션 크기 부족: ${position_size:.2f} < ${min_position_size:.2f}")
+            print(f"      💡 남은 {remaining_slots}개 슬롯에 자금을 효율적으로 분배하기 위해")
+            print(f"      💡 최소 ${min_position_size:.2f} 이상 투자가 필요합니다")
             return False
         
         # 레버리지 설정
@@ -3248,7 +3263,7 @@ def main():
                                 
                                 if decision.get('trade') and confidence >= min_confidence:
                                     print(f"\n   ✅ AI 승인 (신뢰도 {confidence}% ≥ {min_confidence}%)")
-                                    if execute_live_trade(coin_data, decision, available_balance):
+                                    if execute_live_trade(coin_data, decision, available_balance, open_positions_count):
                                         open_positions_count += 1
                                         available_balance = get_available_balance()
                                 else:
