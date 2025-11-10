@@ -20,6 +20,8 @@ AI Live Trading Bot v2.9 (부분 익절 시스템)
   4. ✅ AI 추세 약화 분석 (RSI, MACD, EMA, 캔들 패턴)
   5. ✅ 약화 점수 6/10 이상 시 자동 부분 익절
   6. ✅ 나머지 50%는 트레일링 스탑으로 계속 보호
+  7. ✅ 포지션 크기: 최소 요구금액 기반 + 신뢰도 추가 투자
+  8. ✅ 남은 슬롯별 동적 최소 투자금액 (효율적 자금 분배)
 
 🔧 v2.8 기능 (신뢰도 기반 포지션 사이징):
   1. ✅ 간단하고 명확한 포지션 크기 계산
@@ -2323,32 +2325,8 @@ def execute_live_trade(coin_data: dict, ai_decision: dict, available_balance: fl
             trading_style = TRADING_STYLES[default_style]
             print(f"   📌 기본 스타일 사용: {trading_style['name']}")
         
-        # 🔧 Option C: 신뢰도 기반 포지션 사이징 (단순하고 명확)
-        # 거래 스타일별 기본 포지션 크기
-        if style_name == "SCALPING":
-            base_position_pct = 25  # 스캘핑: 25%
-        elif style_name == "DAY_TRADING":
-            base_position_pct = 35  # 데이트레이딩: 35%
-        else:
-            base_position_pct = 35  # 기본값: 35%
-        
-        # 신뢰도 보너스
-        if confidence >= 90:
-            confidence_bonus = 10  # 90%+ → +10%
-        elif confidence >= 80:
-            confidence_bonus = 5   # 80-90% → +5%
-        else:
-            confidence_bonus = 0   # 70-80% → +0%
-        
-        # 최종 포지션 크기
-        position_pct = base_position_pct + confidence_bonus
-        
-        # 최대 50% 제한 (안전장치)
-        position_pct = min(50, position_pct)
-        
-        position_size = available_balance * (position_pct / 100)
-        
-        # 🆕 동적 최소 투자금액 계산 (남은 포지션 수 기반)
+        # 🔧 Option C 개선: 최소 요구금액 기반 + 신뢰도 추가 투자
+        # 1단계: 최소 요구금액 계산 (가용자금/남은슬롯 × 80%)
         max_positions = LIVE_TRADING_CONFIG['MAX_CONCURRENT_POSITIONS']
         remaining_slots = max_positions - open_positions_count
         
@@ -2356,22 +2334,38 @@ def execute_live_trade(coin_data: dict, ai_decision: dict, available_balance: fl
             print(f"   ❌ 포지션 슬롯 없음")
             return False
         
-        # 최소 투자금액 = (가용자금 / 남은 슬롯) × 80%
         min_position_size = (available_balance / remaining_slots) * 0.8
         
-        print(f"   💰 포지션 크기 계산 (Option C - 신뢰도 기반):")
-        print(f"      - 거래 스타일: {trading_style['name']}")
-        print(f"      - 베이스: {base_position_pct}%")
-        print(f"      - 신뢰도 보너스: +{confidence_bonus}% ({confidence}% 신뢰도)")
-        print(f"      - 계산된 크기: {position_pct}% = ${position_size:,.2f}")
-        print(f"      - 남은 슬롯: {remaining_slots}개")
-        print(f"      - 최소 요구: ${min_position_size:,.2f} (가용자금/슬롯 × 80%)")
+        # 2단계: 신뢰도 기반 추가 투자 배율
+        if confidence >= 90:
+            confidence_multiplier = 1.20  # 90%+ → +20%
+        elif confidence >= 80:
+            confidence_multiplier = 1.10  # 80-90% → +10%
+        else:
+            confidence_multiplier = 1.00  # 70-80% → +0%
         
-        # 최소 포지션 크기 체크
+        # 3단계: 최종 포지션 크기 = 최소 요구금액 × 신뢰도 배율
+        position_size = min_position_size * confidence_multiplier
+        
+        # 4단계: 가용자금 초과 방지 (최대 80% 제한)
+        max_position_size = available_balance * 0.8
+        if position_size > max_position_size:
+            position_size = max_position_size
+            print(f"   ⚠️ 포지션 크기 조정: 가용자금의 80% 제한")
+        
+        confidence_bonus_pct = (confidence_multiplier - 1.0) * 100
+        
+        print(f"   💰 포지션 크기 계산 (최소 요구 + 신뢰도 추가):")
+        print(f"      - 거래 스타일: {trading_style['name']}")
+        print(f"      - 가용 자금: ${available_balance:,.2f}")
+        print(f"      - 남은 슬롯: {remaining_slots}개")
+        print(f"      - 최소 요구: ${min_position_size:,.2f} (자금/슬롯 × 80%)")
+        print(f"      - 신뢰도: {confidence}% → 추가 투자 {confidence_bonus_pct:+.0f}%")
+        print(f"      - 최종 투자: ${position_size:,.2f}")
+        
+        # 안전장치: 최소 요구금액 미달 시 (이론상 발생 안함)
         if position_size < min_position_size:
-            print(f"   ❌ 포지션 크기 부족: ${position_size:.2f} < ${min_position_size:.2f}")
-            print(f"      💡 남은 {remaining_slots}개 슬롯에 자금을 효율적으로 분배하기 위해")
-            print(f"      💡 최소 ${min_position_size:.2f} 이상 투자가 필요합니다")
+            print(f"   ❌ 시스템 오류: 계산된 크기가 최소 요구 미달")
             return False
         
         # 레버리지 설정
@@ -3377,7 +3371,7 @@ if __name__ == "__main__":
     print(f"   5. 수수료: Maker 0.02%, Taker 0.05%")
     print(f"   6. 🆕 트레일링 스탑이 진입 즉시 활성화됩니다 (바이낸스 서버)")
     print(f"   7. 🆕 거래 시간대: 한국시간 07:00~23:00만 신규 진입")
-    print(f"   8. 🆕 Option C 포지션 사이징: 스캘핑 25%, 데이트레이딩 35% + 신뢰도 보너스")
+    print(f"   8. 🆕 포지션 크기: 최소 요구금액(자금/슬롯×80%) + 신뢰도 추가 투자")
     print(f"   9. 🆕 부분 익절: 수익 10%+ 시 추세 약화 감지하면 50% 자동 청산\n")
     
     print("\n🔧 v2.9 신규 기능 (부분 익절 시스템):")
@@ -3387,7 +3381,9 @@ if __name__ == "__main__":
     print("   4. ✅ AI 추세 약화 분석 (RSI, MACD, EMA, 캔들 패턴)")
     print("   5. ✅ 약화 점수 6/10 이상 시 자동 부분 익절")
     print("   6. ✅ 나머지 50%는 트레일링 스탑으로 계속 보호")
-    print("   💡 수익 확보 + 추가 수익 기회 모두 잡기!")
+    print("   7. ✅ 포지션 크기: 최소 요구금액 + 신뢰도 추가 투자")
+    print("   8. ✅ 남은 슬롯별 동적 최소금액 (자금/슬롯 × 80%)")
+    print("   💡 수익 확보 + 추가 수익 + 효율적 자금 배분!")
     
     print("\n🔧 v2.8 기능 (신뢰도 기반 포지션 사이징):")
     print("   1. ✅ 스타일별 베이스: 스캘핑 25%, 데이트레이딩 35%")
