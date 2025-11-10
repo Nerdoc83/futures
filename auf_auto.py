@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-AI Live Trading Bot v2.8 (신뢰도 기반 포지션 사이징)
+AI Live Trading Bot v2.9 (부분 익절 시스템)
 ----------------------------------------------------------------------
 ⚠️ 실제 바이낸스 선물 거래 - 실제 자금 사용
 - 실시간 바이낸스 선물 데이터 사용
@@ -13,7 +13,15 @@ AI Live Trading Bot v2.8 (신뢰도 기반 포지션 사이징)
 - 🆕 거래 시간대 제한 (한국시간 23:00~07:00 신규 진입 차단)
 - 🆕 AI 포지션 모니터링 제거 (트레일링 스탑에 전담)
 
-🔧 v2.8 신규 기능 (Option C - 신뢰도 기반 포지션 사이징):
+🔧 v2.9 신규 기능 (부분 익절 시스템):
+  1. ✅ 수익 10% 이상 & 추세 약화 감지 시 50% 자동 청산
+  2. ✅ 1시간 차트 분석 (데이트레이딩 전략에 최적화)
+  3. ✅ 30분마다 자동 체크
+  4. ✅ AI 추세 약화 분석 (RSI, MACD, EMA, 캔들 패턴)
+  5. ✅ 약화 점수 6/10 이상 시 자동 부분 익절
+  6. ✅ 나머지 50%는 트레일링 스탑으로 계속 보호
+
+🔧 v2.8 기능 (신뢰도 기반 포지션 사이징):
   1. ✅ 간단하고 명확한 포지션 크기 계산
   2. ✅ 스타일별 베이스: 스캘핑 25%, 데이트레이딩 35%
   3. ✅ 신뢰도 보너스: 70-80% +0%, 80-90% +5%, 90%+ +10%
@@ -1801,7 +1809,9 @@ def init_database():
             pnl REAL,
             pnl_percent REAL,
             exit_reason TEXT,
-            status TEXT DEFAULT 'OPEN'
+            status TEXT DEFAULT 'OPEN',
+            partial_profit_taken REAL DEFAULT 0,
+            remaining_position_pct REAL DEFAULT 100
         )
     ''')
     
@@ -1811,6 +1821,19 @@ def init_database():
         print("✅ exit_reason 컬럼 추가됨")
     except sqlite3.OperationalError:
         # 이미 존재하면 무시
+        pass
+    
+    # 🆕 부분 익절 시스템 컬럼 추가
+    try:
+        c.execute("ALTER TABLE trades ADD COLUMN partial_profit_taken REAL DEFAULT 0")
+        print("✅ partial_profit_taken 컬럼 추가됨")
+    except sqlite3.OperationalError:
+        pass
+    
+    try:
+        c.execute("ALTER TABLE trades ADD COLUMN remaining_position_pct REAL DEFAULT 100")
+        print("✅ remaining_position_pct 컬럼 추가됨")
+    except sqlite3.OperationalError:
         pass
     
     # 기존 manual_trade 컬럼이 있으면 모두 FALSE로 설정
@@ -1900,6 +1923,213 @@ def get_all_open_trades() -> List[dict]:
         })
     
     return trades
+
+def ai_analyze_trend_weakness(symbol: str, side: str, current_pnl_pct: float) -> Dict:
+    """
+    🆕 AI 추세 약화 분석 (부분 익절용)
+    - 1시간 차트 분석 (데이트레이딩 전략용)
+    - 수익 10% 이상일 때 추세 약화 감지
+    
+    Args:
+        symbol: 거래 심볼 (예: BTC/USDT:USDT)
+        side: 포지션 방향 ('long' or 'short')
+        current_pnl_pct: 현재 수익률(%)
+    
+    Returns:
+        dict: {
+            'should_partial_close': bool,
+            'weakness_score': int (0-10),
+            'reasoning': str
+        }
+    """
+    try:
+        # 1시간 차트 데이터 가져오기
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe='1h', limit=100)
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        
+        # 기술적 지표 계산
+        df['rsi'] = ta.rsi(df['close'], length=14)
+        macd = ta.macd(df['close'])
+        df['macd'] = macd['MACD_12_26_9']
+        df['signal'] = macd['MACDs_12_26_9']
+        df['ema50'] = ta.ema(df['close'], length=50)
+        
+        # 최근 데이터
+        latest = df.iloc[-1]
+        prev = df.iloc[-2]
+        
+        weakness_signals = []
+        weakness_score = 0
+        
+        if side.lower() == 'long':
+            # LONG 포지션 추세 약화 신호
+            
+            # 1. RSI 과매수 구간
+            if latest['rsi'] > 70:
+                weakness_signals.append(f"RSI 과매수 ({latest['rsi']:.1f})")
+                weakness_score += 3
+            elif latest['rsi'] > 65:
+                weakness_signals.append(f"RSI 상승 둔화 ({latest['rsi']:.1f})")
+                weakness_score += 2
+            
+            # 2. MACD 약화
+            if latest['macd'] < prev['macd']:
+                weakness_signals.append("MACD 하락 전환")
+                weakness_score += 2
+                if latest['macd'] < latest['signal']:
+                    weakness_signals.append("MACD 데드크로스")
+                    weakness_score += 3
+            
+            # 3. EMA 이탈
+            if latest['close'] < latest['ema50']:
+                weakness_signals.append("EMA50 하락 이탈")
+                weakness_score += 2
+            
+            # 4. 캔들 패턴 (음봉 연속)
+            recent_closes = df['close'].tail(3).tolist()
+            recent_opens = df['open'].tail(3).tolist()
+            red_candles = sum(1 for i in range(len(recent_closes)) if recent_closes[i] < recent_opens[i])
+            if red_candles >= 2:
+                weakness_signals.append(f"음봉 {red_candles}개 연속")
+                weakness_score += 1
+        
+        else:  # SHORT 포지션
+            # SHORT 포지션 추세 약화 신호
+            
+            # 1. RSI 과매도 구간
+            if latest['rsi'] < 30:
+                weakness_signals.append(f"RSI 과매도 ({latest['rsi']:.1f})")
+                weakness_score += 3
+            elif latest['rsi'] < 35:
+                weakness_signals.append(f"RSI 하락 둔화 ({latest['rsi']:.1f})")
+                weakness_score += 2
+            
+            # 2. MACD 약화
+            if latest['macd'] > prev['macd']:
+                weakness_signals.append("MACD 상승 전환")
+                weakness_score += 2
+                if latest['macd'] > latest['signal']:
+                    weakness_signals.append("MACD 골든크로스")
+                    weakness_score += 3
+            
+            # 3. EMA 이탈
+            if latest['close'] > latest['ema50']:
+                weakness_signals.append("EMA50 상승 돌파")
+                weakness_score += 2
+            
+            # 4. 캔들 패턴 (양봉 연속)
+            recent_closes = df['close'].tail(3).tolist()
+            recent_opens = df['open'].tail(3).tolist()
+            green_candles = sum(1 for i in range(len(recent_closes)) if recent_closes[i] > recent_opens[i])
+            if green_candles >= 2:
+                weakness_signals.append(f"양봉 {green_candles}개 연속")
+                weakness_score += 1
+        
+        # 부분 익절 결정 (weakness_score >= 6/10)
+        should_close = weakness_score >= 6 and current_pnl_pct >= 10
+        
+        reasoning = f"추세 약화 점수: {weakness_score}/10\n"
+        if weakness_signals:
+            reasoning += "신호: " + ", ".join(weakness_signals)
+        else:
+            reasoning += "추세 유지 중"
+        
+        return {
+            'should_partial_close': should_close,
+            'weakness_score': weakness_score,
+            'reasoning': reasoning
+        }
+    
+    except Exception as e:
+        print(f"   ⚠️ 추세 분석 오류: {e}")
+        return {
+            'should_partial_close': False,
+            'weakness_score': 0,
+            'reasoning': f"분석 오류: {e}"
+        }
+
+def execute_partial_close(trade: Dict) -> bool:
+    """
+    🆕 부분 익절 실행 (50% 청산)
+    
+    Args:
+        trade: 거래 정보 딕셔너리
+    
+    Returns:
+        bool: 성공 여부
+    """
+    try:
+        symbol = f"{trade['coin_symbol']}/USDT:USDT"
+        side = trade['side']
+        original_quantity = trade['quantity']
+        remaining_pct = trade.get('remaining_position_pct', 100)
+        
+        # 현재 남은 수량 계산
+        current_quantity = original_quantity * (remaining_pct / 100)
+        
+        # 50% 청산
+        close_quantity = current_quantity * 0.5
+        
+        # 반대 주문 (LONG이면 SELL, SHORT면 BUY)
+        order_side = 'sell' if side.lower() == 'long' else 'buy'
+        
+        print(f"\n   🔄 부분 익절 실행 중...")
+        print(f"   원본 수량: {original_quantity:.8f}")
+        print(f"   현재 남은: {current_quantity:.8f} ({remaining_pct:.1f}%)")
+        print(f"   청산 수량: {close_quantity:.8f} (50%)")
+        
+        # 시장가 주문으로 50% 청산
+        order = exchange.create_order(
+            symbol=symbol,
+            type='market',
+            side=order_side,
+            amount=close_quantity,
+            params={'reduceOnly': True}
+        )
+        
+        print(f"   ✅ 부분 청산 완료!")
+        print(f"   주문 ID: {order['id']}")
+        
+        # 실제 체결 가격 조회
+        time.sleep(1)
+        filled_order = exchange.fetch_order(order['id'], symbol)
+        filled_price = filled_order['average']
+        
+        # 부분 익절 수익 계산
+        entry_price = trade['entry_price']
+        leverage = trade['leverage']
+        
+        if side.lower() == 'long':
+            pnl_per_unit = (filled_price - entry_price) * close_quantity
+        else:
+            pnl_per_unit = (entry_price - filled_price) * close_quantity
+        
+        partial_profit = pnl_per_unit  # 레버리지는 이미 포지션 크기에 반영되어 있음
+        
+        # DB 업데이트
+        new_remaining_pct = remaining_pct * 0.5
+        
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        
+        c.execute('''
+            UPDATE trades 
+            SET partial_profit_taken = partial_profit_taken + ?,
+                remaining_position_pct = ?
+            WHERE id = ?
+        ''', (partial_profit, new_remaining_pct, trade['id']))
+        
+        conn.commit()
+        conn.close()
+        
+        print(f"   💰 부분 익절 수익: ${partial_profit:+,.2f}")
+        print(f"   📊 남은 포지션: {new_remaining_pct:.1f}%")
+        
+        return True
+    
+    except Exception as e:
+        print(f"   ❌ 부분 익절 실패: {e}")
+        return False
 
 def update_closed_trades_pnl_from_history():
     """
@@ -2774,6 +3004,7 @@ def main():
     last_analysis_time = 0
     last_review_time = 0
     last_dashboard_time = 0
+    last_partial_check_time = 0  # 🆕 부분 익절 체크
     
     while True:
         try:
@@ -2817,6 +3048,101 @@ def main():
             if current_time - last_review_time > LIVE_TRADING_CONFIG['PERFORMANCE_REVIEW_INTERVAL']:
                 ai_performance_review()
                 last_review_time = current_time
+            
+            # 🆕 부분 익절 체크 (30분마다)
+            if current_time - last_partial_check_time > 1800:  # 1800초 = 30분
+                print(f"\n{'='*80}")
+                print(f"💰 부분 익절 체크")
+                print(f"{'='*80}")
+                
+                # 오픈 포지션 조회
+                open_positions = get_open_positions()
+                
+                if not open_positions:
+                    print(f"   ℹ️ 체크할 오픈 포지션이 없습니다")
+                else:
+                    for pos in open_positions:
+                        try:
+                            coin = pos['symbol'].split('/')[0]
+                            unrealized_pnl = pos.get('unrealizedPnl', 0)
+                            position_size = abs(pos.get('notional', 0))
+                            
+                            if position_size == 0:
+                                continue
+                            
+                            pnl_pct = (unrealized_pnl / position_size) * 100
+                            
+                            print(f"\n   📊 {coin}")
+                            print(f"      수익률: {pnl_pct:+.2f}%")
+                            print(f"      미실현: ${unrealized_pnl:+,.2f}")
+                            
+                            # 수익 10% 미만이면 스킵
+                            if pnl_pct < 10:
+                                print(f"      ⏭️ 수익 10% 미만 (체크 기준 미달)")
+                                continue
+                            
+                            # DB에서 해당 거래 찾기
+                            conn = sqlite3.connect(DB_FILE)
+                            c = conn.cursor()
+                            c.execute('''
+                                SELECT id, coin_symbol, side, entry_price, quantity, 
+                                       remaining_position_pct, partial_profit_taken
+                                FROM trades 
+                                WHERE coin_symbol = ? AND status = 'OPEN'
+                                ORDER BY id DESC LIMIT 1
+                            ''', (coin,))
+                            
+                            trade_row = c.fetchone()
+                            conn.close()
+                            
+                            if not trade_row:
+                                print(f"      ⚠️ DB에 거래 기록 없음")
+                                continue
+                            
+                            trade_data = {
+                                'id': trade_row[0],
+                                'coin_symbol': trade_row[1],
+                                'side': trade_row[2],
+                                'entry_price': trade_row[3],
+                                'quantity': trade_row[4],
+                                'remaining_position_pct': trade_row[5] or 100,
+                                'partial_profit_taken': trade_row[6] or 0
+                            }
+                            
+                            # 이미 50% 청산했으면 스킵
+                            if trade_data['remaining_position_pct'] <= 50:
+                                print(f"      ✅ 이미 부분 익절 완료 ({trade_data['remaining_position_pct']:.1f}% 남음)")
+                                continue
+                            
+                            # AI 추세 약화 분석
+                            print(f"      🤖 추세 약화 분석 중 (1시간 차트)...")
+                            symbol = f"{coin}/USDT:USDT"
+                            analysis = ai_analyze_trend_weakness(
+                                symbol, 
+                                trade_data['side'], 
+                                pnl_pct
+                            )
+                            
+                            print(f"      {analysis['reasoning']}")
+                            
+                            if analysis['should_partial_close']:
+                                print(f"      🎯 부분 익절 조건 충족!")
+                                print(f"         - 수익률: {pnl_pct:+.2f}% (≥10%)")
+                                print(f"         - 약화 점수: {analysis['weakness_score']}/10 (≥6)")
+                                
+                                success = execute_partial_close(trade_data)
+                                if success:
+                                    print(f"      ✅ 50% 부분 익절 완료!")
+                                else:
+                                    print(f"      ❌ 부분 익절 실패")
+                            else:
+                                print(f"      ⏭️ 추세 유지 중 (부분 익절 조건 미달)")
+                        
+                        except Exception as e:
+                            print(f"   ❌ {coin} 체크 오류: {e}")
+                
+                last_partial_check_time = current_time
+                print(f"{'='*80}\n")
             
             # 포지션이 꽉 찼는지 체크 (바이낸스 실제 포지션 기준)
             max_positions = LIVE_TRADING_CONFIG['MAX_CONCURRENT_POSITIONS']
@@ -2997,7 +3323,7 @@ if __name__ == "__main__":
     
     print(f"""
 ╔═══════════════════════════════════════════════════════════════╗
-║        🔴 AI 실거래 트레이딩 봇 v2.8 (신뢰도 기반 사이징)     ║
+║        🔴 AI 실거래 트레이딩 봇 v2.9 (부분 익절 시스템)      ║
 ║        🎯 OBJECTIVE: MAXIMIZE RISK-ADJUSTED RETURNS          ║
 ║        ⚠️  실제 자금으로 거래합니다!                         ║
 ║        ✅ AI: {provider:20s} ({model_name:20s})    ║
@@ -3006,6 +3332,7 @@ if __name__ == "__main__":
 ║        🆕 트레일링 스탑 (바이낸스 서버)                       ║
 ║        🆕 거래 시간대 제한 (KST 07:00~23:00)                  ║
 ║        🆕 Option C 포지션 사이징 (신뢰도 기반)                ║
+║        🆕 부분 익절 시스템 (10%+ 수익 시)                     ║
 ╚═══════════════════════════════════════════════════════════════╝
     """)
     
@@ -3017,9 +3344,19 @@ if __name__ == "__main__":
     print(f"   5. 수수료: Maker 0.02%, Taker 0.05%")
     print(f"   6. 🆕 트레일링 스탑이 진입 즉시 활성화됩니다 (바이낸스 서버)")
     print(f"   7. 🆕 거래 시간대: 한국시간 07:00~23:00만 신규 진입")
-    print(f"   8. 🆕 Option C 포지션 사이징: 스캘핑 25%, 데이트레이딩 35% + 신뢰도 보너스\n")
+    print(f"   8. 🆕 Option C 포지션 사이징: 스캘핑 25%, 데이트레이딩 35% + 신뢰도 보너스")
+    print(f"   9. 🆕 부분 익절: 수익 10%+ 시 추세 약화 감지하면 50% 자동 청산\n")
     
-    print("\n🔧 v2.8 신규 기능 (Option C - 신뢰도 기반 포지션 사이징):")
+    print("\n🔧 v2.9 신규 기능 (부분 익절 시스템):")
+    print("   1. ✅ 수익 10% 이상 & 추세 약화 감지 시 50% 자동 청산")
+    print("   2. ✅ 1시간 차트 분석 (데이트레이딩에 최적화)")
+    print("   3. ✅ 30분마다 자동 체크 → API 비용 최소화")
+    print("   4. ✅ AI 추세 약화 분석 (RSI, MACD, EMA, 캔들 패턴)")
+    print("   5. ✅ 약화 점수 6/10 이상 시 자동 부분 익절")
+    print("   6. ✅ 나머지 50%는 트레일링 스탑으로 계속 보호")
+    print("   💡 수익 확보 + 추가 수익 기회 모두 잡기!")
+    
+    print("\n🔧 v2.8 기능 (신뢰도 기반 포지션 사이징):")
     print("   1. ✅ 스타일별 베이스: 스캘핑 25%, 데이트레이딩 35%")
     print("   2. ✅ 신뢰도 보너스: 70-80% +0%, 80-90% +5%, 90%+ +10%")
     print("   3. ✅ 최대 50% 제한 (안전장치)")
