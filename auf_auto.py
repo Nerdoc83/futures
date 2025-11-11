@@ -750,6 +750,8 @@ def close_position_and_get_pnl(symbol: str, side: str, trade_info: dict) -> Tupl
         position_side = target_position['side']
         contracts = abs(float(target_position['contracts']))
         
+        print(f"      📊 실제 청산 수량: {contracts:.8f}")
+        
         if position_side == 'long':
             order_side = 'sell'
         else:
@@ -776,9 +778,10 @@ def close_position_and_get_pnl(symbol: str, side: str, trade_info: dict) -> Tupl
             exit_price = current_price
             print(f"      ⚠️ 청산가 이상, 현재가 사용: ${exit_price:,.4f}")
         
-        # 🔧 trade_info에 exit_price 추가 (PnL 계산용)
+        # 🔧 trade_info에 exit_price와 실제 청산 수량 추가 (PnL 계산용)
         trade_info_with_exit = trade_info.copy()
         trade_info_with_exit['exit_price'] = exit_price
+        trade_info_with_exit['quantity'] = contracts  # 🔧 실제 청산된 수량 사용!
         
         # 6. 청산 확인 (최대 3초 대기)
         close_confirmed = False
@@ -811,15 +814,22 @@ def close_position_and_get_pnl(symbol: str, side: str, trade_info: dict) -> Tupl
         print(f"      ❌ 청산 실패: {e}")
         return False, 0.0, 0.0, 0.0
 
-def calculate_pnl_from_price(entry_price: float, exit_price: float, position_size: float, side: str, leverage: int) -> Tuple[float, float]:
+def calculate_pnl_from_price(entry_price: float, exit_price: float, quantity: float, side: str, leverage: int) -> Tuple[float, float]:
     """
     🔧 바이낸스 공식 PnL 계산
     
     바이낸스 선물 PnL 계산 공식:
-    - Long: PnL = (Exit Price - Entry Price) × Position Size
-    - Short: PnL = (Entry Price - Exit Price) × Position Size
+    - Long: PnL = (Exit Price - Entry Price) × Quantity (계약 수량)
+    - Short: PnL = (Entry Price - Exit Price) × Quantity (계약 수량)
     - ROE% = PnL / Initial Margin × 100
-    - Initial Margin = Position Size × Entry Price / Leverage
+    - Initial Margin = Quantity × Entry Price / Leverage
+    
+    Args:
+        entry_price: 진입 가격
+        exit_price: 청산 가격
+        quantity: 계약 수량 (코인 개수, NOT 투자금액!)
+        side: 'LONG' 또는 'SHORT'
+        leverage: 레버리지 배수
     
     Returns:
         (realized_pnl, roe_percentage)
@@ -827,16 +837,16 @@ def calculate_pnl_from_price(entry_price: float, exit_price: float, position_siz
     try:
         # 1. PnL 계산 (바이낸스 공식)
         if side.upper() == 'LONG':
-            pnl_before_fees = (exit_price - entry_price) * position_size
+            pnl_before_fees = (exit_price - entry_price) * quantity
         else:  # SHORT
-            pnl_before_fees = (entry_price - exit_price) * position_size
+            pnl_before_fees = (entry_price - exit_price) * quantity
         
         # 2. 수수료 계산 (실제 거래 금액 기준)
         maker_fee = LIVE_TRADING_CONFIG.get('MAKER_FEE', 0.02)  # 0.02%
         taker_fee = LIVE_TRADING_CONFIG.get('TAKER_FEE', 0.05)  # 0.05%
         
-        entry_notional = position_size * entry_price  # 진입시 거래 금액
-        exit_notional = position_size * exit_price    # 청산시 거래 금액
+        entry_notional = quantity * entry_price  # 진입시 거래 금액
+        exit_notional = quantity * exit_price    # 청산시 거래 금액
         
         entry_fee = entry_notional * (maker_fee / 100)
         exit_fee = exit_notional * (taker_fee / 100)
@@ -846,7 +856,7 @@ def calculate_pnl_from_price(entry_price: float, exit_price: float, position_siz
         realized_pnl = pnl_before_fees - total_fees
         
         # 4. ROE% 계산 (바이낸스 공식)
-        initial_margin = (position_size * entry_price) / leverage
+        initial_margin = (quantity * entry_price) / leverage
         roe_percent = (realized_pnl / initial_margin) * 100
         
         return realized_pnl, roe_percent
@@ -1154,7 +1164,8 @@ def get_realized_pnl_accurate(symbol: str, close_timestamp: int, trade_info: dic
     # 🔧 trade_info에서 확실한 값들 가져오기
     entry_price = trade_info['entry_price']
     exit_price = trade_info.get('exit_price', 0)  # 청산가
-    position_size = trade_info['position_size']
+    quantity = trade_info['quantity']  # 🔧 계약 수량 (position_size가 아님!)
+    position_size = trade_info['position_size']  # 투자금액 (ROE 계산용)
     side = trade_info['side']
     leverage = trade_info['leverage']
     
@@ -1169,10 +1180,11 @@ def get_realized_pnl_accurate(symbol: str, close_timestamp: int, trade_info: dic
             print(f"      ⚠️ 현재가 조회 실패, 진입가 사용")
     
     # 🎯 바이낸스 공식으로 직접 계산
+    # 🔧 수정: position_size(투자금액) 대신 quantity(계약수량) 사용!
     realized_pnl, roe_pct = calculate_pnl_from_price(
         entry_price,
         exit_price,
-        position_size,
+        quantity,  # 🔧 수정: 계약 수량으로 변경!
         side,
         leverage
     )
@@ -1875,29 +1887,49 @@ def record_trade(coin_symbol: str, side: str, entry_price: float, quantity: floa
 
 def update_trade_exit(trade_id: int, exit_price: float, pnl: float, 
                      pnl_percent: float, reason: str):
-    """거래 청산 업데이트"""
+    """
+    거래 청산 업데이트
+    
+    🔧 부분 익절이 있었다면 partial_profit_taken을 최종 PnL에 합산
+    """
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
+    
+    # 🔧 기존 부분 익절 수익 조회
+    c.execute('SELECT partial_profit_taken FROM trades WHERE id = ?', (trade_id,))
+    result = c.fetchone()
+    partial_profit = result[0] if result and result[0] else 0
+    
+    # 🔧 최종 PnL = 이번 청산 수익 + 기존 부분 익절 수익
+    total_pnl = pnl + partial_profit
+    
+    if partial_profit > 0:
+        print(f"   💰 부분 익절 수익 합산: ${pnl:.2f} + ${partial_profit:.2f} = ${total_pnl:.2f}")
     
     c.execute('''
         UPDATE trades SET 
             exit_price = ?, pnl = ?, pnl_percent = ?, 
             exit_reason = ?, status = 'CLOSED'
         WHERE id = ?
-    ''', (exit_price, pnl, pnl_percent, reason, trade_id))
+    ''', (exit_price, total_pnl, pnl_percent, reason, trade_id))
     
     conn.commit()
     conn.close()
 
 def get_all_open_trades() -> List[dict]:
-    """모든 오픈 거래 조회"""
+    """
+    모든 오픈 거래 조회
+    
+    🔧 부분 익절 정보 포함 (partial_profit_taken, remaining_position_pct)
+    """
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     
     c.execute('''
         SELECT id, timestamp, coin_symbol, side, entry_price, quantity, 
                leverage, position_size, ai_confidence, ai_reasoning,
-               stop_loss_price, take_profit_price
+               stop_loss_price, take_profit_price,
+               partial_profit_taken, remaining_position_pct
         FROM trades WHERE status = 'OPEN'
         ORDER BY timestamp DESC
     ''')
@@ -1919,7 +1951,9 @@ def get_all_open_trades() -> List[dict]:
             'ai_confidence': row[8],
             'ai_reasoning': row[9],
             'stop_loss_price': row[10],
-            'take_profit_price': row[11]
+            'take_profit_price': row[11],
+            'partial_profit_taken': row[12] if len(row) > 12 else 0,
+            'remaining_position_pct': row[13] if len(row) > 13 else 100
         })
     
     return trades
@@ -2755,13 +2789,13 @@ def sync_db_with_binance() -> int:
                         trade_id = trade['id']
                         exit_price = close_data['price']
                         entry_price = trade['entry_price']
-                        position_size = trade['position_size']
+                        quantity = trade['quantity']  # 🔧 계약 수량 (position_size가 아님!)
                         side = trade['side']
                         leverage = trade['leverage']
                         
                         # 🔧 바이낸스 공식으로 PnL 직접 계산
                         realized_pnl, pnl_pct = calculate_pnl_from_price(
-                            entry_price, exit_price, position_size, side, leverage
+                            entry_price, exit_price, quantity, side, leverage  # 🔧 quantity 사용!
                         )
                         
                         print(f"      ✅ ID {trade_id}: PnL ${realized_pnl:+.2f} ({pnl_pct:+.2f}%), 청산가 ${exit_price:,.4f}")
@@ -2787,7 +2821,7 @@ def sync_db_with_binance() -> int:
                     trade_id = trade['id']
                     entry_price = trade['entry_price']
                     side = trade['side']
-                    position_size = trade['position_size']
+                    quantity = trade['quantity']  # 🔧 계약 수량 (position_size가 아님!)
                     leverage = trade['leverage']
                     
                     # 현재가로 추정
@@ -2796,7 +2830,7 @@ def sync_db_with_binance() -> int:
                     
                     # 🔧 바이낸스 공식으로 계산
                     realized_pnl, pnl_pct = calculate_pnl_from_price(
-                        entry_price, exit_price, position_size, side, leverage
+                        entry_price, exit_price, quantity, side, leverage  # 🔧 quantity 사용!
                     )
                     
                     print(f"      📊 ID {trade_id}: 추정 PnL ${realized_pnl:+.2f} ({pnl_pct:+.2f}%)")
