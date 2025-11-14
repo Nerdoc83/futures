@@ -153,9 +153,9 @@ os.environ['PYTHONUNBUFFERED'] = '1'
 
 # ===== AI 모델 선택 =====
 AI_MODEL_CONFIG = {
-    "provider": "deepseek",  # 🔧 여기서 변경: "gemini" 또는 "deepseek" (유료, 정확)
+    "provider": "gemini",  # 🔧 여기서 변경: "gemini" 또는 "deepseek" (유료, 정확)
     "models": {
-        "gemini": "gemini-2.5-flash-latest",  # 무료, 빠름
+        "gemini": "gemini-2.5-flash",  # 무료, 빠름
         "deepseek": "deepseek-chat"  # DeepSeek V3 (최신, 추천)
     },
     "rate_limit": {
@@ -246,7 +246,7 @@ TRADING_STYLES = {
 # ===== 실거래 설정 =====
 LIVE_TRADING_CONFIG = {
     "MAX_CONCURRENT_POSITIONS": 5,  # 최대 동시 포지션 (실제 진입 제한)
-    "MIN_CAPITAL_THRESHOLD": 50.0,  # 최소 잔고 (USDT)
+    "MIN_CAPITAL_THRESHOLD": 10.0,  # 최소 잔고 (USDT)
     
     # 🆕 AI 거래 스타일: 데이트레이딩 중심 + 극단적 스캘핑
     "ADAPTIVE_STYLE_ENABLED": True,  # 극단적 기회 감지 활성화
