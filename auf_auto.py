@@ -155,7 +155,7 @@ os.environ['PYTHONUNBUFFERED'] = '1'
 AI_MODEL_CONFIG = {
     "provider": "gemini",  # 🔧 여기서 변경: "gemini" 또는 "deepseek" (유료, 정확)
     "models": {
-        "gemini": "gemini-2.5-flash",  # 무료, 빠름
+        "gemini": "gemini-3.0-flash",  # 무료, 빠름
         "deepseek": "deepseek-chat"  # DeepSeek V3 (최신, 추천)
     },
     "rate_limit": {
