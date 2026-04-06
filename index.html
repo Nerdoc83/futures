@@ -13,7 +13,24 @@
   <header id="header">
     <div class="header-inner">
       <a href="#" class="logo">
-        <span class="logo-en">ONYX</span>
+        <!-- ONYX SVG 로고 — O의 보석 파셋 + X의 대각선 그림자 -->
+        <svg class="logo-svg" viewBox="0 0 178 58" xmlns="http://www.w3.org/2000/svg" aria-label="ONYX">
+          <defs>
+            <mask id="logo-o-mask-hd">
+              <rect width="178" height="58" fill="white"/>
+              <!-- O 내부 육각형 컷 (보석 파셋) -->
+              <polygon fill="black" points="20,14 28,19 28,37 20,42 12,37 12,19"/>
+            </mask>
+          </defs>
+          <!-- ONYX 텍스트 (O에 마스크 적용) -->
+          <text y="50" font-family="'Playfair Display','Times New Roman',serif"
+                font-weight="700" font-size="50" letter-spacing="2"
+                class="logo-text-node" mask="url(#logo-o-mask-hd)">ONYX</text>
+          <!-- O 보석 파셋 그림자 -->
+          <polygon class="logo-gem" points="20,14 28,19 28,37 20,42 12,37 12,19"/>
+          <!-- X 대각선 그림자 슬라이스 -->
+          <polygon class="logo-gem x-gem" points="156,6 167,6 157,26 146,26"/>
+        </svg>
         <span class="logo-kr">오닉스 성형외과</span>
       </a>
 
@@ -456,7 +473,19 @@
       <div class="footer-grid">
         <div class="footer-brand">
           <div class="logo">
-            <span class="logo-en">ONYX</span>
+            <svg class="logo-svg logo-svg-footer" viewBox="0 0 178 58" xmlns="http://www.w3.org/2000/svg" aria-label="ONYX">
+              <defs>
+                <mask id="logo-o-mask-ft">
+                  <rect width="178" height="58" fill="white"/>
+                  <polygon fill="black" points="20,14 28,19 28,37 20,42 12,37 12,19"/>
+                </mask>
+              </defs>
+              <text y="50" font-family="'Playfair Display','Times New Roman',serif"
+                    font-weight="700" font-size="50" letter-spacing="2"
+                    fill="white" mask="url(#logo-o-mask-ft)">ONYX</text>
+              <polygon class="logo-gem logo-gem-footer" points="20,14 28,19 28,37 20,42 12,37 12,19"/>
+              <polygon class="logo-gem logo-gem-footer x-gem" points="156,6 167,6 157,26 146,26"/>
+            </svg>
             <span class="logo-kr">오닉스 성형외과</span>
           </div>
           <p>자연스러운 아름다움을 추구하는<br/>오닉스 성형외과입니다.</p>

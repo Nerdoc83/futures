@@ -145,39 +145,60 @@ img { max-width: 100%; display: block; }
   justify-content: space-between;
 }
 
+/* ---------- LOGO (SVG 버전) ---------- */
 .logo {
   display: flex;
   flex-direction: column;
-  line-height: 1;
-  gap: 4px;
-}
-.logo-en {
-  font-family: 'Playfair Display', serif;
-  font-size: 28px;
-  font-weight: 700;
-  color: #fff;
-  letter-spacing: 0.15em;
-  transition: color var(--trans);
-  /* 오닉스 광택 효과 */
-  background: linear-gradient(135deg, #ffffff 0%, #e8e0d8 40%, #ffffff 60%, #c8c0b8 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
-}
-.logo-kr {
-  font-size: 9.5px;
-  letter-spacing: 0.3em;
-  color: var(--gold-light);
-  transition: color var(--trans);
+  align-items: flex-start;
+  gap: 3px;
+  text-decoration: none;
 }
 
-#header.scrolled .logo-en {
-  background: linear-gradient(135deg, var(--onyx) 0%, #3a3a3a 40%, var(--onyx) 70%, #555 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+/* SVG 로고 — 헤더 기본 (다크 배경) */
+.logo-svg {
+  height: 38px;
+  width: auto;
+  display: block;
 }
-#header.scrolled .logo-kr { color: var(--gold); }
+
+/* SVG 텍스트 노드: 다크 배경 → 흰색 */
+.logo-text-node {
+  fill: #ffffff;
+  transition: fill var(--trans);
+}
+
+/* O 보석 파셋 & X 그림자: 다크 배경 → 은회색 */
+.logo-gem {
+  fill: rgba(190, 185, 180, 0.55);
+  transition: fill var(--trans);
+}
+
+/* 스크롤 후 (라이트 배경): 텍스트 → 순수 블랙 */
+#header.scrolled .logo-text-node {
+  fill: var(--onyx);
+}
+/* 스크롤 후 파셋: 어두운 회색 (블랙 글자 위의 패싯 효과) */
+#header.scrolled .logo-gem {
+  fill: rgba(55, 55, 55, 0.45);
+}
+
+/* 푸터 로고 (다크 배경 고정) */
+.logo-svg-footer { height: 36px; }
+.logo-gem-footer { fill: rgba(180, 175, 170, 0.55); }
+
+/* 로고 서브텍스트 */
+.logo-kr {
+  font-size: 9px;
+  letter-spacing: 0.32em;
+  color: var(--gold-light);
+  transition: color var(--trans);
+  font-weight: 400;
+  padding-left: 1px;
+}
+#header.scrolled .logo-kr { color: var(--gold-dark); }
+
+/* 푸터 로고 내 kr 텍스트 */
+.logo .logo-kr { color: var(--gold-light); }
 
 .gnb > ul {
   display: flex;
