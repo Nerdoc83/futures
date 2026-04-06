@@ -386,23 +386,31 @@ img { max-width: 100%; display: block; }
   margin: 0 auto;
   padding: 0 24px;
   padding-top: 72px;
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 48px;
+  align-items: center;
 }
 
+/* 왼쪽 텍스트 영역 */
+.hero-text { padding-right: 20px; }
+
 .hero-sub {
-  font-size: 12px;
-  letter-spacing: 0.3em;
+  font-size: 11px;
+  letter-spacing: 0.35em;
   text-transform: uppercase;
   color: var(--onyx);
-  margin-bottom: 20px;
-  opacity: 0.5;
+  margin-bottom: 22px;
+  opacity: 0.45;
 }
 
 .hero-title {
   font-family: 'Playfair Display', 'Noto Sans KR', serif;
-  font-size: clamp(38px, 6vw, 72px);
+  font-size: clamp(32px, 4.5vw, 58px);
   font-weight: 700;
   color: var(--onyx);
-  line-height: 1.15;
+  line-height: 1.18;
   margin-bottom: 24px;
 }
 .hero-title em {
@@ -411,13 +419,148 @@ img { max-width: 100%; display: block; }
 }
 
 .hero-desc {
-  font-size: 16px;
+  font-size: 15px;
   color: var(--text-light);
   line-height: 1.9;
-  margin-bottom: 40px;
+  margin-bottom: 36px;
+  max-width: 440px;
 }
 
-.hero-btns { display: flex; gap: 16px; flex-wrap: wrap; }
+.hero-btns { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 40px; }
+
+/* 히어로 영역 btn-ghost: 다크 배경이 아니므로 색 조정 */
+.btn-ghost.hero-ghost {
+  border-color: rgba(10,10,10,0.2);
+  color: var(--text);
+}
+.btn-ghost.hero-ghost:hover {
+  border-color: var(--onyx);
+  background: rgba(0,0,0,0.04);
+  color: var(--onyx);
+}
+
+/* 히어로 미니 수치 */
+.hero-mini-stats {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+}
+.mini-stat { text-align: center; }
+.mini-stat strong {
+  display: block;
+  font-family: 'Playfair Display', serif;
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--onyx);
+  line-height: 1;
+}
+.mini-stat span {
+  font-size: 11px;
+  color: var(--text-light);
+  letter-spacing: 0.05em;
+  margin-top: 4px;
+  display: block;
+}
+.mini-stat-divider {
+  width: 1px;
+  height: 32px;
+  background: var(--border);
+}
+
+/* ── 모델 이미지 영역 ── */
+.hero-model { position: relative; }
+
+.hero-model-wrap {
+  position: relative;
+  display: inline-block;
+  width: 100%;
+  max-width: 480px;
+  margin-left: auto;
+  display: block;
+}
+
+.hero-model-img {
+  width: 100%;
+  aspect-ratio: 3 / 4;
+  object-fit: cover;
+  object-position: top center;
+  /* 비대칭 라운드 — 럭셔리 클리닉 느낌 */
+  border-radius: 0 120px 0 120px;
+  display: block;
+  position: relative;
+  z-index: 1;
+}
+
+/* 골드 데코 프레임 (이미지 뒤 우상단) */
+.hero-deco-frame {
+  position: absolute;
+  top: -18px; right: -18px;
+  width: 65%;
+  height: 65%;
+  border: 1.5px solid var(--gold);
+  border-radius: 0 120px 0 0;
+  z-index: 0;
+  opacity: 0.55;
+}
+
+/* 오닉스 블랙 포인트 박스 (좌하단) */
+.hero-deco-box {
+  position: absolute;
+  bottom: -16px; left: -16px;
+  width: 38%;
+  height: 38%;
+  background: var(--onyx);
+  border-radius: 0 0 0 60px;
+  z-index: 0;
+  opacity: 0.08;
+}
+
+/* AI 분석 태그 (이미지 위 플로팅) */
+.hero-ai-tag {
+  position: absolute;
+  bottom: 32px;
+  left: -24px;
+  background: rgba(255,255,255,0.96);
+  backdrop-filter: blur(12px);
+  border-radius: 16px;
+  padding: 14px 20px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.12);
+  border: 1px solid var(--border);
+  z-index: 2;
+  white-space: nowrap;
+}
+
+.ai-tag-dot {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  background: #22c55e;
+  flex-shrink: 0;
+  box-shadow: 0 0 0 3px rgba(34,197,94,0.2);
+  animation: dotPulse 2s ease-in-out infinite;
+}
+
+@keyframes dotPulse {
+  0%, 100% { box-shadow: 0 0 0 3px rgba(34,197,94,0.2); }
+  50%       { box-shadow: 0 0 0 6px rgba(34,197,94,0.1); }
+}
+
+.hero-ai-tag span {
+  display: block;
+  font-size: 10px;
+  letter-spacing: 0.15em;
+  color: var(--text-light);
+  text-transform: uppercase;
+}
+.hero-ai-tag strong {
+  display: block;
+  font-size: 13px;
+  color: var(--onyx);
+  font-weight: 600;
+  margin-top: 2px;
+}
 
 .hero-scroll-hint {
   position: absolute;
@@ -1109,13 +1252,28 @@ footer {
 /* ---------- RESPONSIVE ---------- */
 @media (max-width: 1100px) {
   .cat-grid { grid-template-columns: repeat(3, 1fr); }
-  .cat-grid .cat-card:nth-child(4),
-  .cat-grid .cat-card:nth-child(5) { grid-column: span 1; }
+  .hero-model-img { border-radius: 0 80px 0 80px; }
 }
 
 @media (max-width: 900px) {
   .gnb, .pc-only { display: none; }
   .hamburger { display: flex; }
+
+  /* 히어로 모바일: 세로 단 */
+  .hero-content {
+    grid-template-columns: 1fr;
+    padding-top: 100px;
+    min-height: auto;
+    padding-bottom: 60px;
+    gap: 40px;
+  }
+  .hero-text { padding-right: 0; text-align: center; }
+  .hero-desc { margin-inline: auto; }
+  .hero-btns { justify-content: center; }
+  .hero-mini-stats { justify-content: center; }
+  .hero-model { max-width: 320px; margin: 0 auto; }
+  .hero-ai-tag { left: 50%; transform: translateX(-50%); bottom: 20px; }
+
   .ai-grid { grid-template-columns: 1fr; gap: 48px; }
   .ai-visual { order: -1; }
   .ai-card { width: 280px; height: 280px; }
@@ -1135,8 +1293,9 @@ footer {
   .cat-grid { grid-template-columns: 1fr 1fr; }
   .footer-grid { grid-template-columns: 1fr; }
   .footer-bottom { flex-direction: column; align-items: flex-start; }
-  .hero-btns { flex-direction: column; }
+  .hero-btns { flex-direction: column; align-items: center; }
   .cta-btns { flex-direction: column; align-items: center; }
   .btn-ghost.large { border-color: rgba(201,169,110,0.4); color: var(--gold-light); }
   .doctors-grid { grid-template-columns: 1fr; }
+  .hero-mini-stats { gap: 16px; }
 }
