@@ -154,33 +154,28 @@ img { max-width: 100%; display: block; }
   text-decoration: none;
 }
 
-/* SVG 로고 — 헤더 기본 (다크 배경) */
+/* SVG 로고 — 헤더 기본 (라이트 히어로 위: 다크 컬러) */
 .logo-svg {
   height: 38px;
   width: auto;
   display: block;
 }
 
-/* SVG 텍스트 노드: 다크 배경 → 흰색 */
+/* SVG 텍스트 노드: 기본 → 오닉스 블랙 */
 .logo-text-node {
-  fill: #ffffff;
-  transition: fill var(--trans);
-}
-
-/* O 보석 파셋 & X 그림자: 다크 배경 → 은회색 */
-.logo-gem {
-  fill: rgba(190, 185, 180, 0.55);
-  transition: fill var(--trans);
-}
-
-/* 스크롤 후 (라이트 배경): 텍스트 → 순수 블랙 */
-#header.scrolled .logo-text-node {
   fill: var(--onyx);
+  transition: fill var(--trans);
 }
-/* 스크롤 후 파셋: 어두운 회색 (블랙 글자 위의 패싯 효과) */
-#header.scrolled .logo-gem {
-  fill: rgba(55, 55, 55, 0.45);
+
+/* O 보석 파셋 & X 그림자: 기본 → 진회색 */
+.logo-gem {
+  fill: rgba(55, 55, 55, 0.42);
+  transition: fill var(--trans);
 }
+
+/* 스크롤 후 동일 (라이트 배경) */
+#header.scrolled .logo-text-node { fill: var(--onyx); }
+#header.scrolled .logo-gem { fill: rgba(55, 55, 55, 0.42); }
 
 /* 푸터 로고 (다크 배경 고정) */
 .logo-svg-footer { height: 36px; }
@@ -190,14 +185,12 @@ img { max-width: 100%; display: block; }
 .logo-kr {
   font-size: 9px;
   letter-spacing: 0.32em;
-  color: var(--gold-light);
+  color: var(--gold-dark);
   transition: color var(--trans);
   font-weight: 400;
   padding-left: 1px;
 }
 #header.scrolled .logo-kr { color: var(--gold-dark); }
-
-/* 푸터 로고 내 kr 텍스트 */
 .logo .logo-kr { color: var(--gold-light); }
 
 .gnb > ul {
@@ -215,14 +208,14 @@ img { max-width: 100%; display: block; }
   padding: 10px 14px;
   font-size: 14px;
   font-weight: 500;
-  color: rgba(255,255,255,0.85);
+  color: var(--text);
   border-radius: 6px;
   transition: color var(--trans), background var(--trans);
   white-space: nowrap;
 }
 
-.gnb > ul > li > a:hover { color: #fff; background: rgba(255,255,255,0.1); }
-.gnb > ul > li.has-sub:hover > a { color: var(--gold-light); }
+.gnb > ul > li > a:hover { color: var(--onyx); background: rgba(0,0,0,0.04); }
+.gnb > ul > li.has-sub:hover > a { color: var(--onyx); }
 
 #header.scrolled .gnb > ul > li > a { color: var(--text); }
 #header.scrolled .gnb > ul > li > a:hover { color: var(--gold); background: rgba(201,169,110,0.08); }
@@ -284,11 +277,11 @@ img { max-width: 100%; display: block; }
   display: block;
   width: 24px;
   height: 2px;
-  background: #fff;
+  background: var(--onyx);
   border-radius: 2px;
   transition: background var(--trans);
 }
-#header.scrolled .hamburger span { background: var(--dark); }
+#header.scrolled .hamburger span { background: var(--onyx); }
 
 /* ---------- MOBILE MENU ---------- */
 .mobile-menu {
@@ -350,20 +343,29 @@ img { max-width: 100%; display: block; }
 .hero-bg {
   position: absolute;
   inset: 0;
-  /* 오닉스: 순수한 검정 + 청흑 광택 */
-  background: linear-gradient(135deg, #050505 0%, #0e0e12 30%, #14100c 60%, #080808 100%);
+  /* 라이트 배경: 크림 화이트 */
+  background: linear-gradient(160deg, #f7f5f2 0%, #ffffff 45%, #f4f2ef 100%);
 }
 
 .hero-gradient {
   position: absolute;
   inset: 0;
   background:
-    radial-gradient(ellipse 55% 55% at 75% 35%, rgba(201,169,110,0.12) 0%, transparent 65%),
-    radial-gradient(ellipse 35% 45% at 15% 75%, rgba(42,42,50,0.6) 0%, transparent 55%),
-    radial-gradient(ellipse 70% 40% at 50% 100%, rgba(10,10,10,0.8) 0%, transparent 70%);
+    radial-gradient(ellipse 55% 65% at 78% 38%, rgba(201,169,110,0.09) 0%, transparent 60%),
+    radial-gradient(ellipse 35% 35% at 5% 85%, rgba(10,10,10,0.04) 0%, transparent 55%);
 }
 
-/* 오닉스 광택 줄무늬 — 원석의 레이어 표현 */
+/* 오닉스 포인트 — 좌측 세로 블랙 액센트 바 */
+.hero-bg::before {
+  content: '';
+  position: absolute;
+  top: 15%; left: 0;
+  width: 4px;
+  height: 55%;
+  background: linear-gradient(to bottom, transparent, var(--onyx) 30%, var(--onyx) 70%, transparent);
+}
+
+/* 미세 대각선 결 */
 .hero-bg::after {
   content: '';
   position: absolute;
@@ -372,16 +374,8 @@ img { max-width: 100%; display: block; }
     repeating-linear-gradient(
       -15deg,
       transparent,
-      transparent 80px,
-      rgba(201,169,110,0.025) 81px,
-      rgba(201,169,110,0.025) 82px,
-      transparent 83px
-    ),
-    repeating-linear-gradient(
-      90deg,
-      transparent,
-      transparent 119px,
-      rgba(255,255,255,0.015) 120px
+      transparent 100px,
+      rgba(10,10,10,0.018) 101px
     );
 }
 
@@ -398,26 +392,27 @@ img { max-width: 100%; display: block; }
   font-size: 12px;
   letter-spacing: 0.3em;
   text-transform: uppercase;
-  color: var(--gold);
+  color: var(--onyx);
   margin-bottom: 20px;
+  opacity: 0.5;
 }
 
 .hero-title {
   font-family: 'Playfair Display', 'Noto Sans KR', serif;
   font-size: clamp(38px, 6vw, 72px);
   font-weight: 700;
-  color: #fff;
+  color: var(--onyx);
   line-height: 1.15;
   margin-bottom: 24px;
 }
 .hero-title em {
   font-style: italic;
-  color: var(--gold-light);
+  color: var(--gold-dark);
 }
 
 .hero-desc {
   font-size: 16px;
-  color: rgba(255,255,255,0.65);
+  color: var(--text-light);
   line-height: 1.9;
   margin-bottom: 40px;
 }
@@ -433,7 +428,7 @@ img { max-width: 100%; display: block; }
   flex-direction: column;
   align-items: center;
   gap: 12px;
-  color: rgba(255,255,255,0.3);
+  color: rgba(10,10,10,0.28);
   font-size: 10px;
   letter-spacing: 0.2em;
 }
@@ -441,7 +436,7 @@ img { max-width: 100%; display: block; }
 .scroll-line {
   width: 1px;
   height: 50px;
-  background: linear-gradient(to bottom, rgba(201,169,110,0.6), transparent);
+  background: linear-gradient(to bottom, var(--onyx), transparent);
   animation: scrollPulse 2s ease-in-out infinite;
 }
 
@@ -452,11 +447,11 @@ img { max-width: 100%; display: block; }
 
 /* ---------- NOTICE BAND ---------- */
 .notice-band {
+  /* 오닉스 포인트 블랙 밴드 (좁은 블랙 스트라이프) */
   background: var(--onyx);
-  padding: 14px 0;
+  padding: 12px 0;
   overflow: hidden;
-  border-bottom: 1px solid rgba(201,169,110,0.12);
-  border-top: 1px solid rgba(255,255,255,0.04);
+  border-bottom: 1px solid rgba(201,169,110,0.15);
 }
 
 .notice-track {
@@ -497,19 +492,18 @@ img { max-width: 100%; display: block; }
   position: relative;
   width: 380px;
   height: 380px;
-  /* 오닉스 원석 단면 같은 그라디언트 */
-  background: linear-gradient(145deg, var(--onyx) 0%, var(--onyx2) 30%, var(--onyx-shine) 55%, var(--onyx2) 75%, var(--onyx) 100%);
+  /* 라이트 그레이 + 오닉스 포인트 */
+  background: linear-gradient(145deg, #f0eeeb 0%, #f8f7f5 40%, #eeece9 100%);
   border-radius: 24px;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 20px;
-  border: 1px solid rgba(201,169,110,0.18);
+  border: 1px solid var(--border);
   box-shadow:
-    0 32px 80px rgba(0,0,0,0.6),
-    inset 0 1px 0 rgba(255,255,255,0.05),
-    inset 0 -1px 0 rgba(0,0,0,0.3);
+    0 24px 60px rgba(0,0,0,0.1),
+    inset 0 1px 0 rgba(255,255,255,0.8);
   overflow: hidden;
 }
 
@@ -522,15 +516,16 @@ img { max-width: 100%; display: block; }
     180deg,
     transparent,
     transparent 3px,
-    rgba(201,169,110,0.03) 4px
+    rgba(0,0,0,0.018) 4px
   );
 }
 
 .ai-label {
   font-size: 13px;
   letter-spacing: 0.2em;
-  color: var(--gold);
+  color: var(--onyx);
   text-transform: uppercase;
+  opacity: 0.6;
 }
 
 /* Animated scanning dot */
@@ -685,10 +680,10 @@ img { max-width: 100%; display: block; }
 
 /* ---------- STATS ---------- */
 .stats-section {
-  background: linear-gradient(135deg, var(--onyx) 0%, var(--onyx2) 40%, var(--onyx-shine) 70%, var(--onyx) 100%);
+  background: #f2f1ef;
   padding: 70px 0;
-  border-top: 1px solid rgba(255,255,255,0.04);
-  border-bottom: 1px solid rgba(201,169,110,0.1);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
 }
 
 .stats-grid {
@@ -700,7 +695,7 @@ img { max-width: 100%; display: block; }
 .stat-item {
   text-align: center;
   padding: 40px 20px;
-  border-right: 1px solid rgba(255,255,255,0.06);
+  border-right: 1px solid var(--border);
   position: relative;
 }
 .stat-item:last-child { border-right: none; }
@@ -709,19 +704,19 @@ img { max-width: 100%; display: block; }
   font-family: 'Playfair Display', serif;
   font-size: clamp(42px, 5vw, 64px);
   font-weight: 700;
-  color: var(--gold-light);
+  color: var(--onyx);
   line-height: 1;
 }
 .stat-unit {
   font-family: 'Playfair Display', serif;
   font-size: 28px;
-  color: var(--gold);
+  color: var(--gold-dark);
 }
 
 .stat-item p {
   margin-top: 10px;
   font-size: 13px;
-  color: rgba(255,255,255,0.45);
+  color: var(--text-light);
   letter-spacing: 0.1em;
 }
 
@@ -746,10 +741,10 @@ img { max-width: 100%; display: block; }
 .step-circle {
   width: 60px; height: 60px;
   border-radius: 50%;
-  /* 홀수: 블랙 포인트, 짝수: 골드 */
-  background: var(--onyx);
-  color: var(--gold-light);
-  border: 1.5px solid rgba(201,169,110,0.4);
+  /* 홀수: 화이트 + 블랙 테두리 */
+  background: #ffffff;
+  color: var(--onyx);
+  border: 2px solid var(--onyx);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -759,16 +754,14 @@ img { max-width: 100%; display: block; }
   margin-bottom: 20px;
   position: relative;
   z-index: 1;
-  box-shadow:
-    0 4px 20px rgba(0,0,0,0.4),
-    inset 0 1px 0 rgba(255,255,255,0.06);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.1);
 }
 
 .process-step:nth-child(even) .step-circle {
-  background: var(--gold);
+  background: var(--onyx);
   color: #fff;
-  border-color: var(--gold-dark);
-  box-shadow: 0 4px 20px rgba(201,169,110,0.35);
+  border-color: var(--onyx);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.2);
 }
 
 .step-line {
@@ -860,28 +853,30 @@ img { max-width: 100%; display: block; }
 }
 
 .review-card {
-  background: rgba(255,255,255,0.05);
-  border: 1px solid rgba(255,255,255,0.08);
+  background: #ffffff;
+  border: 1px solid var(--border);
   border-radius: 20px;
   padding: 32px;
-  transition: background var(--trans), border-color var(--trans), transform var(--trans);
+  transition: border-color var(--trans), box-shadow var(--trans), transform var(--trans);
 }
 .review-card:hover {
-  background: rgba(255,255,255,0.08);
-  border-color: rgba(201,169,110,0.3);
+  border-color: rgba(201,169,110,0.35);
+  box-shadow: 0 12px 40px rgba(0,0,0,0.07);
   transform: translateY(-4px);
 }
 
 .review-card.featured {
-  background: rgba(201,169,110,0.08);
-  border-color: rgba(201,169,110,0.25);
+  background: #f9f7f4;
+  border-color: rgba(201,169,110,0.3);
+  /* 오닉스 포인트: 상단 블랙 라인 */
+  border-top: 3px solid var(--onyx);
 }
 
 .review-stars { color: var(--gold); font-size: 14px; margin-bottom: 16px; letter-spacing: 2px; }
 
 .review-text {
   font-size: 14px;
-  color: rgba(255,255,255,0.65);
+  color: var(--text-light);
   line-height: 1.85;
   margin-bottom: 24px;
 }
@@ -895,7 +890,7 @@ img { max-width: 100%; display: block; }
 .author-initial {
   width: 40px; height: 40px;
   border-radius: 50%;
-  background: var(--gold);
+  background: var(--onyx);
   color: #fff;
   display: flex;
   align-items: center;
@@ -905,8 +900,8 @@ img { max-width: 100%; display: block; }
   flex-shrink: 0;
 }
 
-.review-author strong { display: block; font-size: 14px; color: #fff; font-weight: 500; }
-.review-author small  { font-size: 12px; color: rgba(255,255,255,0.35); }
+.review-author strong { display: block; font-size: 14px; color: var(--dark); font-weight: 500; }
+.review-author small  { font-size: 12px; color: var(--text-light); }
 
 /* ---------- CTA ---------- */
 .cta-section {
@@ -918,8 +913,8 @@ img { max-width: 100%; display: block; }
 .cta-bg {
   position: absolute;
   inset: 0;
-  /* 오닉스: 완전한 검정 배경 */
-  background: linear-gradient(160deg, var(--onyx) 0%, var(--onyx2) 35%, var(--onyx-shine) 60%, var(--onyx) 100%);
+  /* 오닉스 포인트: 따뜻한 차콜 (완전 블랙보다 부드럽게) */
+  background: linear-gradient(160deg, #111111 0%, #1c1a18 50%, #111111 100%);
 }
 
 .cta-bg::before {
@@ -927,12 +922,12 @@ img { max-width: 100%; display: block; }
   position: absolute;
   inset: 0;
   background:
-    radial-gradient(ellipse 60% 60% at 50% 50%, rgba(201,169,110,0.1) 0%, transparent 65%),
+    radial-gradient(ellipse 55% 55% at 50% 50%, rgba(201,169,110,0.08) 0%, transparent 60%),
     repeating-linear-gradient(
       -20deg,
       transparent,
-      transparent 100px,
-      rgba(255,255,255,0.012) 101px
+      transparent 120px,
+      rgba(255,255,255,0.008) 121px
     );
 }
 
