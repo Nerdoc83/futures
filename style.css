@@ -1,24 +1,28 @@
 /* ============================================================
-   NOVA 성형외과 — Main Stylesheet
+   오닉스 성형외과 — Main Stylesheet
    ============================================================ */
 
 /* ---------- RESET & BASE ---------- */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  --gold:       #c9a96e;
-  --gold-light: #f0d9a8;
-  --gold-dark:  #a07840;
-  --dark:       #1a1612;
-  --dark2:      #2a2420;
-  --mid:        #6b5f52;
-  --text:       #3d342b;
-  --text-light: #8c7d6e;
-  --bg:         #ffffff;
-  --bg-light:   #faf8f5;
-  --border:     #e8e0d4;
-  --radius:     12px;
-  --trans:      0.35s cubic-bezier(0.4, 0, 0.2, 1);
+  --gold:        #c9a96e;
+  --gold-light:  #f0d9a8;
+  --gold-dark:   #a07840;
+  --onyx:        #0a0a0a;
+  --onyx2:       #141414;
+  --onyx3:       #1e1e1e;
+  --onyx-shine:  #2a2a32;       /* 오닉스 특유의 청흑 광택 */
+  --dark:        #1a1612;
+  --dark2:       #2a2420;
+  --mid:         #6b5f52;
+  --text:        #2e2b28;
+  --text-light:  #8c7d6e;
+  --bg:          #ffffff;
+  --bg-light:    #f9f8f6;
+  --border:      #e4ddd4;
+  --radius:      12px;
+  --trans:       0.35s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 html { scroll-behavior: smooth; font-size: 16px; }
@@ -43,7 +47,7 @@ img { max-width: 100%; display: block; }
 
 .section-pad { padding: 100px 0; }
 .bg-light { background: var(--bg-light); }
-.bg-dark  { background: var(--dark); }
+.bg-dark  { background: var(--onyx); }
 
 /* ---------- TYPOGRAPHY ---------- */
 .section-tag {
@@ -145,22 +149,34 @@ img { max-width: 100%; display: block; }
   display: flex;
   flex-direction: column;
   line-height: 1;
+  gap: 4px;
 }
 .logo-en {
   font-family: 'Playfair Display', serif;
-  font-size: 26px;
+  font-size: 28px;
   font-weight: 700;
   color: #fff;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.15em;
   transition: color var(--trans);
+  /* 오닉스 광택 효과 */
+  background: linear-gradient(135deg, #ffffff 0%, #e8e0d8 40%, #ffffff 60%, #c8c0b8 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
 }
 .logo-kr {
-  font-size: 10px;
-  letter-spacing: 0.25em;
+  font-size: 9.5px;
+  letter-spacing: 0.3em;
   color: var(--gold-light);
   transition: color var(--trans);
 }
-#header.scrolled .logo-en { color: var(--dark); }
+
+#header.scrolled .logo-en {
+  background: linear-gradient(135deg, var(--onyx) 0%, #3a3a3a 40%, var(--onyx) 70%, #555 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
 #header.scrolled .logo-kr { color: var(--gold); }
 
 .gnb > ul {
@@ -313,28 +329,38 @@ img { max-width: 100%; display: block; }
 .hero-bg {
   position: absolute;
   inset: 0;
-  background: linear-gradient(135deg, #1a1612 0%, #2e2218 40%, #3d2e1e 70%, #1a1612 100%);
+  /* 오닉스: 순수한 검정 + 청흑 광택 */
+  background: linear-gradient(135deg, #050505 0%, #0e0e12 30%, #14100c 60%, #080808 100%);
 }
 
 .hero-gradient {
   position: absolute;
   inset: 0;
   background:
-    radial-gradient(ellipse 60% 60% at 70% 40%, rgba(201,169,110,0.15) 0%, transparent 70%),
-    radial-gradient(ellipse 40% 50% at 20% 80%, rgba(201,169,110,0.08) 0%, transparent 60%);
+    radial-gradient(ellipse 55% 55% at 75% 35%, rgba(201,169,110,0.12) 0%, transparent 65%),
+    radial-gradient(ellipse 35% 45% at 15% 75%, rgba(42,42,50,0.6) 0%, transparent 55%),
+    radial-gradient(ellipse 70% 40% at 50% 100%, rgba(10,10,10,0.8) 0%, transparent 70%);
 }
 
-/* Decorative lines */
+/* 오닉스 광택 줄무늬 — 원석의 레이어 표현 */
 .hero-bg::after {
   content: '';
   position: absolute;
   inset: 0;
   background-image:
     repeating-linear-gradient(
+      -15deg,
+      transparent,
+      transparent 80px,
+      rgba(201,169,110,0.025) 81px,
+      rgba(201,169,110,0.025) 82px,
+      transparent 83px
+    ),
+    repeating-linear-gradient(
       90deg,
       transparent,
-      transparent 59px,
-      rgba(201,169,110,0.04) 60px
+      transparent 119px,
+      rgba(255,255,255,0.015) 120px
     );
 }
 
@@ -405,10 +431,11 @@ img { max-width: 100%; display: block; }
 
 /* ---------- NOTICE BAND ---------- */
 .notice-band {
-  background: var(--dark2);
+  background: var(--onyx);
   padding: 14px 0;
   overflow: hidden;
-  border-bottom: 1px solid rgba(201,169,110,0.15);
+  border-bottom: 1px solid rgba(201,169,110,0.12);
+  border-top: 1px solid rgba(255,255,255,0.04);
 }
 
 .notice-track {
@@ -449,15 +476,19 @@ img { max-width: 100%; display: block; }
   position: relative;
   width: 380px;
   height: 380px;
-  background: linear-gradient(145deg, #1e1a16, #2a2420);
+  /* 오닉스 원석 단면 같은 그라디언트 */
+  background: linear-gradient(145deg, var(--onyx) 0%, var(--onyx2) 30%, var(--onyx-shine) 55%, var(--onyx2) 75%, var(--onyx) 100%);
   border-radius: 24px;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 20px;
-  border: 1px solid rgba(201,169,110,0.2);
-  box-shadow: 0 32px 80px rgba(0,0,0,0.3);
+  border: 1px solid rgba(201,169,110,0.18);
+  box-shadow:
+    0 32px 80px rgba(0,0,0,0.6),
+    inset 0 1px 0 rgba(255,255,255,0.05),
+    inset 0 -1px 0 rgba(0,0,0,0.3);
   overflow: hidden;
 }
 
@@ -579,7 +610,8 @@ img { max-width: 100%; display: block; }
   position: absolute;
   bottom: 0; left: 0; right: 0;
   height: 3px;
-  background: linear-gradient(90deg, var(--gold), var(--gold-light));
+  /* 오닉스: 검정→금 그라디언트 포인트 */
+  background: linear-gradient(90deg, var(--onyx), var(--gold), var(--gold-light));
   transform: scaleX(0);
   transition: transform var(--trans);
   transform-origin: left;
@@ -632,8 +664,10 @@ img { max-width: 100%; display: block; }
 
 /* ---------- STATS ---------- */
 .stats-section {
-  background: linear-gradient(135deg, var(--dark) 0%, var(--dark2) 100%);
+  background: linear-gradient(135deg, var(--onyx) 0%, var(--onyx2) 40%, var(--onyx-shine) 70%, var(--onyx) 100%);
   padding: 70px 0;
+  border-top: 1px solid rgba(255,255,255,0.04);
+  border-bottom: 1px solid rgba(201,169,110,0.1);
 }
 
 .stats-grid {
@@ -691,8 +725,10 @@ img { max-width: 100%; display: block; }
 .step-circle {
   width: 60px; height: 60px;
   border-radius: 50%;
-  background: var(--gold);
-  color: #fff;
+  /* 홀수: 블랙 포인트, 짝수: 골드 */
+  background: var(--onyx);
+  color: var(--gold-light);
+  border: 1.5px solid rgba(201,169,110,0.4);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -702,6 +738,15 @@ img { max-width: 100%; display: block; }
   margin-bottom: 20px;
   position: relative;
   z-index: 1;
+  box-shadow:
+    0 4px 20px rgba(0,0,0,0.4),
+    inset 0 1px 0 rgba(255,255,255,0.06);
+}
+
+.process-step:nth-child(even) .step-circle {
+  background: var(--gold);
+  color: #fff;
+  border-color: var(--gold-dark);
   box-shadow: 0 4px 20px rgba(201,169,110,0.35);
 }
 
@@ -852,14 +897,22 @@ img { max-width: 100%; display: block; }
 .cta-bg {
   position: absolute;
   inset: 0;
-  background: linear-gradient(135deg, #1a1612 0%, #2e2218 50%, #1a1612 100%);
+  /* 오닉스: 완전한 검정 배경 */
+  background: linear-gradient(160deg, var(--onyx) 0%, var(--onyx2) 35%, var(--onyx-shine) 60%, var(--onyx) 100%);
 }
 
 .cta-bg::before {
   content: '';
   position: absolute;
   inset: 0;
-  background: radial-gradient(ellipse 70% 70% at 50% 50%, rgba(201,169,110,0.12) 0%, transparent 70%);
+  background:
+    radial-gradient(ellipse 60% 60% at 50% 50%, rgba(201,169,110,0.1) 0%, transparent 65%),
+    repeating-linear-gradient(
+      -20deg,
+      transparent,
+      transparent 100px,
+      rgba(255,255,255,0.012) 101px
+    );
 }
 
 .cta-inner {
@@ -895,9 +948,9 @@ img { max-width: 100%; display: block; }
 
 /* ---------- FOOTER ---------- */
 footer {
-  background: var(--dark);
+  background: var(--onyx);
   padding: 80px 0 0;
-  border-top: 1px solid rgba(201,169,110,0.1);
+  border-top: 1px solid rgba(201,169,110,0.12);
 }
 
 .footer-grid {
@@ -1015,15 +1068,15 @@ footer {
 .float-btn.kakao svg { width: 22px; fill: #3C1E1E; }
 
 .float-btn.top {
-  background: rgba(26,22,18,0.8);
-  color: rgba(255,255,255,0.7);
-  border: 1px solid rgba(255,255,255,0.1);
+  background: var(--onyx);
+  color: var(--gold-light);
+  border: 1px solid rgba(201,169,110,0.25);
   font-size: 18px;
   opacity: 0;
   pointer-events: none;
-  transition: opacity var(--trans), transform var(--trans);
-  border: none;
+  transition: opacity var(--trans), transform var(--trans), border-color var(--trans);
 }
+.float-btn.top:hover { border-color: var(--gold); }
 .float-btn.top.show { opacity: 1; pointer-events: auto; }
 
 /* ---------- FADE-UP ANIMATION ---------- */
