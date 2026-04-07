@@ -205,8 +205,8 @@ img { max-width: 100%; display: block; }
 
 .gnb > ul > li > a {
   display: block;
-  padding: 10px 14px;
-  font-size: 14px;
+  padding: 10px 10px;
+  font-size: 13px;
   font-weight: 500;
   color: var(--text);
   border-radius: 6px;
@@ -307,17 +307,60 @@ img { max-width: 100%; display: block; }
   color: var(--text);
 }
 
-.mobile-menu ul { display: flex; flex-direction: column; gap: 4px; }
-.mobile-menu li a {
-  display: block;
-  padding: 14px 0;
-  font-size: 16px;
-  font-weight: 500;
-  border-bottom: 1px solid var(--border);
+.mobile-menu > ul { display: flex; flex-direction: column; }
+
+/* 모바일 아코디언 토글 버튼 */
+.mob-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 15px 0;
+  font-size: 15px;
+  font-weight: 600;
   color: var(--text);
-  transition: color var(--trans);
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  text-align: left;
 }
-.mobile-menu li a:hover { color: var(--gold); }
+.mob-toggle span {
+  font-size: 18px;
+  font-weight: 300;
+  color: var(--text-light);
+  transition: transform var(--trans);
+  line-height: 1;
+}
+.mob-has-sub.open .mob-toggle span { transform: rotate(45deg); }
+
+/* 모바일 서브메뉴 */
+.mob-sub {
+  display: flex;
+  flex-direction: column;
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.35s ease;
+  background: var(--bg-light);
+  border-radius: 0 0 8px 8px;
+}
+.mob-has-sub.open .mob-sub { max-height: 400px; }
+.mob-sub li a {
+  display: block;
+  padding: 11px 16px;
+  font-size: 13px;
+  color: var(--text-light);
+  border-bottom: 1px solid var(--border);
+  transition: color var(--trans), background var(--trans);
+}
+.mob-sub li:last-child a { border-bottom: none; }
+.mob-sub li a:hover { color: var(--gold); background: rgba(201,169,110,0.05); }
+
+/* 상담예약 강조 */
+.mob-consult .mob-toggle {
+  color: var(--gold-dark);
+  font-weight: 700;
+}
 
 .mobile-overlay {
   position: fixed;

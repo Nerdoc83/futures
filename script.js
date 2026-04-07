@@ -41,6 +41,17 @@
   if (mobileClose) mobileClose.addEventListener('click', closeMobile);
   if (mobileOverlay) mobileOverlay.addEventListener('click', closeMobile);
 
+  // ---------- MOBILE 아코디언 ----------
+  document.querySelectorAll('.mob-toggle').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const li = btn.closest('.mob-has-sub');
+      const isOpen = li.classList.contains('open');
+      // 다른 항목 닫기
+      document.querySelectorAll('.mob-has-sub.open').forEach(el => el.classList.remove('open'));
+      if (!isOpen) li.classList.add('open');
+    });
+  });
+
   // ---------- FADE-UP ON SCROLL ----------
   const fadeEls = document.querySelectorAll('.fade-up');
 
