@@ -81,13 +81,14 @@ def calc_angle(p1, vertex, p2):
 # ─── 랜드마크 감지 ────────────────────────────────────────────────
 def get_landmarks(image_rgb, keys):
     h, w = image_rgb.shape[:2]
-    with mp.solutions.face_mesh.FaceMesh(
+    fm = mp.solutions.face_mesh.FaceMesh(
         static_image_mode=True,
         max_num_faces=1,
         refine_landmarks=True,
         min_detection_confidence=0.4,
-    ) as fm:
-        res = fm.process(image_rgb)
+    )
+    res = fm.process(image_rgb)
+    fm.close()
 
     if not res.multi_face_landmarks:
         return None
