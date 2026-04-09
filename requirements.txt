@@ -4,3 +4,7 @@ ccxt
 pandas
 streamlit
 plotly
+mediapipe
+opencv-python-headless
+numpy
+Pillow
